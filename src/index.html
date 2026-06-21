@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Image-to-Prompt Generator</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>Image-to-Prompt Generator</h1>
+      <p class="subtitle">Two-stage pipeline: analyze an image with a custom preset, edit the result, then synthesize a refined prompt.</p>
+    </header>
+
+    <!-- ─── Step 1: Preset ─────────────────────────────────────────────── -->
+    <section class="step" id="step-preset" aria-label="Step 1: Choose a preset">
+      <header class="step-header">
+        <span class="step-number">1</span>
+        <h2 class="step-title">Choose a preset</h2>
+      </header>
+      <div class="step-body">
+        <div class="preset-controls">
+          <select id="preset-select" class="select" aria-label="Select preset">
+            <option value="">— Select a preset —</option>
+          </select>
+          <div class="preset-actions">
+            <button type="button" id="preset-new-btn" class="btn-secondary">+ New</button>
+            <button type="button" id="preset-edit-btn" class="btn-secondary" disabled>Edit</button>
+            <button type="button" id="preset-export-btn" class="btn-secondary" disabled>Export</button>
+            <button type="button" id="preset-import-btn" class="btn-secondary">Import</button>
+            <input type="file" id="preset-import-input" accept=".json,application/json" hidden>
+          </div>
+        </div>
+        <div id="preset-description" class="preset-description" hidden></div>
+      </div>
+    </section>
+
+    <!-- ─── Step 2: Upload ─────────────────────────────────────────────── -->
+    <section class="step" id="step-upload" aria-label="Step 2: Upload image">
+      <header class="step-header">
+        <span class="step-number">2</span>
+        <h2 class="step-title">Upload image</h2>
+      </header>
+      <div class="step-body">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Upload image by clicking or dragging and dropping">
+          <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden>
+          <div class="dropzone-content">
+            <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <p class="dropzone-text">Drag &amp; drop an image here</p>
+            <p class="dropzone-subtext">or click to browse</p>
+            <p class="dropzone-formats">JPG, PNG, WebP • up to 10MB</p>
+          </div>
+          <div id="preview-container" class="preview-container" hidden>
+            <img id="preview-image" class="preview-image" alt="Uploaded image preview">
+            <button type="button" id="remove-image-btn" class="btn-remove" aria-label="Remove uploaded image">×</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── Step 3: Analyze + Edit ─────────────────────────────────────── -->
+    <section class="step" id="step-analyze" aria-label="Step 3: Analyze and edit">
+      <header class="step-header">
+        <span class="step-number">3</span>
+        <h2 class="step-title">Analyze &amp; edit</h2>
+      </header>
+      <div class="step-body">
+        <button type="button" id="analyze-btn" class="btn-primary" disabled>
+          <span class="btn-text">Analyze image</span>
+          <span class="btn-spinner" hidden aria-hidden="true"></span>
+        </button>
+
+        <div id="analysis-editor" class="analysis-editor" hidden>
+          <p class="analysis-hint">Stage 1 returned the structured analysis below. Edit any field, then proceed.</p>
+          <div id="analysis-fields" class="analysis-fields"></div>
+
+          <div class="directives-section">
+            <label for="directives-input" class="label">Directives (optional)</label>
+            <p class="directives-hint">Free-form instructions passed to Stage 2. Examples: "add a punchy red accent in the upper-right", "make it more dramatic", "use shorter sentences".</p>
+            <textarea
+              id="directives-input"
+              class="textarea"
+              rows="3"
+              maxlength="1000"
+              placeholder="Add any specific guidance for the final prompt…"
+            ></textarea>
+            <span id="directives-count" class="char-count">0 / 1000</span>
+          </div>
+
+          <div class="step-actions">
+            <button type="button" id="re-analyze-btn" class="btn-secondary">Re-analyze</button>
+            <button type="button" id="generate-prompt-btn" class="btn-primary">
+              <span class="btn-text">Generate prompt</span>
+              <span class="btn-spinner" hidden aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── Step 4: Result ─────────────────────────────────────────────── -->
+    <section class="step" id="step-result" aria-label="Step 4: Generated prompt" hidden>
+      <header class="step-header">
+        <span class="step-number">4</span>
+        <h2 class="step-title">Generated prompt</h2>
+      </header>
+      <div class="step-body">
+        <div class="result-card">
+          <p id="result-prompt" class="result-prompt"></p>
+          <div class="result-meta">
+            <span id="result-meta-info" class="result-meta-info"></span>
+          </div>
+          <div class="result-actions">
+            <button type="button" id="copy-btn" class="btn-copy">Copy to clipboard</button>
+            <button type="button" id="regenerate-btn" class="btn-secondary">Regenerate</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── Error toast ───────────────────────────────────────────────── -->
+    <div id="error-toast" class="error-toast" hidden role="alert">
+      <span id="error-message"></span>
+      <button type="button" id="error-dismiss-btn" class="btn-dismiss" aria-label="Dismiss error">×</button>
+    </div>
+
+    <!-- ─── Preset editor modal ───────────────────────────────────────── -->
+    <div id="preset-modal" class="modal" hidden role="dialog" aria-labelledby="preset-modal-title">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <header class="modal-header">
+          <h3 id="preset-modal-title">Edit preset</h3>
+          <button type="button" id="preset-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+        </header>
+        <form id="preset-form" class="modal-body">
+          <label for="preset-name-input" class="label">Name</label>
+          <input type="text" id="preset-name-input" class="text-input" maxlength="100" required>
+
+          <label for="preset-stage1-input" class="label">
+            Stage 1 system prompt
+            <span class="label-hint">— sent to the vision LLM; controls how the image is analyzed</span>
+          </label>
+          <textarea id="preset-stage1-input" class="textarea" rows="8" maxlength="5000" required></textarea>
+
+          <fieldset class="fields-fieldset">
+            <legend class="label">Stage 1 fields</legend>
+            <p class="label-hint">— which attributes Stage 1 should extract from the image</p>
+            <div id="preset-fields-grid" class="fields-grid"></div>
+          </fieldset>
+
+          <label for="preset-stage2-input" class="label">
+            Stage 2 system prompt
+            <span class="label-hint">— sent to the text LLM; controls how the analysis is converted into a final prompt</span>
+          </label>
+          <textarea id="preset-stage2-input" class="textarea" rows="8" maxlength="5000" required></textarea>
+
+          <div class="modal-actions">
+            <button type="button" id="preset-modal-cancel" class="btn-secondary">Cancel</button>
+            <button type="button" id="preset-modal-delete" class="btn-danger" hidden>Delete</button>
+            <button type="submit" id="preset-modal-save" class="btn-primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

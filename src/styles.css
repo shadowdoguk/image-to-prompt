@@ -1,0 +1,680 @@
+:root {
+  --bg-primary: #0f1115;
+  --bg-secondary: #1a1d24;
+  --bg-tertiary: #232830;
+  --bg-elevated: #2a2f38;
+  --border-color: #2d3340;
+  --border-strong: #3d4452;
+  --text-primary: #e8eaed;
+  --text-secondary: #9aa0a6;
+  --text-muted: #6b7280;
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-active: #1d4ed8;
+  --accent-soft: rgba(59, 130, 246, 0.12);
+  --success: #10b981;
+  --error: #ef4444;
+  --error-bg: #2d1a1a;
+  --danger: #dc2626;
+  --shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
+  --radius: 8px;
+  --radius-lg: 12px;
+  --step-accent: linear-gradient(135deg, #3b82f6, #8b5cf6);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* The HTML `hidden` attribute must always beat our display rules. */
+[hidden] { display: none !important; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+.container {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 2.5rem;
+}
+
+.header h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  background: var(--step-accent);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.subtitle {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* ─── Steps ────────────────────────────────────────────────────────────── */
+
+.step {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  margin-bottom: 1.25rem;
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+
+.step.is-active {
+  border-color: var(--accent);
+}
+
+.step.is-locked {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.step-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.step-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--step-accent);
+  color: white;
+  font-weight: 700;
+  font-size: 0.95rem;
+  flex-shrink: 0;
+}
+
+.step-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.step-body {
+  padding: 1.5rem;
+}
+
+.step-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+  flex-wrap: wrap;
+}
+
+/* ─── Step 1: Preset picker ───────────────────────────────────────────── */
+
+.preset-controls {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.preset-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.preset-description {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.preset-description strong {
+  color: var(--text-primary);
+  display: block;
+  margin-bottom: 0.25rem;
+}
+
+/* ─── Step 2: Upload ──────────────────────────────────────────────────── */
+
+.dropzone {
+  position: relative;
+  border: 2px dashed var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-tertiary);
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.dropzone:hover, .dropzone:focus-visible {
+  border-color: var(--accent);
+  background: var(--bg-elevated);
+  outline: none;
+}
+
+.dropzone.is-dragover {
+  border-color: var(--accent);
+  background: var(--bg-elevated);
+}
+
+.dropzone-icon {
+  width: 44px;
+  height: 44px;
+  color: var(--text-secondary);
+  margin-bottom: 0.75rem;
+}
+
+.dropzone-text {
+  font-size: 1.05rem;
+  font-weight: 500;
+}
+
+.dropzone-subtext {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.dropzone-formats {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.preview-container { position: relative; display: inline-block; }
+
+.preview-image {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: var(--radius);
+  display: block;
+}
+
+.btn-remove {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--error);
+  color: white;
+  border: 2px solid var(--bg-primary);
+  font-size: 1.25rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.btn-remove:hover { background: var(--danger); }
+
+/* ─── Step 3: Analysis editor ─────────────────────────────────────────── */
+
+.analysis-editor {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.analysis-hint {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+}
+
+.analysis-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.field-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.field-row .label { margin-bottom: 0; }
+
+.field-input, .text-input {
+  width: 100%;
+  padding: 0.6rem 0.85rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.95rem;
+  transition: border-color 0.2s;
+}
+
+.field-input:focus, .text-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.textarea {
+  width: 100%;
+  padding: 0.75rem 0.85rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.95rem;
+  resize: vertical;
+  min-height: 60px;
+  transition: border-color 0.2s;
+}
+
+.textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Colors chip input */
+.colors-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  min-height: 48px;
+}
+
+.color-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0.3rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.color-chip-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  flex-shrink: 0;
+}
+
+.color-chip-hex {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.color-chip-name { color: var(--text-primary); }
+
+.color-chip-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0 0.1rem;
+  margin-left: 0.2rem;
+}
+
+.color-chip-remove:hover { color: var(--error); }
+
+.color-add {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.color-add input[type="color"] {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.color-add input[type="text"] {
+  width: 90px;
+  padding: 0.35rem 0.5rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: monospace;
+  font-size: 0.8rem;
+}
+
+.color-add input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.color-add-btn {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.85rem;
+}
+
+.color-add-btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Directives */
+.directives-section {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border-color);
+  position: relative;
+}
+
+.directives-hint {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+/* ─── Step 4: Result ──────────────────────────────────────────────────── */
+
+.result-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+}
+
+.result-prompt {
+  font-size: 1rem;
+  line-height: 1.7;
+  color: var(--text-primary);
+  margin-bottom: 1rem;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.result-meta {
+  margin-bottom: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.result-meta-info {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.result-actions {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+/* ─── Form controls (shared) ──────────────────────────────────────────── */
+
+.label {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 0.4rem;
+}
+
+.label-hint {
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.char-count {
+  position: absolute;
+  bottom: 0.5rem;
+  right: 0.85rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: var(--bg-tertiary);
+  padding: 0 0.25rem;
+}
+
+.select {
+  flex: 1;
+  min-width: 200px;
+  padding: 0.6rem 0.85rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.select:focus { outline: none; border-color: var(--accent); }
+
+/* ─── Buttons ─────────────────────────────────────────────────────────── */
+
+.btn-primary, .btn-secondary, .btn-copy, .btn-danger {
+  padding: 0.65rem 1.25rem;
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-primary:active:not(:disabled) { background: var(--accent-active); }
+.btn-primary:disabled {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border-color: var(--border-color);
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+
+.btn-secondary:hover:not(:disabled) { background: var(--bg-elevated); border-color: var(--border-strong); }
+.btn-secondary:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-copy {
+  background: var(--success);
+  color: white;
+  border-color: var(--success);
+}
+.btn-copy:hover { background: #059669; border-color: #059669; }
+
+.btn-danger {
+  background: transparent;
+  color: var(--error);
+  border-color: var(--error);
+}
+.btn-danger:hover { background: var(--error-bg); }
+
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Error toast ─────────────────────────────────────────────────────── */
+
+.error-toast {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  background: var(--error-bg);
+  border: 1px solid var(--error);
+  border-radius: var(--radius);
+  padding: 0.85rem 1.25rem;
+  max-width: 90%;
+  box-shadow: var(--shadow-lg);
+  z-index: 100;
+}
+
+.error-toast span { color: var(--error); font-size: 0.9rem; }
+
+/* ─── Modal ───────────────────────────────────────────────────────────── */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.modal-content {
+  position: relative;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  max-width: 720px;
+  width: calc(100% - 2rem);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header h3 {
+  font-size: 1.15rem;
+  font-weight: 600;
+}
+
+.modal-body {
+  padding: 1.5rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-color);
+}
+
+/* Fields grid in preset editor */
+.fields-fieldset {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 1rem;
+}
+
+.fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.field-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: border-color 0.2s;
+}
+
+.field-checkbox:hover { border-color: var(--border-strong); }
+
+.field-checkbox input { cursor: pointer; accent-color: var(--accent); }
+
+.field-checkbox.is-checked {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+/* ─── Responsive ──────────────────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .container { padding: 1rem; }
+  .header h1 { font-size: 1.5rem; }
+  .step-body { padding: 1rem; }
+  .preset-controls { flex-direction: column; align-items: stretch; }
+  .preset-actions { justify-content: flex-start; }
+  .result-actions { flex-direction: column; }
+  .btn-primary, .btn-secondary, .btn-copy, .btn-danger { width: 100%; }
+  .modal-content { max-height: 95vh; }
+}
