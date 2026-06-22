@@ -135,6 +135,32 @@ inherit the `subject` exhaustive contract automatically.
 No changes to `data/presets.json`, `src/styles.css`, or the existing
 per-preset system prompts.
 
+## Files changed — amendment (2026-06-22)
+
+The original implementation sent the per-field `description` text in the
+JSON Schema and relied on MiniMax M3 to surface it in the system prompt.
+Live testing showed the API rejects `description` strings over 200
+characters, which broke `/api/analyze` for every preset that included
+`subject` (all three built-ins).
+
+The fix:
+
+| File | Change |
+|---|---|
+| `server.js` | New helper `buildFieldFormatOverridePrompt(fieldNames)` that returns a `# PER-FIELD OVERRIDES` block listing every field with a hint (name, minLength, full description). Returns an empty string when no hints apply, so callers can always concatenate unconditionally. `buildStage1Schema` no longer sets `description` on schema properties (only `minLength`). `callMiniMaxStage1` appends the override block to `stage1SystemPrompt` for both the initial call and the ADR 0001 retry-with-strengthened-prompt call. |
+
+Mechanism: append (not prepend) the override block to the system
+prompt, so the per-preset specialty focus and description-first contract
+remain in the LLM's primary attention window. The override block opens
+with "override the FIELD FORMAT block above where they conflict" so the
+LLM doesn't treat it as additive guidance. The same text now reaches
+the LLM via the channel that ADR 0001 already proved works (the system
+prompt, same channel the per-preset specialty focus uses).
+
+Net effect: the schema is the same shape as it was before this ADR
+(plus the higher `minLength` for `subject`); the per-field contract
+moves from "schema `description`" to "appended system-prompt block".
+
 ## Why these decisions
 
 - **Schema-level override, not per-preset prompt rewrite.** Three identical
@@ -165,18 +191,18 @@ per-preset system prompts.
   runtime scanner). A higher floor for `subject` will probably increase
   that count for simple/sparse images. Per the existing ADR 0001
   accuracy contract, this is acceptable best-effort behaviour.
-- **Schema description length.** The MiniMax M3 API rejects schema
-  `description` strings over ~250 chars. The current `subject`
-  description is ~750 chars. **Mitigation:** the JSON Schema spec only
-  uses `description` for documentation; the API may or may not inject it
-  into the system prompt. We need a real smoke test to confirm whether
-  the description actually reaches the LLM; if it doesn't, fall back to
-  prepending the description to `stage1_system_prompt` (the same
-  mechanism the oil-painting preset's specialty focus uses today).
-  See "Verification" below — the existing smoke test images in ADR 0001
-  were reused for that check, and if the description fails to propagate,
-  ADR 0003 should be amended to inject the description into the system
-  prompt instead.
+- **Schema description length — RESOLVED 2026-06-22.** The original
+  plan put the per-field `description` in the JSON Schema. The MiniMax
+  M3 API rejects schema `description` strings **over 200 characters**
+  with error code 2013 ("property subject description too long
+  (max 200 characters)"). My initial estimate in this ADR of "~250
+  chars" was wrong; the real limit is 200. The ~750-char `subject`
+  description caused live `/api/analyze` calls to fail with HTTP 400.
+  **Resolution applied** (see "Files changed — amendment" below): the
+  `description` is no longer sent in the schema. The same text is
+  delivered to the LLM via a new `buildFieldFormatOverridePrompt`
+  helper that appends a `# PER-FIELD OVERRIDES` block to the Stage 1
+  system prompt, for both Stage 1 attempts (initial + retry).
 - **Empty/sparse images.** For a 256×256 test image, the LLM can't pad
   `subject` to 600 chars without inventing details. The description
   explicitly forbids inventing. The retry will fail and the warning will
@@ -207,4 +233,12 @@ per-preset system prompts.
   `callMiniMaxStage1` to prepend `FIELD_FORMAT_HINTS[name]?.description`
   to the system prompt for each field that has one — same mechanism the
   specialty-focus sections in each preset use today. Re-run the smoke
-  test and confirm the longer output.
+  test and confirm the longer output. **This follow-up was triggered
+  on 2026-06-22** by a live `/api/analyze` 400 error
+  (`code: 2013, msg: property subject description too long (max 200
+  characters)`). The resolution applied is exactly the fallback
+  described in the previous bullet — `buildFieldFormatOverridePrompt`
+  appends a per-field override block to the system prompt for both
+  Stage 1 attempts. After the fix, `/api/analyze` succeeds for the
+  `preset_alla_prima_oil` preset and the live server returns a
+  long, exhaustive `subject` matching the contract.

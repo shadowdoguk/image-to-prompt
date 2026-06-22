@@ -69,10 +69,11 @@ const PRESET_FILE_VERSION = 1;
  * Per-field overrides applied on top of the global `FIELD_INPUT_MIN_LENGTH` and
  * the JSON Schema. Keys must be valid `FIELD_PALETTE` names. Each hint may set:
  *   - `minLength` (chars, replaces the input-type default for this field)
- *   - `description` (injected into the JSON Schema so MiniMax M3 includes it in
- *     the system prompt the LLM sees — this is the documented mechanism for
- *     nudging the model to produce longer/more-exhaustive content for a specific
- *     field, since `strict: true` schemas are otherwise silent on tone)
+ *   - `description` (appended to the Stage 1 system prompt via
+ *     `buildFieldFormatOverridePrompt` so the LLM sees the per-field contract
+ *     for every field that has a hint. This text is NOT sent in the JSON Schema
+ *     because the MiniMax M3 API rejects schema `description` strings over
+ *     200 characters with error code 2013 — verified live 2026-06-22.)
  *
  * ADR 0003: `subject` is the canonical case — the rest of the palette uses the
  * generic input-type floor.
@@ -82,6 +83,30 @@ const FIELD_FORMAT_HINTS = {
     minLength: 600,
     description: 'Exhaustive paragraph-length description of the image. Cover EVERY visible element: every person, figure, object, and significant feature in the image. Include precise spatial positioning (left/right/center, top/bottom, foreground/midground/background, relative to other elements); clothing, accessories, and appearance for figures; primary facial expression and visible body language; hand/arm positions and any visible actions; major objects and props, named specifically; notable environment and background details. Write as ONE cohesive paragraph, 120-200 words, 4-8 sentences. NEVER shorter than 100 words. NEVER invent details not visible in the image.'
   }
+};
+
+/**
+ * Build a per-field format override block to append to the Stage 1 system prompt.
+ * Only fields in `fieldNames` that have a `FIELD_FORMAT_HINTS` entry are listed.
+ * Returns an empty string if no hints apply (so the caller can always concatenate
+ * without a conditional).
+ *
+ * Append (not prepend) so the per-preset specialty focus and description-first
+ * contract remain in the LLM's primary attention window. The override block
+ * then explicitly states "these rules override the FIELD FORMAT block above where
+ * they conflict" so the LLM doesn't treat the override as additive guidance.
+ */
+const buildFieldFormatOverridePrompt = (fieldNames) => {
+  const applicable = fieldNames
+    .map((name) => ({ name, hint: FIELD_FORMAT_HINTS[name] }))
+    .filter((x) => x.hint?.description);
+  if (applicable.length === 0) return '';
+
+  const lines = applicable.map(({ name, hint }) =>
+    `- \`${name}\` (min ${hint.minLength} chars): ${hint.description}`
+  );
+
+  return `\n\n# PER-FIELD OVERRIDES (override the FIELD FORMAT block above where they conflict)\n\nThe following fields have stricter length and content rules than the generic format block above. These are enforced at the schema level — values that don't meet them will be rejected.\n\n${lines.join('\n\n')}\n`;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -321,8 +346,13 @@ const FIELD_INPUT_MIN_LENGTH = {
  * Forces `additionalProperties: false` so the LLM can't add unrequested keys.
  * Applies `minLength` based on field input type to enforce the description-first
  * contract's length requirements at the schema level. Per-field overrides from
- * `FIELD_FORMAT_HINTS` (ADR 0003) take precedence over the input-type default
- * and inject a `description` that the LLM sees via the schema.
+ * `FIELD_FORMAT_HINTS` (ADR 0003) take precedence over the input-type default.
+ *
+ * NOTE: per-field `description` strings from `FIELD_FORMAT_HINTS` are NOT sent
+ * in the schema — the MiniMax M3 API rejects schema `description` over 200
+ * characters (error code 2013, verified live 2026-06-22). The same text is
+ * delivered to the LLM via `buildFieldFormatOverridePrompt` appended to the
+ * Stage 1 system prompt instead.
  */
 const buildStage1Schema = (fieldNames) => {
   const properties = {};
@@ -345,7 +375,6 @@ const buildStage1Schema = (fieldNames) => {
       const minLength = hint?.minLength ?? FIELD_INPUT_MIN_LENGTH[def.input] ?? 0;
       const prop = { type: def.type };
       if (minLength > 0) prop.minLength = minLength;
-      if (hint?.description) prop.description = hint.description;
       properties[name] = prop;
     }
   });
@@ -513,15 +542,23 @@ Respond ONLY with the JSON object — no prose, no markdown, no commentary.`;
     }
   };
 
+  // Append the per-field format override block to the system prompt for both
+  // attempts. The override block is built from FIELD_FORMAT_HINTS for every
+  // field in `fieldNames` that has a hint; see ADR 0003 for why this lives
+  // in the system prompt and not the JSON Schema (API rejects schema
+  // description > 200 chars with error code 2013).
+  const formatOverride = buildFieldFormatOverridePrompt(fieldNames);
+  const fullSystemPrompt = stage1SystemPrompt + formatOverride;
+
   // Attempt 1
-  let parsed = await performCall(stage1SystemPrompt);
+  let parsed = await performCall(fullSystemPrompt);
   let violations = validateAnalysisLengths(parsed, fieldNames);
 
   // Attempt 2 (only if attempt 1 had length violations)
   if (violations.length > 0) {
     const suffix = attemptPromptSuffix(violations);
     console.warn(`Stage 1 attempt 1 failed length validation on ${violations.length} field(s); retrying with strengthened prompt`);
-    parsed = await performCall(stage1SystemPrompt + suffix);
+    parsed = await performCall(fullSystemPrompt + suffix);
     violations = validateAnalysisLengths(parsed, fieldNames);
     if (violations.length > 0) {
       console.warn(`Stage 1 attempt 2 still has ${violations.length} length violation(s): ${violations.map((v) => v.field).join(', ')} — accepting result`);
