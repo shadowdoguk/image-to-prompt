@@ -21,7 +21,8 @@
     finalPrompt: null,
     isAnalyzing: false,
     isGenerating: false,
-    editingPresetId: null  // null when creating new
+    editingPresetId: null,  // null when creating new
+    selectedFieldSources: {}  // { [fieldName]: 'analysis' | 'preset' } (ADR 0002)
   };
 
   // ─── DOM cache ─────────────────────────────────────────────────────────
@@ -153,6 +154,7 @@
     state.selectedPresetId = e.target.value || null;
     // Reset downstream state when preset changes
     state.currentAnalysis = null;
+    state.selectedFieldSources = {};
     dom.analysisEditor.hidden = true;
     dom.resultSection.hidden = true;
     updatePresetDescription();
@@ -333,6 +335,7 @@
     dom.previewContainer.hidden = true;
     dom.dropzone.querySelector('.dropzone-content').hidden = false;
     state.currentAnalysis = null;
+    state.selectedFieldSources = {};
     dom.analysisEditor.hidden = true;
     dom.resultSection.hidden = true;
     updateButtons();
@@ -370,34 +373,84 @@
     const preset = state.presets.find((p) => p.id === state.selectedPresetId);
     if (!preset) return;
 
+    state.selectedFieldSources = {};
+
     preset.stage1_fields.forEach((fieldName) => {
       const def = state.fieldPalette[fieldName] || FIELD_PALETTE_FALLBACK[fieldName];
       const labelText = def?.label || fieldName;
-      const value = analysis[fieldName];
+      const analysisValue = analysis[fieldName];
+      const presetDefault = preset.field_defaults?.[fieldName];
+      const hasToggle = typeof presetDefault === 'string' && def?.input === 'text';
+
+      if (hasToggle) state.selectedFieldSources[fieldName] = 'analysis';
 
       const row = document.createElement('div');
       row.className = 'field-row';
       row.dataset.field = fieldName;
 
+      const labelRow = document.createElement('div');
+      labelRow.className = 'field-row__label-row';
+
       const label = document.createElement('label');
       label.className = 'label';
       label.textContent = labelText;
-      row.appendChild(label);
+      labelRow.appendChild(label);
 
-      if (fieldName === 'colors' && Array.isArray(value)) {
-        row.appendChild(renderColorsInput(value));
-      } else if (typeof value === 'string') {
-        const input = document.createElement('textarea');
+      if (hasToggle) {
+        const toggle = document.createElement('div');
+        toggle.className = 'source-toggle';
+        toggle.setAttribute('role', 'group');
+        toggle.setAttribute('aria-label', `${labelText} value source`);
+
+        const makeBtn = (source, text) => {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'source-btn' + (source === 'analysis' ? ' is-active' : '');
+          btn.dataset.source = source;
+          btn.textContent = text;
+          btn.setAttribute('aria-pressed', source === 'analysis' ? 'true' : 'false');
+          btn.addEventListener('click', () => {
+            state.selectedFieldSources[fieldName] = source;
+            toggle.querySelectorAll('.source-btn').forEach((b) => {
+              const active = b.dataset.source === source;
+              b.classList.toggle('is-active', active);
+              b.setAttribute('aria-pressed', active ? 'true' : 'false');
+            });
+            input.value = source === 'analysis' ? String(analysisValue ?? '') : presetDefault;
+          });
+          return btn;
+        };
+
+        toggle.appendChild(makeBtn('analysis', 'Analysis'));
+        toggle.appendChild(makeBtn('preset', 'Preset'));
+        labelRow.appendChild(toggle);
+      }
+
+      row.appendChild(labelRow);
+
+      let input;
+      if (fieldName === 'colors' && Array.isArray(analysisValue)) {
+        row.appendChild(renderColorsInput(analysisValue));
+      } else if (typeof analysisValue === 'string') {
+        input = document.createElement('textarea');
         input.className = 'textarea';
-        input.rows = (labelText === 'Subject' || labelText === 'Mood' || labelText === 'Texture' || labelText === 'Composition') ? 2 : 1;
-        input.value = value;
+        const rowsByField = {
+          subject: 5,
+          subject_orientation: 2,
+          actions: 2,
+          mood: 2,
+          composition: 2,
+          texture: 2
+        };
+        input.rows = rowsByField[fieldName] ?? 1;
+        input.value = analysisValue;
         input.dataset.field = fieldName;
         row.appendChild(input);
       } else {
-        const input = document.createElement('input');
+        input = document.createElement('input');
         input.type = 'text';
         input.className = 'field-input';
-        input.value = value == null ? '' : String(value);
+        input.value = analysisValue == null ? '' : String(analysisValue);
         input.dataset.field = fieldName;
         row.appendChild(input);
       }
@@ -513,7 +566,10 @@
   };
 
   const collectAnalysisFromEditor = () => {
-    // Pull values from inputs/textareas in the editor
+    // Pull current input values into the analysis object. The source toggle (ADR 0002)
+    // keeps each input's value in sync with the active source, so reading inputs IS the
+    // merge: fields in "Analysis" mode carry the LLM value, fields in "Preset" mode carry
+    // the preset default (or any user edits to either).
     dom.analysisFields.querySelectorAll('textarea[data-field], input[data-field]').forEach((el) => {
       state.currentAnalysis[el.dataset.field] = el.value;
     });

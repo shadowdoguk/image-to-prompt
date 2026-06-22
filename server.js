@@ -65,6 +65,25 @@ const MAX_DIRECTIVES_LENGTH = 1000;
 const PRESET_FILE_FORMAT = 'image-to-prompt-preset';
 const PRESET_FILE_VERSION = 1;
 
+/**
+ * Per-field overrides applied on top of the global `FIELD_INPUT_MIN_LENGTH` and
+ * the JSON Schema. Keys must be valid `FIELD_PALETTE` names. Each hint may set:
+ *   - `minLength` (chars, replaces the input-type default for this field)
+ *   - `description` (injected into the JSON Schema so MiniMax M3 includes it in
+ *     the system prompt the LLM sees — this is the documented mechanism for
+ *     nudging the model to produce longer/more-exhaustive content for a specific
+ *     field, since `strict: true` schemas are otherwise silent on tone)
+ *
+ * ADR 0003: `subject` is the canonical case — the rest of the palette uses the
+ * generic input-type floor.
+ */
+const FIELD_FORMAT_HINTS = {
+  subject: {
+    minLength: 600,
+    description: 'Exhaustive paragraph-length description of the image. Cover EVERY visible element: every person, figure, object, and significant feature in the image. Include precise spatial positioning (left/right/center, top/bottom, foreground/midground/background, relative to other elements); clothing, accessories, and appearance for figures; primary facial expression and visible body language; hand/arm positions and any visible actions; major objects and props, named specifically; notable environment and background details. Write as ONE cohesive paragraph, 120-200 words, 4-8 sentences. NEVER shorter than 100 words. NEVER invent details not visible in the image.'
+  }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Uploads directory + multer config
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,6 +177,52 @@ const generatePresetId = () => `preset_${crypto.randomBytes(8).toString('hex')}`
 
 const validateFieldName = (name) => VALID_FIELD_NAMES.includes(name);
 
+/**
+ * Validate the optional `field_defaults` object on a preset.
+ * Shape only — handlers do the `subset of stage1_fields` check after
+ * stage1_fields is fully resolved (POST has it in body; PUT merges with existing).
+ *
+ * v1 rules (per ADR 0002):
+ *   - object of { [fieldName]: string }
+ *   - keys must be valid FIELD_PALETTE names
+ *   - values only allowed on `text` fields (not `textarea`, not `colors`)
+ *   - values must be non-empty strings meeting FIELD_INPUT_MIN_LENGTH for the field type
+ */
+const validateFieldDefaults = (defaults) => {
+  if (defaults === undefined || defaults === null) return null;
+  if (typeof defaults !== 'object' || Array.isArray(defaults)) {
+    return 'field_defaults must be an object';
+  }
+  for (const [key, value] of Object.entries(defaults)) {
+    const def = FIELD_PALETTE[key];
+    if (!def) return `field_defaults contains invalid field name: ${key}`;
+    if (def.input !== 'text') {
+      return `field_defaults.${key}: only text fields are supported in v1 (field type is '${def.input}')`;
+    }
+    if (typeof value !== 'string') {
+      return `field_defaults.${key} must be a string`;
+    }
+    if (value.trim().length === 0) {
+      return `field_defaults.${key} must be a non-empty string`;
+    }
+    const min = FIELD_INPUT_MIN_LENGTH[def.input] ?? 0;
+    if (value.length < min) {
+      return `field_defaults.${key} must be at least ${min} characters (got ${value.length})`;
+    }
+  }
+  return null;
+};
+
+const validateFieldDefaultsAreSubset = (defaults, stage1Fields) => {
+  if (!defaults || typeof defaults !== 'object') return null;
+  for (const key of Object.keys(defaults)) {
+    if (!stage1Fields.includes(key)) {
+      return `field_defaults.${key} must be included in stage1_fields`;
+    }
+  }
+  return null;
+};
+
 const validatePreset = (preset, { partial = false } = {}) => {
   const errors = [];
 
@@ -196,6 +261,11 @@ const validatePreset = (preset, { partial = false } = {}) => {
     } else if (preset.stage2_system_prompt.length > MAX_PROMPT_LENGTH) {
       errors.push(`stage2_system_prompt must be ${MAX_PROMPT_LENGTH} characters or fewer`);
     }
+  }
+
+  if (!partial || preset.field_defaults !== undefined) {
+    const fdError = validateFieldDefaults(preset.field_defaults);
+    if (fdError) errors.push(fdError);
   }
 
   return errors.length > 0 ? errors.join('; ') : null;
@@ -250,12 +320,15 @@ const FIELD_INPUT_MIN_LENGTH = {
  * Build a JSON schema for Stage 1 that includes only the requested fields.
  * Forces `additionalProperties: false` so the LLM can't add unrequested keys.
  * Applies `minLength` based on field input type to enforce the description-first
- * contract's length requirements at the schema level.
+ * contract's length requirements at the schema level. Per-field overrides from
+ * `FIELD_FORMAT_HINTS` (ADR 0003) take precedence over the input-type default
+ * and inject a `description` that the LLM sees via the schema.
  */
 const buildStage1Schema = (fieldNames) => {
   const properties = {};
   fieldNames.forEach((name) => {
     const def = FIELD_PALETTE[name];
+    const hint = FIELD_FORMAT_HINTS[name];
     if (def.type === 'array') {
       properties[name] = {
         type: 'array',
@@ -269,11 +342,11 @@ const buildStage1Schema = (fieldNames) => {
         }
       };
     } else {
-      const minLength = FIELD_INPUT_MIN_LENGTH[def.input] ?? 0;
-      properties[name] = { type: def.type };
-      if (minLength > 0) {
-        properties[name].minLength = minLength;
-      }
+      const minLength = hint?.minLength ?? FIELD_INPUT_MIN_LENGTH[def.input] ?? 0;
+      const prop = { type: def.type };
+      if (minLength > 0) prop.minLength = minLength;
+      if (hint?.description) prop.description = hint.description;
+      properties[name] = prop;
     }
   });
 
@@ -299,7 +372,8 @@ const validateAnalysisLengths = (parsed, fieldNames) => {
   for (const name of fieldNames) {
     const def = FIELD_PALETTE[name];
     if (!def || def.type === 'array') continue;
-    const min = FIELD_INPUT_MIN_LENGTH[def.input] ?? 0;
+    const hint = FIELD_FORMAT_HINTS[name];
+    const min = hint?.minLength ?? FIELD_INPUT_MIN_LENGTH[def.input] ?? 0;
     if (min === 0) continue;
     const value = parsed?.[name];
     if (typeof value !== 'string') {
@@ -728,16 +802,23 @@ app.post('/api/presets', (req, res) => {
     const validationError = validatePreset(body);
     if (validationError) return res.status(400).json({ success: false, error: validationError });
 
+    const stage1Fields = [...new Set(body.stage1_fields)];
+    const subsetError = validateFieldDefaultsAreSubset(body.field_defaults, stage1Fields);
+    if (subsetError) return res.status(400).json({ success: false, error: subsetError });
+
     const now = new Date().toISOString();
     const newPreset = {
       id: generatePresetId(),
       name: body.name.trim(),
       stage1_system_prompt: body.stage1_system_prompt,
-      stage1_fields: [...new Set(body.stage1_fields)],
+      stage1_fields: stage1Fields,
       stage2_system_prompt: body.stage2_system_prompt,
       created_at: now,
       updated_at: now
     };
+    if (body.field_defaults !== undefined) {
+      newPreset.field_defaults = body.field_defaults;
+    }
 
     const presets = readPresets();
     presets.push(newPreset);
@@ -759,14 +840,29 @@ app.put('/api/presets/:id', (req, res) => {
     if (idx === -1) return res.status(404).json({ success: false, error: `Preset "${req.params.id}" not found.` });
 
     const existing = presets[idx];
+    const mergedStage1Fields = body.stage1_fields !== undefined
+      ? [...new Set(body.stage1_fields)]
+      : existing.stage1_fields;
+
+    if (body.field_defaults !== undefined) {
+      const subsetError = validateFieldDefaultsAreSubset(body.field_defaults, mergedStage1Fields);
+      if (subsetError) return res.status(400).json({ success: false, error: subsetError });
+    }
+
     const updated = {
       ...existing,
       ...(body.name !== undefined ? { name: body.name.trim() } : {}),
       ...(body.stage1_system_prompt !== undefined ? { stage1_system_prompt: body.stage1_system_prompt } : {}),
-      ...(body.stage1_fields !== undefined ? { stage1_fields: [...new Set(body.stage1_fields)] } : {}),
+      ...(body.stage1_fields !== undefined ? { stage1_fields: mergedStage1Fields } : {}),
       ...(body.stage2_system_prompt !== undefined ? { stage2_system_prompt: body.stage2_system_prompt } : {}),
       updated_at: new Date().toISOString()
     };
+
+    if (body.field_defaults === null) {
+      delete updated.field_defaults;
+    } else if (body.field_defaults !== undefined) {
+      updated.field_defaults = body.field_defaults;
+    }
 
     presets[idx] = updated;
     writePresets(presets);
@@ -805,7 +901,8 @@ app.get('/api/presets/export/all', (req, res) => {
         name: p.name,
         stage1_system_prompt: p.stage1_system_prompt,
         stage1_fields: p.stage1_fields,
-        stage2_system_prompt: p.stage2_system_prompt
+        stage2_system_prompt: p.stage2_system_prompt,
+        ...(p.field_defaults ? { field_defaults: p.field_defaults } : {})
       }))
     };
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -830,7 +927,8 @@ app.get('/api/presets/export/:id', (req, res) => {
         name: preset.name,
         stage1_system_prompt: preset.stage1_system_prompt,
         stage1_fields: preset.stage1_fields,
-        stage2_system_prompt: preset.stage2_system_prompt
+        stage2_system_prompt: preset.stage2_system_prompt,
+        ...(preset.field_defaults ? { field_defaults: preset.field_defaults } : {})
       }]
     };
     const safeName = preset.name.replace(/[^a-z0-9-]/gi, '-').toLowerCase();
@@ -854,9 +952,10 @@ app.post('/api/presets/import', (req, res) => {
 
     const imported = [];
     const skipped = [];
+    const importErrors = [];
     const now = new Date().toISOString();
 
-    body.presets.forEach((incoming) => {
+    body.presets.forEach((incoming, i) => {
       let name = incoming.name.trim();
       let id = generatePresetId();
 
@@ -874,12 +973,24 @@ app.post('/api/presets/import', (req, res) => {
         created_at: now,
         updated_at: now
       };
+      if (incoming.field_defaults !== undefined) {
+        const subsetError = validateFieldDefaultsAreSubset(incoming.field_defaults, newPreset.stage1_fields);
+        if (subsetError) {
+          importErrors.push(`presets[${i}] (${name}): ${subsetError}`);
+          return;
+        }
+        newPreset.field_defaults = incoming.field_defaults;
+      }
 
       existingPresets.push(newPreset);
       existingIds.add(id);
       existingNames.add(name.toLowerCase());
       imported.push(newPreset);
     });
+
+    if (importErrors.length > 0) {
+      return res.status(400).json({ success: false, error: importErrors.join('; ') });
+    }
 
     writePresets(existingPresets);
     res.status(201).json({
