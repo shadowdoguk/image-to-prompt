@@ -12,6 +12,8 @@ An AI-powered web application that transforms uploaded images into refined, deta
 - **Copy-to-clipboard** for generated prompts
 - **Error handling** for API timeouts, rate limits, and invalid responses
 - **Responsive design** — works on mobile, tablet, and desktop
+- **Saved color palettes** — name and reuse a palette from any run. After analyze, a "Save palette…" button sits directly under the analyzed colors — click it, name the palette, and it becomes available in the Step 1 picker to override the auto-analyzed colors on the next job.
+- **Saved directives** — name, tag, version, search, share, and reuse your favorite Stage 2 directives. Below the directives textarea, a "Save directive…" button captures the current text as a named, tagged directive; a "Manage directives…" modal lets you edit, search, filter, restore prior versions, and import/export directive sets as `.i2p.json` files. Usage frequency and last-used date are tracked automatically each time you apply a directive.
 
 ## Architecture
 
@@ -116,7 +118,9 @@ Take a (possibly edited) analysis + optional user directives and synthesize the
 final image-generation prompt via Stage 2.
 
 **Request:** `application/json`
-- `presetId` — ID of the preset whose `stage2_system_prompt` should be used
+- `presetId` — ID of the preset whose Stage 2 prompt should be used. If a
+  per-preset override exists in `data/stage2_overrides.json` (see ADR 0007),
+  the override is used; otherwise the preset's built-in `stage2_system_prompt`.
 - `analysis` — the (edited) Stage 1 analysis object
 - `directives` — optional string of additional user instructions (≤ 1000 chars)
 
@@ -132,6 +136,310 @@ final image-generation prompt via Stage 2.
   }
 }
 ```
+
+### `POST /api/subject`
+
+Re-analyze an uploaded image with a factual-only system prompt and return a
+single `subject` field. Powers the "Populate with AI" button beneath the
+subject textarea in the analysis editor (ADR 0004).
+
+Independent of the active preset — the system prompt itself is editable
+via `GET/PUT /api/subject-prompt` (ADR 0005). The shipped default prompt
+excludes artistic style, creative medium, and aesthetic qualities and
+mandates coverage of five factual categories: people (placement, clothing,
+facial expression), locations / settings / environments, spatial
+arrangement, objects / items / environmental features, and contextual
+details.
+
+**Request:** `multipart/form-data`
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "subject": "Two people are seated at a wooden dining table in the lower-center of the frame. The person on the left wears a navy blue wool sweater and is smiling with visible teeth; the person on the right wears a red and black plaid flannel shirt with a neutral expression...",
+    "model": "MiniMax-Text-01"
+  }
+}
+```
+
+### `POST /api/camera-angle`
+
+Re-analyse an uploaded image with a camera-only system prompt and return a
+single `camera_angle` field. Powers the "Populate with AI" button beneath
+the camera angle input in the analysis editor (ADR 0008).
+
+Independent of the active preset. The shipped prompt excludes the subject
+itself, lighting, color, mood, style, and medium — those are separate
+fields — and mandates coverage of five camera-angle categories: camera
+position (height + distance), camera orientation (lateral + level/tilt),
+lens impression (focal length + depth of field), camera movement
+(static vs implied), and frame geometry (subject placement + cropping).
+
+Live testing showed `camera_angle` was the most underperforming field in
+the 14-field Stage 1 schema — the LLM satisfied the 15-character `text`
+floor with one-word labels (`"eye level"`, `"high angle"`) because the
+prompt was balancing camera angle against twelve other fields. This
+endpoint gives the camera-angle contract the full prompt-attention window
+for one question.
+
+**Request:** `multipart/form-data`
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "camera_angle": "Eye-level medium shot captured from a three-quarter front-right perspective, with a normal lens showing natural perspective, shallow depth of field softly blurring the background, and a static frame with no implied motion.",
+    "model": "MiniMax-Text-01"
+  }
+}
+```
+
+### `GET /api/subject-prompt`
+
+Return the active subject-extraction system prompt plus the shipped default
+and an `is_default` flag. Powers the "Edit prompt" modal opened from the
+"Edit prompt" button beside "Populate with AI" (ADR 0005).
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "prompt": "You are an expert visual analyst producing a comprehensive, factual description...",
+    "default_prompt": "You are an expert visual analyst producing a comprehensive, factual description...",
+    "is_default": true
+  }
+}
+```
+
+### `PUT /api/subject-prompt`
+
+Overwrite the active subject-extraction system prompt. The new content is
+persisted to `data/subject_prompt.json` and is picked up by the next
+`POST /api/subject` call (no server restart). The prompt CONTENT is
+unfiltered — the entire point is user ownership. Validation is shape-only:
+non-empty string, ≤ 10 000 chars.
+
+**Request:** `application/json`
+- `prompt` — the new system prompt (string)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "prompt": "...",
+    "is_default": false
+  }
+}
+```
+
+## Stage 2 Prompt Override API
+
+Per-preset overrides for the Stage 2 system prompt used by
+`POST /api/generate-prompt` (ADR 0007). The override is layered on top of
+the preset's built-in `stage2_system_prompt` so the user can iterate on
+how a specific preset synthesizes the final prompt without editing the
+preset itself. Overrides persist to `data/stage2_overrides.json` and are
+read fresh on every `POST /api/generate-prompt` call (no server restart).
+
+Powers the "Edit prompt" button rendered beside "Generate prompt" in the
+analysis editor.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/stage2-prompt?presetId=...` | Get the effective Stage 2 prompt for a preset (override if set, otherwise the preset's built-in `stage2_system_prompt`) |
+| `PUT` | `/api/stage2-prompt?presetId=...` | Write or overwrite the override for a preset |
+| `DELETE` | `/api/stage2-prompt?presetId=...` | Remove the override for a preset (idempotent) |
+
+### `GET /api/stage2-prompt`
+
+**Query params:**
+- `presetId` — ID of an existing preset
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "prompt": "You are a prompt engineer for AI image generators...",
+    "default_prompt": "You are a prompt engineer for AI image generators...",
+    "is_default": true
+  }
+}
+```
+
+`is_default` is content-based (`prompt === default_prompt`), mirroring the
+ADR 0005 subject-prompt response shape.
+
+### `PUT /api/stage2-prompt`
+
+Write an override for the preset's Stage 2 prompt. Validation is shape-only:
+non-empty string, ≤ 10 000 chars. The prompt CONTENT is unfiltered.
+
+**Query params:**
+- `presetId` — ID of an existing preset
+
+**Request:** `application/json`
+- `prompt` — the new Stage 2 prompt override
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "prompt": "...",
+    "default_prompt": "...",
+    "is_default": false
+  }
+}
+```
+
+### `DELETE /api/stage2-prompt`
+
+Remove the override for a preset. Subsequent `POST /api/generate-prompt`
+calls for this preset fall back to `preset.stage2_system_prompt`.
+
+**Query params:**
+- `presetId` — ID of an existing preset
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "preset_id": "preset_alla_prima_oil",
+    "removed": true,
+    "prompt": "You are a prompt engineer for AI image generators...",
+    "default_prompt": "You are a prompt engineer for AI image generators...",
+    "is_default": true
+  }
+}
+```
+
+## Saved Palette API
+
+Saved palettes are reusable color sets extracted from a previous run. Each
+palette persists at `data/palettes.json` with its `name`, `colors`, source
+`run_id`, source `preset_id`, and `created_at` timestamp. Pick one in the
+Step 1 picker to override the auto-analyzed `colors` field on the next
+`/api/analyze` call (ADR 0006).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/palettes` | List all saved palettes |
+| `GET` | `/api/palettes/:id` | Get a single palette |
+| `POST` | `/api/palettes` | Save a new palette from a finished run |
+| `PUT` | `/api/palettes/:id` | Rename an existing palette (body: `{ name }`) |
+| `DELETE` | `/api/palettes/:id` | Hard-delete a palette |
+
+### `POST /api/analyze` with a palette override
+
+The `/api/analyze` multipart form accepts an optional `paletteId` field. When
+provided and resolvable, the route strips `colors` from the Stage 1 schema
+(so the LLM does not re-extract them), appends a one-line system-prompt
+instruction not to speculate colors, and injects the saved palette's colors
+into the analysis response. The response envelope additionally includes
+`run_id` (always), and `palette_id` / `palette_name` when an override was
+applied.
+
+**Form fields:**
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+- `presetId` — ID of an existing preset
+- `paletteId` — (optional) ID of a saved palette to apply
+
+### `POST /api/palettes` body shape
+
+```json
+{
+  "name": "Sunset ochres",
+  "colors": [
+    { "hex": "#d97706", "name": "burnt orange" },
+    { "hex": "#7c2d12", "name": "deep brown" }
+  ],
+  "source_run_id": "run_0123456789abcdef",
+  "source_preset_id": "preset_alla_prima_oil"
+}
+```
+
+Validation:
+- `name`: non-empty string, 60 characters or fewer, **case-insensitively
+  unique** among existing palettes.
+- `colors`: array of 1–50 entries. Each entry: `{ hex: /^#[0-9a-f]{6}$/i,
+  name: string }`.
+- `source_run_id`: matches `/^run_[0-9a-f]{16}$/` (the `run_id` returned
+  by the analyze call that produced this palette).
+- `source_preset_id`: starts with `preset_` (existence is not enforced —
+  presets can be deleted independently).
+
+## Saved Directive API
+
+Saved directives are reusable free-form text snippets that load into the
+analysis editor's "Directives" textarea before running Stage 2. Each
+directive persists at `data/directives.json` with its `name`, `content`,
+optional `tags`, full version `history`, `usage_count`, and `last_used_at`
+timestamp. (ADR 0009.)
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/directives` | List all saved directives (with history) |
+| `GET` | `/api/directives/:id` | Get a single directive (with history) |
+| `POST` | `/api/directives` | Save a new directive |
+| `PUT` | `/api/directives/:id` | Update an existing directive (body: `{ name?, content?, tags? }`, partial) |
+| `DELETE` | `/api/directives/:id` | Hard-delete a directive and its full history |
+| `POST` | `/api/directives/:id/apply` | Record that a directive was applied (increments `usage_count`, stamps `last_used_at`) |
+| `POST` | `/api/directives/:id/restore/:version` | Roll back to a specific history version |
+| `GET` | `/api/directives/export/all` | Download all directives as `.i2p.json` |
+| `POST` | `/api/directives/import` | Import an `.i2p.json` envelope (atomic; mints fresh ids) |
+
+### `POST /api/directives` body shape
+
+```json
+{
+  "name": "Dramatic red accent",
+  "content": "Add a punchy red accent in the upper-right corner.",
+  "tags": ["color", "composition"]
+}
+```
+
+Validation:
+- `name`: non-empty string, 60 characters or fewer, **case-insensitively
+  unique** among existing directives.
+- `content`: non-empty string (after trim), 1000 characters or fewer.
+- `tags`: optional array of ≤ 8 entries. Each tag must match
+  `^[a-z0-9][a-z0-9-]*$` and be 24 characters or fewer. Tags are
+  normalized to lowercase; duplicates are de-duplicated.
+
+### Version history
+
+Every save (initial POST, partial PUT, and restore) appends a new entry
+to the directive's `history` array capturing the post-write state. The
+top-level `name` / `content` / `tags` are always the latest. Restoring a
+prior version makes that version's values the new top-level state and
+records a fresh history entry — nothing is ever deleted, so the entire
+edit trail is preserved.
+
+### Export envelope
+
+```json
+{
+  "format": "image-to-prompt-directives",
+  "version": 1,
+  "exported_at": "2026-06-22T12:34:56.789Z",
+  "directives": [ ... ]
+}
+```
+
+Imports always mint fresh `id` values to prevent collisions with existing
+local directives, reset `usage_count` to 0 and `last_used_at` to null
+(the recipient's library tracks its own usage), and preserve the full
+`history` array. Imports are atomic — if any directive in the batch is
+invalid, none are written.
 
 ## Preset API
 
@@ -152,6 +460,50 @@ Presets are reusable Stage 1 / Stage 2 prompt configurations, persisted in
 The export envelope format is `image-to-prompt-preset` (version `1`); see
 the `i2p.json` files exported from the UI for the exact shape.
 
+## Post-generation Chat API
+
+After Stage 2 returns a final prompt, the chat console (ADR 0011) anchors
+a session to that prompt and lets the user iterate by asking the AI for
+revisions in natural language. Sessions are persisted in
+`data/chat_sessions.json` and survive server restarts. Each session
+carries an immutable `original_prompt` and a mutable `current_prompt`
+that advances only when the user clicks Apply on a revision.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/chat/sessions` | Create a session anchored to a finished prompt |
+| `GET` | `/api/chat/sessions` | List all sessions (newest first, with full messages) |
+| `GET` | `/api/chat/sessions/:id` | Get one session |
+| `POST` | `/api/chat/sessions/:id/messages` | Send a user message, append AI reply |
+| `POST` | `/api/chat/sessions/:id/apply/:messageId` | Apply an assistant's `suggested_prompt` to `current_prompt` |
+| `DELETE` | `/api/chat/sessions/:id` | Hard-delete a session and its full history |
+
+### `POST /api/chat/sessions` body shape
+
+```json
+{
+  "prompt": "the Stage 2 output text",
+  "preset_id": "preset_<16 hex>",
+  "preset_name": "Photorealistic photo description",
+  "run_id": "run_<16 hex>  (optional)",
+  "analysis_snapshot": { "subject": "...", "style": "..." }
+}
+```
+
+`prompt` is required, non-empty, and capped at 5000 characters (matches
+the Stage 2 output ceiling). `preset_id` must resolve to a known preset.
+`analysis_snapshot` is optional; when present, the chat system prompt
+keeps it as context so revisions are grounded in the same facts Stage 2
+used.
+
+### Chat reply shape
+
+Each assistant message has a `suggested_prompt` field that is either
+`null` (a pure-question reply — no revision to apply) or a string (the
+revised prompt text the user can apply with one click). The
+`json_schema`-enforced response from the model always includes both
+fields.
+
 ## Project Structure
 
 ```
@@ -161,7 +513,13 @@ image-to-prompt/
 ├── .env.example           # Environment variable template
 ├── .gitignore
 ├── README.md
-├── CLAUDE.md              # Agent skills configuration
+├── AGENTS.md              # Agent skills configuration
+├── data/                  # Persisted runtime state (presets + palettes + directives + subject prompt + stage2 overrides)
+│   ├── presets.json
+│   ├── palettes.json            # ADR 0006 — saved color palettes (seeded with [])
+│   ├── directives.json          # ADR 0009 — saved directives (seeded with [])
+│   ├── subject_prompt.json      # ADR 0005 — editable from UI; seeded on first read
+│   └── stage2_overrides.json    # ADR 0007 — per-preset Stage 2 prompt overrides (seeded with {})
 ├── docs/
 │   └── agents/
 │       ├── issue-tracker.md
@@ -227,6 +585,13 @@ End-to-end test checklist:
 - [ ] Test with invalid/missing API key → expect friendly error
 - [ ] Test copy-to-clipboard functionality
 - [ ] Test regenerate button
+- [ ] Run an analysis → click "Save palette…" → name it → toast confirms; palette appears in Step 1 picker
+- [ ] Step 1 picker: select a saved palette → run analyze → colors chips match the saved palette (not the new image's auto-analysis)
+- [ ] Step 1 picker: clear selection (back to "Auto-analyze") → run analyze → colors chips come from the LLM as usual
+- [ ] Manager modal: search filters by name (case-insensitive); sort toggles newest/oldest
+- [ ] Manager modal: delete a palette → confirm → row disappears; if it was selected in Step 1, picker clears
+- [ ] Save modal: empty name → error; duplicate name → error; name > 60 chars → error
+- [ ] Apply a deleted palette (race condition): if the picker still references a deleted id, the next analyze 404s and the UI surfaces the error
 
 ## License
 

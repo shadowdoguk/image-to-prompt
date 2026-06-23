@@ -18,11 +18,28 @@
     fieldPalette: {},
     currentFile: null,
     currentAnalysis: null,
+    currentRunId: null,           // ADR 0006 — captured from /api/analyze response
+    lastAnalysisContext: null,    // ADR 0006 — { run_id, preset_id, preset_name, colors } for save modal
     finalPrompt: null,
     isAnalyzing: false,
     isGenerating: false,
+    isPopulatingSubject: false,  // ADR 0004 — "Populate with AI" in flight
+    isPopulatingCameraAngle: false,  // ADR 0008 — camera-angle "Populate with AI" in flight
     editingPresetId: null,  // null when creating new
-    selectedFieldSources: {}  // { [fieldName]: 'analysis' | 'preset' } (ADR 0002)
+    selectedFieldSources: {},  // { [fieldName]: 'analysis' | 'preset' } (ADR 0002)
+    palettes: [],               // ADR 0006 — saved color palettes
+    selectedPaletteId: null,    // ADR 0006 — null = no override, auto-analyze
+    paletteManagerSearch: '',   // ADR 0006 — manager modal filter text
+    paletteManagerSort: 'newest', // ADR 0006 — 'newest' | 'oldest'
+    directives: [],             // ADR 0009 — saved directives
+    selectedDirectiveId: null,  // ADR 0009 — id of currently-selected directive in the apply <select>
+    directiveManagerSearch: '', // ADR 0009 — manager modal search text
+    directiveManagerSort: 'newest', // ADR 0009 — 'newest' | 'oldest' | 'most-used' | 'name'
+    directiveTagFilter: [],     // ADR 0009 — array of tag strings; AND-filter
+    editingDirectiveId: null,   // ADR 0009 — id of the directive being edited (null when closed)
+    chatSessions: [],           // ADR 0011 — all chat sessions, newest first
+    chatSessionId: null,        // ADR 0011 — id of the session anchored to the current generated prompt
+    chatIsSending: false        // ADR 0011 — true while waiting on /api/chat/sessions/:id/messages
   };
 
   // ─── DOM cache ─────────────────────────────────────────────────────────
@@ -49,6 +66,7 @@
     directivesInput: $('directives-input'),
     directivesCount: $('directives-count'),
     reAnalyzeBtn: $('re-analyze-btn'),
+    editStage2PromptBtn: $('edit-stage2-prompt-btn'),
     generatePromptBtn: $('generate-prompt-btn'),
 
     resultSection: $('step-result'),
@@ -72,6 +90,103 @@
     presetStage1Input: $('preset-stage1-input'),
     presetStage2Input: $('preset-stage2-input'),
     presetFieldsGrid: $('preset-fields-grid'),
+
+    subjectPromptModal: $('subject-prompt-modal'),
+    subjectPromptModalClose: $('subject-prompt-modal-close'),
+    subjectPromptCancel: $('subject-prompt-cancel'),
+    subjectPromptSave: $('subject-prompt-save'),
+    subjectPromptReset: $('subject-prompt-reset'),
+    subjectPromptForm: $('subject-prompt-form'),
+    subjectPromptInput: $('subject-prompt-input'),
+    subjectPromptCount: $('subject-prompt-count'),
+    subjectPromptStatus: $('subject-prompt-status'),
+
+    stage2PromptModal: $('stage2-prompt-modal'),
+    stage2PromptModalClose: $('stage2-prompt-modal-close'),
+    stage2PromptCancel: $('stage2-prompt-cancel'),
+    stage2PromptSave: $('stage2-prompt-save'),
+    stage2PromptReset: $('stage2-prompt-reset'),
+    stage2PromptUseDefault: $('stage2-prompt-use-default'),
+    stage2PromptForm: $('stage2-prompt-form'),
+    stage2PromptInput: $('stage2-prompt-input'),
+    stage2PromptCount: $('stage2-prompt-count'),
+    stage2PromptStatus: $('stage2-prompt-status'),
+    stage2PromptPresetName: $('stage2-prompt-preset-name'),
+
+    paletteSelect: $('palette-select'),
+    paletteManageBtn: $('palette-manage-btn'),
+    palettePickerHint: $('palette-picker-hint'),
+    savePaletteBtn: $('save-palette-btn'),
+    paletteApplySelect: $('palette-apply-select'),
+    paletteApplyBtn: $('palette-apply-btn'),
+
+    savePaletteModal: $('save-palette-modal'),
+    savePaletteModalClose: $('save-palette-modal-close'),
+    savePaletteCancel: $('save-palette-cancel'),
+    savePaletteSave: $('save-palette-save'),
+    savePaletteForm: $('save-palette-form'),
+    savePaletteNameInput: $('save-palette-name-input'),
+    savePaletteCount: $('save-palette-count'),
+    savePaletteSource: $('save-palette-source'),
+
+    paletteManagerModal: $('palette-manager-modal'),
+    paletteManagerModalClose: $('palette-manager-modal-close'),
+    paletteManagerCancel: $('palette-manager-cancel'),
+    paletteManagerSearch: $('palette-manager-search'),
+    paletteManagerList: $('palette-manager-list'),
+    paletteManagerStatus: $('palette-manager-status'),
+
+    // ADR 0009 — saved directives
+    directivesSelect: $('directives-select'),
+    directivesApplyBtn: $('directives-apply-btn'),
+    directivesSaveBtn: $('directives-save-btn'),
+    directivesManageBtn: $('directives-manage-btn'),
+
+    saveDirectiveModal: $('save-directive-modal'),
+    saveDirectiveModalClose: $('save-directive-modal-close'),
+    saveDirectiveCancel: $('save-directive-cancel'),
+    saveDirectiveSave: $('save-directive-save'),
+    saveDirectiveForm: $('save-directive-form'),
+    saveDirectiveNameInput: $('save-directive-name-input'),
+    saveDirectiveCount: $('save-directive-count'),
+    saveDirectiveTagsInput: $('save-directive-tags-input'),
+    saveDirectiveContentPreview: $('save-directive-content-preview'),
+
+    directivesManagerModal: $('directives-manager-modal'),
+    directivesManagerModalClose: $('directives-manager-modal-close'),
+    directivesManagerCancel: $('directives-manager-cancel'),
+    directivesManagerSearch: $('directives-manager-search'),
+    directivesManagerList: $('directives-manager-list'),
+    directivesManagerStatus: $('directives-manager-status'),
+    directivesTagFilter: $('directives-tag-filter'),
+    directivesImportBtn: $('directives-import-btn'),
+    directivesImportInput: $('directives-import-input'),
+    directivesExportBtn: $('directives-export-btn'),
+
+    editDirectiveModal: $('edit-directive-modal'),
+    editDirectiveModalClose: $('edit-directive-modal-close'),
+    editDirectiveCancel: $('edit-directive-cancel'),
+    editDirectiveDelete: $('edit-directive-delete'),
+    editDirectiveSave: $('edit-directive-save'),
+    editDirectiveForm: $('edit-directive-form'),
+    editDirectiveNameInput: $('edit-directive-name-input'),
+    editDirectiveNameCount: $('edit-directive-name-count'),
+    editDirectiveTagsInput: $('edit-directive-tags-input'),
+    editDirectiveContentInput: $('edit-directive-content-input'),
+    editDirectiveContentCount: $('edit-directive-content-count'),
+    directiveHistoryList: $('directive-history-list'),
+
+    // ADR 0011 — chat console
+    stepChat: $('step-chat'),
+    chatSessionSelect: $('chat-session-select'),
+    chatSessionDeleteBtn: $('chat-session-delete-btn'),
+    chatSessionStatus: $('chat-session-status'),
+    chatMessages: $('chat-messages'),
+    chatForm: $('chat-form'),
+    chatInput: $('chat-input'),
+    chatInputCount: $('chat-input-count'),
+    chatSendBtn: $('chat-send-btn'),
+    chatFormStatus: $('chat-form-status'),
 
     stepPreset: $('step-preset'),
     stepUpload: $('step-upload'),
@@ -107,6 +222,7 @@
     dom.presetExportBtn.disabled = !state.selectedPresetId;
     dom.analyzeBtn.disabled = !state.selectedPresetId || !state.currentFile || state.isAnalyzing;
     dom.generatePromptBtn.disabled = !state.currentAnalysis || state.isGenerating;
+    dom.editStage2PromptBtn.disabled = !state.selectedPresetId;
   };
 
   // ─── Preset picker ─────────────────────────────────────────────────────
@@ -154,9 +270,16 @@
     state.selectedPresetId = e.target.value || null;
     // Reset downstream state when preset changes
     state.currentAnalysis = null;
+    state.currentRunId = null;
+    state.lastAnalysisContext = null;
     state.selectedFieldSources = {};
     dom.analysisEditor.hidden = true;
     dom.resultSection.hidden = true;
+    resetChatConsole();
+    if (dom.savePaletteBtn) {
+      dom.savePaletteBtn.hidden = true;
+      dom.savePaletteBtn.disabled = true;
+    }
     updatePresetDescription();
     updateButtons();
   });
@@ -335,9 +458,16 @@
     dom.previewContainer.hidden = true;
     dom.dropzone.querySelector('.dropzone-content').hidden = false;
     state.currentAnalysis = null;
+    state.currentRunId = null;
+    state.lastAnalysisContext = null;
     state.selectedFieldSources = {};
     dom.analysisEditor.hidden = true;
     dom.resultSection.hidden = true;
+    resetChatConsole();
+    if (dom.savePaletteBtn) {
+      dom.savePaletteBtn.hidden = true;
+      dom.savePaletteBtn.disabled = true;
+    }
     updateButtons();
   };
 
@@ -380,7 +510,7 @@
       const labelText = def?.label || fieldName;
       const analysisValue = analysis[fieldName];
       const presetDefault = preset.field_defaults?.[fieldName];
-      const hasToggle = typeof presetDefault === 'string' && def?.input === 'text';
+      const hasToggle = typeof presetDefault === 'string' && (def?.input === 'text' || def?.input === 'textarea');
 
       if (hasToggle) state.selectedFieldSources[fieldName] = 'analysis';
 
@@ -453,6 +583,142 @@
         input.value = analysisValue == null ? '' : String(analysisValue);
         input.dataset.field = fieldName;
         row.appendChild(input);
+      }
+
+      // ADR 0004 — "Populate with AI" button directly beneath the subject
+      // input field. Triggers a factual-only re-analysis via /api/subject
+      // and updates the subject textarea value in-place. The button is only
+      // rendered for the subject field; other fields are unaffected.
+      //
+      // ADR 0005 — "Edit prompt" button sits next to it. Opens a modal
+      // showing the active subject-extraction system prompt so the user
+      // can override it. The prompt lives at data/subject_prompt.json
+      // and is read fresh on every Populate click.
+      if (fieldName === 'subject') {
+        const actionWrap = document.createElement('div');
+        actionWrap.className = 'field-row__action';
+
+        const populateBtn = document.createElement('button');
+        populateBtn.type = 'button';
+        populateBtn.className = 'btn-secondary btn-populate-subject';
+        populateBtn.disabled = !state.currentFile || state.isPopulatingSubject;
+        populateBtn.setAttribute('aria-label', 'Populate subject with AI factual re-analysis');
+
+        const btnText = document.createElement('span');
+        btnText.className = 'btn-text';
+        btnText.textContent = 'Populate with AI';
+        populateBtn.appendChild(btnText);
+
+        const btnSpinner = document.createElement('span');
+        btnSpinner.className = 'btn-spinner';
+        btnSpinner.hidden = true;
+        btnSpinner.setAttribute('aria-hidden', 'true');
+        populateBtn.appendChild(btnSpinner);
+
+        populateBtn.addEventListener('click', () => populateSubjectWithAI(populateBtn));
+        actionWrap.appendChild(populateBtn);
+
+        const editPromptBtn = document.createElement('button');
+        editPromptBtn.type = 'button';
+        editPromptBtn.className = 'btn-secondary btn-edit-subject-prompt';
+        editPromptBtn.textContent = 'Edit prompt';
+        editPromptBtn.setAttribute('aria-label', 'Edit the system prompt used for Populate with AI');
+        editPromptBtn.addEventListener('click', () => openSubjectPromptModal());
+        actionWrap.appendChild(editPromptBtn);
+
+        row.appendChild(actionWrap);
+      }
+
+      // ADR 0008 — "Populate with AI" button directly beneath the
+      // camera_angle input field. Triggers a focused, camera-only
+      // re-analysis via /api/camera-angle and updates the camera_angle
+      // input value in-place. The button is only rendered for the
+      // camera_angle field; other fields are unaffected. Mirrors the
+      // ADR 0004 subject button — no "Edit prompt" companion because the
+      // camera-angle prompt is not user-editable in this iteration
+      // (ADR 0008 §5, out of scope).
+      if (fieldName === 'camera_angle') {
+        const actionWrap = document.createElement('div');
+        actionWrap.className = 'field-row__action';
+
+        const populateBtn = document.createElement('button');
+        populateBtn.type = 'button';
+        populateBtn.className = 'btn-secondary btn-populate-camera-angle';
+        populateBtn.disabled = !state.currentFile || state.isPopulatingCameraAngle;
+        populateBtn.setAttribute('aria-label', 'Populate camera angle with AI camera-only re-analysis');
+
+        const btnText = document.createElement('span');
+        btnText.className = 'btn-text';
+        btnText.textContent = 'Populate with AI';
+        populateBtn.appendChild(btnText);
+
+        const btnSpinner = document.createElement('span');
+        btnSpinner.className = 'btn-spinner';
+        btnSpinner.hidden = true;
+        btnSpinner.setAttribute('aria-hidden', 'true');
+        populateBtn.appendChild(btnSpinner);
+
+        populateBtn.addEventListener('click', () => populateCameraAngleWithAI(populateBtn));
+        actionWrap.appendChild(populateBtn);
+
+        const hint = document.createElement('span');
+        hint.className = 'field-action-hint';
+        hint.textContent = 'Re-analyses the image with a focused camera-only prompt.';
+        actionWrap.appendChild(hint);
+
+        row.appendChild(actionWrap);
+      }
+
+      // ADR 0006 — color section is the single home for palette actions:
+      // (1) Save the analyzed colors as a named reusable palette;
+      // (2) Apply a saved palette to replace the current colors;
+      // (3) Manage saved palettes (rename / delete via modal).
+      // Each control is a singleton cached in `dom.*`; appendChild moves
+      // them from any prior location, so re-renders clean up automatically.
+      if (fieldName === 'colors') {
+        const actionWrap = document.createElement('div');
+        actionWrap.className = 'field-row__action palette-actions';
+
+        // Save
+        const saveHint = document.createElement('span');
+        saveHint.className = 'palette-actions__hint';
+        saveHint.textContent = 'Save these colors as a reusable palette for future jobs:';
+        actionWrap.appendChild(saveHint);
+
+        const saveRow = document.createElement('div');
+        saveRow.className = 'palette-actions__row';
+        dom.savePaletteBtn.hidden = false;
+        saveRow.appendChild(dom.savePaletteBtn);
+        actionWrap.appendChild(saveRow);
+
+        // Apply
+        const applyHint = document.createElement('span');
+        applyHint.className = 'palette-actions__hint';
+        applyHint.textContent = 'Or replace these colors with a saved palette:';
+        actionWrap.appendChild(applyHint);
+
+        const applyRow = document.createElement('div');
+        applyRow.className = 'palette-actions__row';
+        populateApplySelect();
+        dom.paletteApplySelect.hidden = false;
+        applyRow.appendChild(dom.paletteApplySelect);
+        dom.paletteApplyBtn.hidden = false;
+        applyRow.appendChild(dom.paletteApplyBtn);
+        actionWrap.appendChild(applyRow);
+
+        // Manage
+        const manageHint = document.createElement('span');
+        manageHint.className = 'palette-actions__hint';
+        manageHint.textContent = 'Or view / rename / delete saved palettes:';
+        actionWrap.appendChild(manageHint);
+
+        const manageRow = document.createElement('div');
+        manageRow.className = 'palette-actions__row';
+        dom.paletteManageBtn.hidden = false;
+        manageRow.appendChild(dom.paletteManageBtn);
+        actionWrap.appendChild(manageRow);
+
+        row.appendChild(actionWrap);
       }
 
       dom.analysisFields.appendChild(row);
@@ -548,13 +814,25 @@
     const fd = new FormData();
     fd.append('image', state.currentFile);
     fd.append('presetId', state.selectedPresetId);
+    if (state.selectedPaletteId) {
+      fd.append('paletteId', state.selectedPaletteId);
+    }
 
     try {
       const data = await apiCall('/api/analyze', { method: 'POST', body: fd });
       state.currentAnalysis = data.analysis;
+      state.currentRunId = data.run_id || null;
+      const preset = state.presets.find((p) => p.id === state.selectedPresetId);
+      state.lastAnalysisContext = {
+        run_id: state.currentRunId,
+        preset_id: state.selectedPresetId,
+        preset_name: preset?.name || state.selectedPresetId,
+        colors: Array.isArray(data.analysis?.colors) ? data.analysis.colors.slice() : []
+      };
       renderAnalysisEditor(data.analysis);
       dom.analysisEditor.hidden = false;
       dom.analysisEditor.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      updateSavePaletteButton();
       hideError();
     } catch (e) {
       showError(`Analysis failed: ${e.message}`);
@@ -564,6 +842,298 @@
       updateButtons();
     }
   };
+
+  /**
+   * ADR 0006 — enable or disable the "Save palette…" button depending on
+   * whether the current analysis has a usable colors array. The button
+   * itself is now rendered inside the colors field-row, so its visibility
+   * follows the analysis editor (which is hidden until the first analyze
+   * run). We only toggle disabled here; the parent editor's hidden state
+   * controls visibility.
+   */
+  const updateSavePaletteButton = () => {
+    if (!dom.savePaletteBtn) return;
+    const colors = state.lastAnalysisContext?.colors;
+    const hasColors = Array.isArray(colors) && colors.length > 0;
+    dom.savePaletteBtn.disabled = !hasColors;
+  };
+
+  /**
+   * ADR 0004 — "Populate with AI" handler. Re-uploads the current image to
+   * the dedicated `/api/subject` endpoint (factual-only system prompt,
+   * independent of the active preset) and replaces the subject textarea's
+   * value in place. Does NOT re-render the analysis editor — that would
+   * clobber any in-progress edits the user has made to other fields
+   * (style, lighting, colors, etc.).
+   */
+  const populateSubjectWithAI = async (btn) => {
+    if (!state.currentFile) {
+      return showError('No image uploaded. Upload an image first.');
+    }
+    if (state.isPopulatingSubject) return;
+
+    state.isPopulatingSubject = true;
+    btn.disabled = true;
+    setButtonLoading(btn, true, 'Populating…');
+
+    const fd = new FormData();
+    fd.append('image', state.currentFile);
+
+    try {
+      const data = await apiCall('/api/subject', { method: 'POST', body: fd });
+      const subjectTextarea = dom.analysisFields.querySelector('textarea[data-field="subject"]');
+      if (subjectTextarea) subjectTextarea.value = data.subject;
+      if (state.currentAnalysis) state.currentAnalysis.subject = data.subject;
+      hideError();
+    } catch (e) {
+      showError(`Populate failed: ${e.message}`);
+    } finally {
+      state.isPopulatingSubject = false;
+      btn.disabled = false;
+      setButtonLoading(btn, false, 'Populate with AI');
+    }
+  };
+
+  /**
+   * ADR 0008 — "Populate with AI" handler for the camera_angle field.
+   * Re-uploads the current image to the dedicated `/api/camera-angle`
+   * endpoint (camera-only system prompt, independent of the active
+   * preset) and replaces the camera_angle input's value in place. Does
+   * NOT re-render the analysis editor — that would clobber any
+   * in-progress edits the user has made to other fields (style,
+   * lighting, colors, etc.).
+   *
+   * Client-side "no image" guard: if `state.currentFile` is null when
+   * the button is clicked, show a clear error and return without
+   * firing the network request. Mirrors `populateSubjectWithAI`'s
+   * guard and prevents a 400 from the route.
+   */
+  const populateCameraAngleWithAI = async (btn) => {
+    if (!state.currentFile) {
+      return showError('No image uploaded. Upload an image first.');
+    }
+    if (state.isPopulatingCameraAngle) return;
+
+    state.isPopulatingCameraAngle = true;
+    btn.disabled = true;
+    setButtonLoading(btn, true, 'Populating…');
+
+    const fd = new FormData();
+    fd.append('image', state.currentFile);
+
+    try {
+      const data = await apiCall('/api/camera-angle', { method: 'POST', body: fd });
+      const cameraAngleInput = dom.analysisFields.querySelector('input[data-field="camera_angle"]');
+      if (cameraAngleInput) cameraAngleInput.value = data.camera_angle;
+      if (state.currentAnalysis) state.currentAnalysis.camera_angle = data.camera_angle;
+      hideError();
+    } catch (e) {
+      showError(`Populate failed: ${e.message}`);
+    } finally {
+      state.isPopulatingCameraAngle = false;
+      btn.disabled = false;
+      setButtonLoading(btn, false, 'Populate with AI');
+    }
+  };
+
+  /**
+   * ADR 0005 — Subject-prompt editor modal. Opens with the current prompt
+   * (loaded from disk via GET /api/subject-prompt), allows edits, and saves
+   * via PUT /api/subject-prompt. The "Reset to default" control restores
+   * the shipped default text in the textarea; the user must then click
+   * Save to persist the reset.
+   *
+   * Tracks the latest GET response in a closure so "Reset to default"
+   * can read `data.default_prompt` without a second fetch.
+   */
+  let subjectPromptModalState = null;
+
+  const openSubjectPromptModal = async () => {
+    dom.subjectPromptInput.value = '';
+    dom.subjectPromptStatus.textContent = '— loading…';
+    dom.subjectPromptModal.hidden = false;
+    try {
+      const data = await apiCall('/api/subject-prompt');
+      subjectPromptModalState = data;
+      dom.subjectPromptInput.value = data.prompt;
+      dom.subjectPromptStatus.textContent = data.is_default
+        ? '— shipped default'
+        : '— custom (edited)';
+    } catch (e) {
+      dom.subjectPromptStatus.textContent = '— failed to load';
+      showError(`Failed to load subject prompt: ${e.message}`);
+    }
+    updateSubjectPromptCount();
+  };
+
+  const closeSubjectPromptModal = () => {
+    dom.subjectPromptModal.hidden = true;
+    subjectPromptModalState = null;
+  };
+
+  const updateSubjectPromptCount = () => {
+    dom.subjectPromptCount.textContent = `${dom.subjectPromptInput.value.length} / 10000`;
+  };
+
+  const saveSubjectPrompt = async () => {
+    const prompt = dom.subjectPromptInput.value;
+    try {
+      await apiCall('/api/subject-prompt', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
+      closeSubjectPromptModal();
+      hideError();
+    } catch (e) {
+      showError(`Save failed: ${e.message}`);
+    }
+  };
+
+  /**
+   * Reset the modal textarea to the shipped default. Destructive if the
+   * user has unsaved edits, so it asks for confirmation first. Does NOT
+   * persist — the user must click Save after the reset to write the
+   * default back to disk (matches "Reset to default" semantics in most
+   * editor UIs).
+   */
+  const resetSubjectPromptToDefault = () => {
+    if (!confirm('Reset the prompt to the shipped default? Unsaved edits will be replaced in the textarea; click Save to persist.')) return;
+    if (!subjectPromptModalState || typeof subjectPromptModalState.default_prompt !== 'string') {
+      return showError('Default prompt not available — try reopening the modal.');
+    }
+    dom.subjectPromptInput.value = subjectPromptModalState.default_prompt;
+    updateSubjectPromptCount();
+  };
+
+  dom.subjectPromptModalClose.addEventListener('click', closeSubjectPromptModal);
+  dom.subjectPromptCancel.addEventListener('click', closeSubjectPromptModal);
+  dom.subjectPromptReset.addEventListener('click', resetSubjectPromptToDefault);
+  dom.subjectPromptForm.addEventListener('submit', (e) => { e.preventDefault(); saveSubjectPrompt(); });
+  dom.subjectPromptInput.addEventListener('input', updateSubjectPromptCount);
+
+  /**
+   * ADR 0007 — Stage 2 prompt editor modal. Opens with the EFFECTIVE
+   * prompt for the current preset (override if one exists, otherwise
+   * the preset's built-in stage2_system_prompt), lets the user edit
+   * or reset it, and saves via PUT /api/stage2-prompt?presetId=...
+   *
+   * Three actions:
+   *  - Save: PUT the textarea contents as an override.
+   *  - Reset to default: load preset.stage2_system_prompt into the
+   *    textarea (user must click Save to persist).
+   *  - Use preset default: DELETE the override for the current preset
+   *    via DELETE /api/stage2-prompt?presetId=... and reload the
+   *    modal showing the preset's built-in prompt.
+   *
+   * Tracks the latest GET response in a closure so "Reset to default"
+   * can read `data.default_prompt` without a second fetch.
+   */
+  let stage2PromptModalState = null;
+
+  const openStage2PromptModal = async () => {
+    if (!state.selectedPresetId) {
+      return showError('Select a preset first before editing the Stage 2 prompt.');
+    }
+    const preset = state.presets.find((p) => p.id === state.selectedPresetId);
+    dom.stage2PromptInput.value = '';
+    dom.stage2PromptStatus.textContent = '— loading…';
+    dom.stage2PromptPresetName.textContent = preset ? `"${preset.name}"` : 'the current preset';
+    dom.stage2PromptModal.hidden = false;
+    try {
+      const data = await apiCall(`/api/stage2-prompt?presetId=${encodeURIComponent(state.selectedPresetId)}`);
+      stage2PromptModalState = data;
+      dom.stage2PromptInput.value = data.prompt;
+      dom.stage2PromptStatus.textContent = data.is_default
+        ? '— preset default'
+        : '— custom (override)';
+    } catch (e) {
+      dom.stage2PromptStatus.textContent = '— failed to load';
+      showError(`Failed to load Stage 2 prompt: ${e.message}`);
+    }
+    updateStage2PromptCount();
+  };
+
+  const closeStage2PromptModal = () => {
+    dom.stage2PromptModal.hidden = true;
+    stage2PromptModalState = null;
+  };
+
+  const updateStage2PromptCount = () => {
+    dom.stage2PromptCount.textContent = `${dom.stage2PromptInput.value.length} / 10000`;
+  };
+
+  const saveStage2Prompt = async () => {
+    if (!state.selectedPresetId) {
+      return showError('Select a preset first.');
+    }
+    const prompt = dom.stage2PromptInput.value;
+    try {
+      await apiCall(`/api/stage2-prompt?presetId=${encodeURIComponent(state.selectedPresetId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
+      closeStage2PromptModal();
+      hideError();
+    } catch (e) {
+      showError(`Save failed: ${e.message}`);
+    }
+  };
+
+  /**
+   * "Reset to default" — load preset.stage2_system_prompt into the
+   * textarea. Does NOT persist; user must click Save to write the
+   * default text back to disk as an explicit override (matches the
+   * subject-prompt modal's semantics).
+   */
+  const resetStage2PromptToDefault = () => {
+    if (!confirm('Reset the textarea to the preset\'s built-in prompt? Unsaved edits will be replaced; click Save to persist.')) return;
+    if (!stage2PromptModalState || typeof stage2PromptModalState.default_prompt !== 'string') {
+      return showError('Default prompt not available — try reopening the modal.');
+    }
+    dom.stage2PromptInput.value = stage2PromptModalState.default_prompt;
+    updateStage2PromptCount();
+  };
+
+  /**
+   * "Use preset default" — DELETE the override for the current preset.
+   * Distinct from "Reset to default" in that no save step is required:
+   * the override is removed immediately, and subsequent "Generate
+   * prompt" calls fall back to the preset's built-in prompt.
+   * Destructive (the user's override text is lost from disk), so it
+   * asks for confirmation first.
+   */
+  const useStage2PresetDefault = async () => {
+    if (!state.selectedPresetId) {
+      return showError('Select a preset first.');
+    }
+    if (!confirm('Remove the Stage 2 override for this preset? The preset\'s built-in prompt will be used for future generations.')) return;
+    try {
+      const data = await apiCall(`/api/stage2-prompt?presetId=${encodeURIComponent(state.selectedPresetId)}`, {
+        method: 'DELETE'
+      });
+      dom.stage2PromptInput.value = data.prompt;
+      dom.stage2PromptStatus.textContent = data.is_default ? '— preset default' : '— custom (override)';
+      stage2PromptModalState = {
+        prompt: data.prompt,
+        default_prompt: data.default_prompt,
+        is_default: data.is_default
+      };
+      updateStage2PromptCount();
+      hideError();
+    } catch (e) {
+      showError(`Failed to remove override: ${e.message}`);
+    }
+  };
+
+  dom.editStage2PromptBtn.addEventListener('click', openStage2PromptModal);
+  dom.stage2PromptModalClose.addEventListener('click', closeStage2PromptModal);
+  dom.stage2PromptCancel.addEventListener('click', closeStage2PromptModal);
+  dom.stage2PromptReset.addEventListener('click', resetStage2PromptToDefault);
+  dom.stage2PromptUseDefault.addEventListener('click', useStage2PresetDefault);
+  dom.stage2PromptForm.addEventListener('submit', (e) => { e.preventDefault(); saveStage2Prompt(); });
+  dom.stage2PromptInput.addEventListener('input', updateStage2PromptCount);
 
   const collectAnalysisFromEditor = () => {
     // Pull current input values into the analysis object. The source toggle (ADR 0002)
@@ -614,6 +1184,17 @@
     dom.resultMetaInfo.textContent = meta.join(' • ');
     dom.resultSection.hidden = false;
     dom.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // ADR 0011 — every successful Stage 2 run gets its own chat session.
+    // Capture the analysis snapshot from state.currentAnalysis so the
+    // chat system prompt has full context (subject, style, lighting, …)
+    // even if the user later edits the live editor. Fire-and-forget: a
+    // 4xx/5xx here must not clobber the result the user just got.
+    if (data && typeof data.prompt === 'string' && data.prompt.trim().length > 0) {
+      activateChatForResult(data).catch((e) => {
+        console.warn('Failed to activate chat console:', e.message);
+      });
+    }
   };
 
   const setButtonLoading = (btn, loading, text) => {
@@ -650,7 +1231,1720 @@
 
   dom.errorDismiss.addEventListener('click', hideError);
 
-  // ─── Initialize ────────────────────────────────────────────────────────
+  // ─── Saved color palettes (ADR 0006) ─────────────────────────────────
+
+  const renderPalettePicker = () => {
+    if (!dom.paletteSelect) return;
+    const previousValue = state.selectedPaletteId || '';
+    dom.paletteSelect.innerHTML = '';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = '— Auto-analyze colors —';
+    dom.paletteSelect.appendChild(defaultOpt);
+
+    state.palettes.forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = `${p.name} (${p.colors.length} colors)`;
+      dom.paletteSelect.appendChild(opt);
+    });
+
+    // Restore selection if the palette still exists; otherwise clear.
+    const stillExists = previousValue && state.palettes.some((p) => p.id === previousValue);
+    dom.paletteSelect.value = stillExists ? previousValue : '';
+
+    if (!stillExists && previousValue) {
+      state.selectedPaletteId = null;
+    }
+
+    updatePalettePickerHint();
+  };
+
+  const updatePalettePickerHint = () => {
+    if (!dom.palettePickerHint) return;
+    if (!state.selectedPaletteId) {
+      dom.palettePickerHint.hidden = true;
+      dom.palettePickerHint.textContent = '';
+      return;
+    }
+    const palette = state.palettes.find((p) => p.id === state.selectedPaletteId);
+    if (!palette) {
+      dom.palettePickerHint.hidden = true;
+      dom.palettePickerHint.textContent = '';
+      return;
+    }
+    const preset = state.presets.find((p) => p.id === palette.source_preset_id);
+    const source = preset ? `extracted from "${preset.name}"` : `extracted from ${palette.source_preset_id}`;
+    dom.palettePickerHint.hidden = false;
+    dom.palettePickerHint.textContent = `Will replace the auto-analyzed colors with ${palette.colors.length} saved color${palette.colors.length === 1 ? '' : 's'} (${source}).`;
+  };
+
+  const loadPalettes = async () => {
+    // Direct fetch (not apiCall) so we can distinguish a 404 (server is
+    // running an older build that doesn't have the palette routes) from
+    // a real failure. A 404 is not fatal — the picker just stays empty
+    // and the user can proceed without palettes. Surface a clear
+    // console hint + a single toast so the operator knows to restart
+    // the server to enable the feature.
+    try {
+      const res = await fetch('/api/palettes');
+      if (res.status === 404) {
+        console.warn(
+          '[palettes] GET /api/palettes returned 404 — the server is running an older ' +
+          'build without palette routes. Restart the server (npm start) to enable ' +
+          'saved color palettes.'
+        );
+        showError('Palette endpoints unavailable — restart the server to enable saved palettes.');
+        state.palettes = [];
+        renderPalettePicker();
+        populateApplySelect();
+        return;
+      }
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.success) {
+        throw new Error((data && data.error) || `HTTP ${res.status}`);
+      }
+      state.palettes = data.data || [];
+      renderPalettePicker();
+      populateApplySelect();
+    } catch (e) {
+      showError(`Failed to load palettes: ${e.message}`);
+    }
+  };
+
+  dom.paletteSelect.addEventListener('change', (e) => {
+    state.selectedPaletteId = e.target.value || null;
+    updatePalettePickerHint();
+  });
+
+  dom.paletteManageBtn.addEventListener('click', () => openPaletteManagerModal());
+
+  // ─── Apply palette (color section) ─────────────────────────────────
+
+  /**
+   * Fill the Apply `<select>` in the color section with the current
+   * saved palettes. Called on render and after any save / delete so
+   * the dropdown stays in sync with /api/palettes.
+   */
+  const populateApplySelect = () => {
+    if (!dom.paletteApplySelect) return;
+    const previousValue = dom.paletteApplySelect.value;
+    dom.paletteApplySelect.innerHTML = '';
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = state.palettes.length === 0
+      ? '— No saved palettes —'
+      : '— Choose a palette —';
+    dom.paletteApplySelect.appendChild(placeholder);
+
+    state.palettes.forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = `${p.name} (${p.colors.length} colors)`;
+      dom.paletteApplySelect.appendChild(opt);
+    });
+
+    // Restore previous selection if still valid.
+    if (previousValue && state.palettes.some((p) => p.id === previousValue)) {
+      dom.paletteApplySelect.value = previousValue;
+    }
+
+    updateApplyControls();
+  };
+
+  /**
+   * Enable / disable the Apply button + select based on whether there
+   * are any saved palettes to apply. Mirrors updateSavePaletteButton.
+   */
+  const updateApplyControls = () => {
+    if (!dom.paletteApplySelect || !dom.paletteApplyBtn) return;
+    const hasPalettes = state.palettes.length > 0;
+    dom.paletteApplySelect.disabled = !hasPalettes;
+    dom.paletteApplyBtn.disabled = !hasPalettes || !dom.paletteApplySelect.value;
+  };
+
+  /**
+   * Replace the current analysis colors with the selected saved palette.
+   * Mutates state.currentAnalysis.colors in place (so the chips re-render
+   * with the new values) and updates state.lastAnalysisContext so the
+   * Save modal would save the NEW colors if the user clicks it next.
+   */
+  const applySelectedPalette = () => {
+    if (!dom.paletteApplySelect) return;
+    const paletteId = dom.paletteApplySelect.value;
+    if (!paletteId) {
+      return showError('Pick a saved palette first.');
+    }
+    const palette = state.palettes.find((p) => p.id === paletteId);
+    if (!palette) {
+      return showError('That palette no longer exists.');
+    }
+    if (!state.currentAnalysis) {
+      return showError('Run an analysis first — there are no colors to replace.');
+    }
+
+    state.currentAnalysis.colors = palette.colors.map((c) => ({
+      hex: typeof c.hex === 'string' ? c.hex.toLowerCase() : c.hex,
+      name: typeof c.name === 'string' ? c.name : ''
+    }));
+
+    if (state.lastAnalysisContext) {
+      state.lastAnalysisContext.colors = state.currentAnalysis.colors.slice();
+    }
+
+    // Re-render just the colors input. Calling the full render would
+    // clobber any in-progress edits the user has made to other fields
+    // (style, lighting, subject, etc.) — same rationale as the
+    // Populate-with-AI button.
+    const colorsRow = dom.analysisFields.querySelector('.field-row[data-field="colors"]');
+    if (colorsRow) {
+      const oldChips = colorsRow.querySelector('.colors-chips');
+      if (oldChips && typeof window !== 'undefined') {
+        // The renderColorsInput closure already mutates state.currentAnalysis.colors
+        // and listens for click events on its children. Replace the DOM node
+        // wholesale; re-render the chip list inside it.
+        const newChips = renderColorsInput(state.currentAnalysis.colors);
+        oldChips.replaceWith(newChips);
+      }
+    }
+
+    showError(`Applied palette "${palette.name}" (${palette.colors.length} colors).`);
+  };
+
+  dom.paletteApplyBtn.addEventListener('click', applySelectedPalette);
+  dom.paletteApplySelect.addEventListener('change', updateApplyControls);
+
+  // ─── Save palette modal ──────────────────────────────────────────────
+
+  const openSavePaletteModal = () => {
+    if (!state.lastAnalysisContext) {
+      return showError('Run an analysis first — there is no palette to save yet.');
+    }
+    const ctx = state.lastAnalysisContext;
+    dom.savePaletteNameInput.value = '';
+    updateSavePaletteCount();
+    const sourcePreset = state.presets.find((p) => p.id === ctx.preset_id);
+    const sourceLabel = sourcePreset ? sourcePreset.name : ctx.preset_id;
+    dom.savePaletteSource.textContent =
+      `Source: preset "${sourceLabel}", ${ctx.colors.length} color${ctx.colors.length === 1 ? '' : 's'}. ` +
+      `Run ${ctx.run_id || 'unknown'}.`;
+    dom.savePaletteModal.hidden = false;
+    dom.savePaletteNameInput.focus();
+  };
+
+  const closeSavePaletteModal = () => {
+    dom.savePaletteModal.hidden = true;
+  };
+
+  const updateSavePaletteCount = () => {
+    if (!dom.savePaletteCount) return;
+    const len = dom.savePaletteNameInput.value.length;
+    dom.savePaletteCount.textContent = `${len} / 60`;
+  };
+
+  const savePalette = async () => {
+    const ctx = state.lastAnalysisContext;
+    if (!ctx) return showError('No analysis context to save from.');
+    const name = dom.savePaletteNameInput.value.trim();
+    if (!name) return showError('Palette name is required.');
+    if (name.length > 60) return showError('Palette name must be 60 characters or fewer.');
+
+    const body = {
+      name,
+      colors: ctx.colors.map((c) => ({ hex: c.hex, name: c.name || '' })),
+      source_run_id: ctx.run_id,
+      source_preset_id: ctx.preset_id
+    };
+
+    try {
+      await apiCall('/api/palettes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      closeSavePaletteModal();
+      await loadPalettes();
+      hideError();
+    } catch (e) {
+      showError(`Save failed: ${e.message}`);
+    }
+  };
+
+  dom.savePaletteBtn.addEventListener('click', openSavePaletteModal);
+  dom.savePaletteModalClose.addEventListener('click', closeSavePaletteModal);
+  dom.savePaletteCancel.addEventListener('click', closeSavePaletteModal);
+  dom.savePaletteForm.addEventListener('submit', (e) => { e.preventDefault(); savePalette(); });
+  dom.savePaletteNameInput.addEventListener('input', updateSavePaletteCount);
+
+  // ─── Palette manager modal ──────────────────────────────────────────
+
+  const openPaletteManagerModal = async () => {
+    dom.paletteManagerSearch.value = state.paletteManagerSearch;
+    state.paletteManagerSort = state.paletteManagerSort || 'newest';
+    Array.from(document.querySelectorAll('input[name="palette-sort"]')).forEach((r) => {
+      r.checked = r.value === state.paletteManagerSort;
+    });
+    dom.paletteManagerStatus.textContent = 'Loading…';
+    dom.paletteManagerStatus.hidden = false;
+    dom.paletteManagerList.hidden = true;
+    dom.paletteManagerList.innerHTML = '';
+    dom.paletteManagerModal.hidden = false;
+    dom.paletteManagerSearch.focus();
+
+    try {
+      state.palettes = await apiCall('/api/palettes');
+      renderPaletteManagerList();
+    } catch (e) {
+      dom.paletteManagerStatus.textContent = `Failed to load palettes: ${e.message}`;
+    }
+  };
+
+  const closePaletteManagerModal = () => {
+    dom.paletteManagerModal.hidden = true;
+    state.paletteManagerSearch = '';
+  };
+
+  const formatRelativeDate = (iso) => {
+    if (!iso) return '';
+    const then = new Date(iso).getTime();
+    if (Number.isNaN(then)) return '';
+    const diffMs = Date.now() - then;
+    const sec = Math.round(diffMs / 1000);
+    if (sec < 60) return 'just now';
+    const min = Math.round(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.round(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const day = Math.round(hr / 24);
+    if (day < 30) return `${day}d ago`;
+    const mo = Math.round(day / 30);
+    if (mo < 12) return `${mo}mo ago`;
+    const yr = Math.round(mo / 12);
+    return `${yr}y ago`;
+  };
+
+  const renderPaletteManagerList = () => {
+    const term = state.paletteManagerSearch.trim().toLowerCase();
+    const sort = state.paletteManagerSort || 'newest';
+
+    const filtered = state.palettes
+      .filter((p) => !term || (p.name || '').toLowerCase().includes(term))
+      .sort((a, b) => {
+        const at = new Date(a.created_at || 0).getTime();
+        const bt = new Date(b.created_at || 0).getTime();
+        return sort === 'oldest' ? at - bt : bt - at;
+      });
+
+    dom.paletteManagerList.innerHTML = '';
+
+    if (state.palettes.length === 0) {
+      dom.paletteManagerStatus.textContent = 'No saved palettes yet. Run an analysis and click "Save palette…" to create one.';
+      dom.paletteManagerStatus.hidden = false;
+      dom.paletteManagerList.hidden = true;
+      return;
+    }
+    if (filtered.length === 0) {
+      dom.paletteManagerStatus.textContent = `No palettes match "${term}".`;
+      dom.paletteManagerStatus.hidden = false;
+      dom.paletteManagerList.hidden = true;
+      return;
+    }
+
+    dom.paletteManagerStatus.hidden = true;
+    dom.paletteManagerList.hidden = false;
+
+    filtered.forEach((p) => {
+      const li = document.createElement('li');
+      li.className = 'palette-manager-item';
+      li.dataset.paletteId = p.id;
+
+      const main = document.createElement('div');
+      main.className = 'palette-manager-item__main';
+
+      const name = document.createElement('div');
+      name.className = 'palette-manager-item__name';
+      name.textContent = p.name;
+      main.appendChild(name);
+
+      const meta = document.createElement('div');
+      meta.className = 'palette-manager-item__meta';
+      const swatches = document.createElement('span');
+      swatches.className = 'palette-manager-item__swatches';
+      swatches.setAttribute('aria-hidden', 'true');
+      (p.colors || []).slice(0, 12).forEach((c) => {
+        const sw = document.createElement('span');
+        sw.className = 'palette-manager-item__swatch';
+        sw.style.background = c.hex;
+        sw.title = `${c.name || ''} ${c.hex}`.trim();
+        swatches.appendChild(sw);
+      });
+      meta.appendChild(swatches);
+      const count = document.createElement('span');
+      count.textContent = `${(p.colors || []).length} color${(p.colors || []).length === 1 ? '' : 's'}`;
+      meta.appendChild(count);
+      const when = document.createElement('span');
+      when.textContent = formatRelativeDate(p.created_at);
+      meta.appendChild(when);
+      main.appendChild(meta);
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'palette-manager-item__delete';
+      del.textContent = 'Delete';
+      del.setAttribute('aria-label', `Delete palette ${p.name}`);
+      del.addEventListener('click', () => deletePalette(p.id, p.name));
+
+      li.appendChild(main);
+      li.appendChild(del);
+      dom.paletteManagerList.appendChild(li);
+    });
+  };
+
+  const deletePalette = async (id, name) => {
+    if (!confirm(`Delete saved palette "${name}"? This cannot be undone.`)) return;
+    try {
+      await apiCall(`/api/palettes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      // Refresh picker list + manager list. If the deleted palette was the
+      // selected one, clear the selection so /api/analyze falls back to
+      // auto-analysis.
+      if (state.selectedPaletteId === id) {
+        state.selectedPaletteId = null;
+      }
+      await loadPalettes();
+      renderPaletteManagerList();
+    } catch (e) {
+      showError(`Delete failed: ${e.message}`);
+    }
+  };
+
+  dom.paletteManagerModalClose.addEventListener('click', closePaletteManagerModal);
+  dom.paletteManagerCancel.addEventListener('click', closePaletteManagerModal);
+  dom.paletteManagerSearch.addEventListener('input', (e) => {
+    state.paletteManagerSearch = e.target.value;
+    renderPaletteManagerList();
+  });
+  document.querySelectorAll('input[name="palette-sort"]').forEach((r) => {
+    r.addEventListener('change', (e) => {
+      state.paletteManagerSort = e.target.value;
+      renderPaletteManagerList();
+    });
+  });
+
+  // ─── Saved directives (ADR 0009) ────────────────────────────────────
+
+  /**
+   * Tag normalization — mirrors the server's normalizeDirectiveTags
+   * rules so the client-side preview + filter behave identically to
+   * what the server will accept on POST/PUT. Lowercase, kebab-case,
+   * non-empty, <= 24 chars.
+   */
+  const clientNormalizeTag = (raw) => {
+    if (typeof raw !== 'string') return null;
+    const t = raw.trim().toLowerCase();
+    if (t.length === 0) return null;
+    if (t.length > 24) return null;
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(t)) return null;
+    return t;
+  };
+
+  const clientNormalizeTagsInput = (raw) => {
+    if (!raw) return [];
+    return raw
+      .split(',')
+      .map((s) => clientNormalizeTag(s))
+      .filter((t) => t !== null);
+  };
+
+  /**
+   * Fetch all saved directives from the server. Like palettes, a 404
+   * is treated as "feature unavailable — server is on an older build",
+   * not a fatal error. The select stays empty and the user can still
+   * type into the textarea.
+   */
+  const loadDirectives = async () => {
+    try {
+      const res = await fetch('/api/directives');
+      if (res.status === 404) {
+        console.warn(
+          '[directives] GET /api/directives returned 404 — the server is running an older ' +
+          'build without directive routes. Restart the server (npm start) to enable saved directives.'
+        );
+        showError('Directive endpoints unavailable — restart the server to enable saved directives.');
+        state.directives = [];
+        renderDirectivesSelect();
+        return;
+      }
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.success) {
+        throw new Error((data && data.error) || `HTTP ${res.status}`);
+      }
+      state.directives = Array.isArray(data.data) ? data.data : [];
+      renderDirectivesSelect();
+    } catch (e) {
+      showError(`Failed to load directives: ${e.message}`);
+    }
+  };
+
+  /**
+   * Repopulate the "Choose a saved directive" <select> from
+   * state.directives. Called on init, after every save, after delete,
+   * and after import. Preserves the previous selection if the
+   * directive still exists.
+   */
+  const renderDirectivesSelect = () => {
+    if (!dom.directivesSelect) return;
+    const previous = state.selectedDirectiveId || '';
+    dom.directivesSelect.innerHTML = '';
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = state.directives.length === 0
+      ? '— No saved directives —'
+      : '— Choose a saved directive —';
+    dom.directivesSelect.appendChild(placeholder);
+
+    state.directives.forEach((d) => {
+      const opt = document.createElement('option');
+      opt.value = d.id;
+      const uses = d.usage_count || 0;
+      const useLabel = uses === 1 ? '1 use' : `${uses} uses`;
+      opt.textContent = `${d.name} (${useLabel})`;
+      dom.directivesSelect.appendChild(opt);
+    });
+
+    if (previous && state.directives.some((d) => d.id === previous)) {
+      dom.directivesSelect.value = previous;
+    } else {
+      state.selectedDirectiveId = null;
+    }
+    updateDirectivesActions();
+  };
+
+  /**
+   * Enable / disable Apply + Save buttons based on current state.
+   *   - Apply needs a selection in the <select>
+   *   - Save needs a non-empty (trimmed) textarea
+   */
+  const updateDirectivesActions = () => {
+    if (dom.directivesApplyBtn) {
+      dom.directivesApplyBtn.disabled = !state.selectedDirectiveId;
+    }
+    if (dom.directivesSaveBtn) {
+      const hasContent = !!(dom.directivesInput.value || '').trim();
+      dom.directivesSaveBtn.disabled = !hasContent;
+    }
+  };
+
+  /**
+   * Load the selected directive's content into the textarea and
+   * record usage on the server. Closes the manager modal if open so
+   * the user sees the textarea update.
+   */
+  const applySelectedDirective = async () => {
+    if (!state.selectedDirectiveId) {
+      return showError('Pick a saved directive first.');
+    }
+    const directive = state.directives.find((d) => d.id === state.selectedDirectiveId);
+    if (!directive) {
+      return showError('That directive no longer exists.');
+    }
+    dom.directivesInput.value = directive.content || '';
+    dom.directivesInput.dispatchEvent(new Event('input'));
+    hideError();
+    if (!dom.directivesManagerModal.hidden) {
+      closeDirectivesManagerModal();
+    }
+    try {
+      await apiCall(`/api/directives/${encodeURIComponent(directive.id)}/apply`, { method: 'POST' });
+      // Refresh local state so the next open of the manager reflects
+      // the new usage count. Failure to update stats is non-fatal —
+      // the user has already applied the directive.
+      const refreshed = state.directives.find((d) => d.id === directive.id);
+      if (refreshed) {
+        refreshed.usage_count = (refreshed.usage_count || 0) + 1;
+        refreshed.last_used_at = new Date().toISOString();
+        renderDirectivesSelect();
+      }
+    } catch (e) {
+      // Don't block on apply-tracking failure — the content is in the
+      // textarea. Surface as a warning.
+      console.warn('Failed to record directive usage:', e.message);
+    }
+    showError(`Applied directive "${directive.name}".`);
+  };
+
+  // ─── Save directive modal ──────────────────────────────────────────
+
+  const openSaveDirectiveModal = () => {
+    const content = (dom.directivesInput.value || '').trim();
+    if (!content) {
+      return showError('Type something in the directives box first — there is nothing to save.');
+    }
+    dom.saveDirectiveNameInput.value = '';
+    dom.saveDirectiveTagsInput.value = '';
+    dom.saveDirectiveContentPreview.textContent = dom.directivesInput.value;
+    updateSaveDirectiveCount();
+    dom.saveDirectiveModal.hidden = false;
+    dom.saveDirectiveNameInput.focus();
+  };
+
+  const closeSaveDirectiveModal = () => {
+    dom.saveDirectiveModal.hidden = true;
+  };
+
+  const updateSaveDirectiveCount = () => {
+    if (!dom.saveDirectiveCount) return;
+    const len = dom.saveDirectiveNameInput.value.length;
+    dom.saveDirectiveCount.textContent = `${len} / 60`;
+  };
+
+  const saveDirective = async () => {
+    const name = dom.saveDirectiveNameInput.value.trim();
+    if (!name) return showError('Directive name is required.');
+    if (name.length > 60) return showError('Directive name must be 60 characters or fewer.');
+
+    const content = dom.directivesInput.value;
+    if (!content.trim()) return showError('Directive content is empty.');
+    if (content.length > 1000) return showError('Directive content must be 1000 characters or fewer.');
+
+    const tags = clientNormalizeTagsInput(dom.saveDirectiveTagsInput.value);
+
+    try {
+      const created = await apiCall('/api/directives', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, content, tags })
+      });
+      closeSaveDirectiveModal();
+      // Optimistically add to local state and re-render the select,
+      // then refresh from the server in the background.
+      state.directives.push(created);
+      state.selectedDirectiveId = created.id;
+      renderDirectivesSelect();
+      hideError();
+      loadDirectives();
+    } catch (e) {
+      showError(`Save failed: ${e.message}`);
+    }
+  };
+
+  dom.directivesSaveBtn.addEventListener('click', openSaveDirectiveModal);
+  dom.saveDirectiveModalClose.addEventListener('click', closeSaveDirectiveModal);
+  dom.saveDirectiveCancel.addEventListener('click', closeSaveDirectiveModal);
+  dom.saveDirectiveForm.addEventListener('submit', (e) => { e.preventDefault(); saveDirective(); });
+  dom.saveDirectiveNameInput.addEventListener('input', updateSaveDirectiveCount);
+
+  // Apply button
+  dom.directivesApplyBtn.addEventListener('click', applySelectedDirective);
+  dom.directivesSelect.addEventListener('change', (e) => {
+    state.selectedDirectiveId = e.target.value || null;
+    updateDirectivesActions();
+  });
+
+  // Save / Apply enable state on textarea edits
+  dom.directivesInput.addEventListener('input', updateDirectivesActions);
+
+  // ─── Manage directives modal ───────────────────────────────────────
+
+  const openDirectivesManagerModal = async () => {
+    state.directiveManagerSearch = state.directiveManagerSearch || '';
+    state.directiveManagerSort = state.directiveManagerSort || 'newest';
+    state.directiveTagFilter = Array.isArray(state.directiveTagFilter) ? state.directiveTagFilter : [];
+
+    dom.directivesManagerSearch.value = state.directiveManagerSearch;
+    Array.from(document.querySelectorAll('input[name="directive-sort"]')).forEach((r) => {
+      r.checked = r.value === state.directiveManagerSort;
+    });
+    dom.directivesManagerStatus.textContent = 'Loading…';
+    dom.directivesManagerStatus.hidden = false;
+    dom.directivesManagerList.hidden = true;
+    dom.directivesManagerList.innerHTML = '';
+    dom.directivesManagerModal.hidden = false;
+    dom.directivesManagerSearch.focus();
+
+    try {
+      state.directives = await apiCall('/api/directives');
+      renderDirectivesManagerList();
+    } catch (e) {
+      dom.directivesManagerStatus.textContent = `Failed to load directives: ${e.message}`;
+    }
+  };
+
+  const closeDirectivesManagerModal = () => {
+    dom.directivesManagerModal.hidden = true;
+    state.directiveManagerSearch = '';
+    state.directiveTagFilter = [];
+  };
+
+  /**
+   * Compute the union of all tags across the current directive list
+   * with usage counts. Returns a Map<tag, count> sorted by count desc,
+   * then alphabetical.
+   */
+  const computeTagUnion = () => {
+    const counts = new Map();
+    for (const d of state.directives) {
+      for (const t of (d.tags || [])) {
+        counts.set(t, (counts.get(t) || 0) + 1);
+      }
+    }
+    const entries = Array.from(counts.entries());
+    entries.sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]));
+    return entries;
+  };
+
+  /**
+   * Render the tag-filter chip row. Each chip is a toggle button;
+   * active chips are visually distinct. The chip filter is AND: a
+   * directive must contain ALL active tags to be visible.
+   */
+  const renderDirectiveTagFilter = () => {
+    const union = computeTagUnion();
+    if (union.length === 0) {
+      dom.directivesTagFilter.hidden = true;
+      dom.directivesTagFilter.innerHTML = '';
+      return;
+    }
+    dom.directivesTagFilter.hidden = false;
+    dom.directivesTagFilter.innerHTML = '';
+
+    const label = dom.directivesTagFilter.querySelector('.label-hint');
+    if (label) dom.directivesTagFilter.appendChild(label);
+
+    union.forEach(([tag, count]) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'directive-tag-chip';
+      const active = state.directiveTagFilter.includes(tag);
+      if (active) chip.classList.add('is-active');
+      chip.setAttribute('aria-pressed', active ? 'true' : 'false');
+      chip.setAttribute('aria-label', `Toggle filter by tag ${tag} (${count} directive${count === 1 ? '' : 's'})`);
+      chip.textContent = `#${tag} (${count})`;
+      chip.addEventListener('click', () => {
+        if (state.directiveTagFilter.includes(tag)) {
+          state.directiveTagFilter = state.directiveTagFilter.filter((t) => t !== tag);
+        } else {
+          state.directiveTagFilter = state.directiveTagFilter.concat([tag]);
+        }
+        renderDirectiveTagFilter();
+        renderDirectivesManagerList();
+      });
+      dom.directivesTagFilter.appendChild(chip);
+    });
+  };
+
+  const renderDirectivesManagerList = () => {
+    const term = (state.directiveManagerSearch || '').trim().toLowerCase();
+    const sort = state.directiveManagerSort || 'newest';
+    const activeTags = state.directiveTagFilter || [];
+
+    const filtered = state.directives
+      .filter((d) => {
+        // Text search: name OR any tag contains the term
+        if (term) {
+          const nameMatch = (d.name || '').toLowerCase().includes(term);
+          const tagMatch = (d.tags || []).some((t) => (t || '').toLowerCase().includes(term));
+          if (!nameMatch && !tagMatch) return false;
+        }
+        // Tag filter: must contain ALL active tags
+        if (activeTags.length > 0) {
+          const dTags = new Set((d.tags || []).map((t) => (t || '').toLowerCase()));
+          for (const t of activeTags) {
+            if (!dTags.has(t)) return false;
+          }
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        if (sort === 'oldest') {
+          return new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime();
+        }
+        if (sort === 'most-used') {
+          const ua = a.usage_count || 0;
+          const ub = b.usage_count || 0;
+          if (ub !== ua) return ub - ua;
+          return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+        }
+        if (sort === 'name') {
+          return (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase());
+        }
+        // 'newest' default
+        return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+      });
+
+    renderDirectiveTagFilter();
+
+    dom.directivesManagerList.innerHTML = '';
+
+    if (state.directives.length === 0) {
+      dom.directivesManagerStatus.textContent = 'No saved directives yet. Type a directive in the box above and click "Save directive…".';
+      dom.directivesManagerStatus.hidden = false;
+      dom.directivesManagerList.hidden = true;
+      return;
+    }
+    if (filtered.length === 0) {
+      dom.directivesManagerStatus.textContent = `No directives match the current filters.`;
+      dom.directivesManagerStatus.hidden = false;
+      dom.directivesManagerList.hidden = true;
+      return;
+    }
+
+    dom.directivesManagerStatus.hidden = true;
+    dom.directivesManagerList.hidden = false;
+
+    filtered.forEach((d) => {
+      dom.directivesManagerList.appendChild(buildDirectiveManagerItem(d));
+    });
+  };
+
+  const buildDirectiveManagerItem = (d) => {
+    const li = document.createElement('li');
+    li.className = 'directive-manager-item';
+    li.dataset.directiveId = d.id;
+
+    const main = document.createElement('div');
+    main.className = 'directive-manager-item__main';
+
+    const name = document.createElement('div');
+    name.className = 'directive-manager-item__name';
+    name.textContent = d.name;
+    main.appendChild(name);
+
+    const preview = document.createElement('div');
+    preview.className = 'directive-manager-item__preview';
+    preview.textContent = d.content;
+    main.appendChild(preview);
+
+    const meta = document.createElement('div');
+    meta.className = 'directive-manager-item__meta';
+    if (Array.isArray(d.tags) && d.tags.length > 0) {
+      const tagsWrap = document.createElement('span');
+      tagsWrap.className = 'directive-manager-item__tags';
+      d.tags.forEach((t) => {
+        const tagEl = document.createElement('span');
+        tagEl.className = 'directive-tag-chip directive-tag-chip--readonly';
+        tagEl.textContent = `#${t}`;
+        tagsWrap.appendChild(tagEl);
+      });
+      meta.appendChild(tagsWrap);
+    }
+    const usage = document.createElement('span');
+    const uses = d.usage_count || 0;
+    usage.textContent = uses === 1 ? '1 use' : `${uses} uses`;
+    meta.appendChild(usage);
+    if (d.last_used_at) {
+      const last = document.createElement('span');
+      last.textContent = `last used ${formatRelativeDate(d.last_used_at)}`;
+      meta.appendChild(last);
+    } else {
+      const last = document.createElement('span');
+      last.textContent = 'never used';
+      meta.appendChild(last);
+    }
+    const versions = document.createElement('span');
+    const vCount = (d.history || []).length;
+    versions.textContent = vCount === 1 ? '1 version' : `${vCount} versions`;
+    meta.appendChild(versions);
+    const created = document.createElement('span');
+    created.textContent = `created ${formatRelativeDate(d.created_at)}`;
+    meta.appendChild(created);
+    main.appendChild(meta);
+
+    li.appendChild(main);
+
+    const actions = document.createElement('div');
+    actions.className = 'directive-manager-item__actions';
+
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'btn-secondary';
+    edit.textContent = 'Edit';
+    edit.setAttribute('aria-label', `Edit directive ${d.name}`);
+    edit.addEventListener('click', () => openEditDirectiveModal(d.id));
+    actions.appendChild(edit);
+
+    const apply = document.createElement('button');
+    apply.type = 'button';
+    apply.className = 'btn-secondary';
+    apply.textContent = 'Apply';
+    apply.setAttribute('aria-label', `Apply directive ${d.name}`);
+    apply.addEventListener('click', () => {
+      state.selectedDirectiveId = d.id;
+      applySelectedDirective();
+    });
+    actions.appendChild(apply);
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn-danger';
+    del.textContent = 'Delete';
+    del.setAttribute('aria-label', `Delete directive ${d.name}`);
+    del.addEventListener('click', () => deleteDirective(d.id, d.name));
+    actions.appendChild(del);
+
+    li.appendChild(actions);
+    return li;
+  };
+
+  const deleteDirective = async (id, name) => {
+    if (!confirm(`Delete saved directive "${name}"? This cannot be undone.`)) return;
+    try {
+      await apiCall(`/api/directives/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      state.directives = state.directives.filter((d) => d.id !== id);
+      if (state.selectedDirectiveId === id) state.selectedDirectiveId = null;
+      renderDirectivesSelect();
+      renderDirectivesManagerList();
+    } catch (e) {
+      showError(`Delete failed: ${e.message}`);
+    }
+  };
+
+  // ─── Edit directive modal ──────────────────────────────────────────
+
+  const openEditDirectiveModal = async (id) => {
+    let directive = state.directives.find((d) => d.id === id);
+    if (!directive) {
+      return showError('That directive no longer exists.');
+    }
+    state.editingDirectiveId = id;
+    dom.editDirectiveNameInput.value = directive.name || '';
+    dom.editDirectiveTagsInput.value = (directive.tags || []).join(', ');
+    dom.editDirectiveContentInput.value = directive.content || '';
+    updateEditDirectiveCounts();
+    renderDirectiveHistory(directive);
+    dom.editDirectiveModal.hidden = false;
+    dom.editDirectiveNameInput.focus();
+
+    // Always re-fetch the latest in case another tab/editor changed it.
+    try {
+      const fresh = await apiCall(`/api/directives/${encodeURIComponent(id)}`);
+      const idx = state.directives.findIndex((d) => d.id === id);
+      if (idx !== -1) state.directives[idx] = fresh;
+      directive = fresh;
+      // Only re-populate if the modal is still open and editing this id.
+      if (!dom.editDirectiveModal.hidden && state.editingDirectiveId === id) {
+        dom.editDirectiveNameInput.value = directive.name || '';
+        dom.editDirectiveTagsInput.value = (directive.tags || []).join(', ');
+        dom.editDirectiveContentInput.value = directive.content || '';
+        updateEditDirectiveCounts();
+        renderDirectiveHistory(directive);
+      }
+    } catch (e) {
+      // Non-fatal — we already populated from local state.
+      console.warn('Failed to refresh directive in edit modal:', e.message);
+    }
+  };
+
+  const closeEditDirectiveModal = () => {
+    dom.editDirectiveModal.hidden = true;
+    state.editingDirectiveId = null;
+  };
+
+  const updateEditDirectiveCounts = () => {
+    if (dom.editDirectiveNameCount) {
+      dom.editDirectiveNameCount.textContent = `${dom.editDirectiveNameInput.value.length} / 60`;
+    }
+    if (dom.editDirectiveContentCount) {
+      dom.editDirectiveContentCount.textContent = `${dom.editDirectiveContentInput.value.length} / 1000`;
+    }
+  };
+
+  const renderDirectiveHistory = (directive) => {
+    dom.directiveHistoryList.innerHTML = '';
+    const history = Array.isArray(directive.history) ? directive.history : [];
+    if (history.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'directive-history-item directive-history-item--empty';
+      empty.textContent = 'No history yet.';
+      dom.directiveHistoryList.appendChild(empty);
+      return;
+    }
+    // Newest first for display, with current version marked.
+    const sorted = history.slice().sort((a, b) => b.version - a.version);
+    const latestVersion = Math.max(...history.map((h) => h.version));
+    sorted.forEach((h) => {
+      const li = document.createElement('li');
+      li.className = 'directive-history-item';
+      if (h.version === latestVersion) {
+        li.classList.add('is-current');
+      }
+
+      const versionLabel = document.createElement('span');
+      versionLabel.className = 'directive-history-item__version';
+      versionLabel.textContent = `v${h.version}${h.version === latestVersion ? ' (current)' : ''}`;
+      li.appendChild(versionLabel);
+
+      const when = document.createElement('span');
+      when.className = 'directive-history-item__when';
+      when.textContent = formatRelativeDate(h.saved_at);
+      li.appendChild(when);
+
+      const preview = document.createElement('div');
+      preview.className = 'directive-history-item__preview';
+      preview.textContent = h.content;
+      li.appendChild(preview);
+
+      if (Array.isArray(h.tags) && h.tags.length > 0) {
+        const tagsWrap = document.createElement('div');
+        tagsWrap.className = 'directive-history-item__tags';
+        h.tags.forEach((t) => {
+          const tagEl = document.createElement('span');
+          tagEl.className = 'directive-tag-chip directive-tag-chip--readonly';
+          tagEl.textContent = `#${t}`;
+          tagsWrap.appendChild(tagEl);
+        });
+        li.appendChild(tagsWrap);
+      }
+
+      if (h.version !== latestVersion) {
+        const restore = document.createElement('button');
+        restore.type = 'button';
+        restore.className = 'btn-secondary directive-history-item__restore';
+        restore.textContent = 'Restore';
+        restore.setAttribute('aria-label', `Restore version ${h.version} from ${formatRelativeDate(h.saved_at)}`);
+        restore.addEventListener('click', () => restoreDirectiveVersion(h.version));
+        li.appendChild(restore);
+      }
+
+      dom.directiveHistoryList.appendChild(li);
+    });
+  };
+
+  const restoreDirectiveVersion = async (version) => {
+    const id = state.editingDirectiveId;
+    if (!id) return;
+    if (!confirm(`Restore version ${version}? The current values will be saved as a new version before the rollback takes effect.`)) return;
+    try {
+      const updated = await apiCall(`/api/directives/${encodeURIComponent(id)}/restore/${encodeURIComponent(version)}`, { method: 'POST' });
+      const idx = state.directives.findIndex((d) => d.id === id);
+      if (idx !== -1) state.directives[idx] = updated;
+      dom.editDirectiveNameInput.value = updated.name || '';
+      dom.editDirectiveTagsInput.value = (updated.tags || []).join(', ');
+      dom.editDirectiveContentInput.value = updated.content || '';
+      updateEditDirectiveCounts();
+      renderDirectiveHistory(updated);
+      renderDirectivesSelect();
+      hideError();
+    } catch (e) {
+      showError(`Restore failed: ${e.message}`);
+    }
+  };
+
+  const submitEditDirective = async () => {
+    const id = state.editingDirectiveId;
+    if (!id) return;
+    const name = dom.editDirectiveNameInput.value.trim();
+    const content = dom.editDirectiveContentInput.value;
+    if (!name) return showError('Name is required.');
+    if (!content.trim()) return showError('Content is required.');
+    if (name.length > 60) return showError('Name must be 60 characters or fewer.');
+    if (content.length > 1000) return showError('Content must be 1000 characters or fewer.');
+
+    const tags = clientNormalizeTagsInput(dom.editDirectiveTagsInput.value);
+
+    try {
+      const updated = await apiCall(`/api/directives/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, content, tags })
+      });
+      const idx = state.directives.findIndex((d) => d.id === id);
+      if (idx !== -1) state.directives[idx] = updated;
+      renderDirectivesSelect();
+      closeEditDirectiveModal();
+      hideError();
+    } catch (e) {
+      showError(`Save failed: ${e.message}`);
+    }
+  };
+
+  const deleteDirectiveFromEdit = async () => {
+    const id = state.editingDirectiveId;
+    if (!id) return;
+    const directive = state.directives.find((d) => d.id === id);
+    if (!directive) return;
+    await deleteDirective(id, directive.name);
+    if (!dom.directivesManagerModal.hidden) {
+      // Manager is still showing the deleted row; refresh.
+      renderDirectivesManagerList();
+    }
+    closeEditDirectiveModal();
+  };
+
+  // ─── Import / Export ──────────────────────────────────────────────
+
+  const exportDirectives = async () => {
+    try {
+      const res = await fetch('/api/directives/export/all');
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error((data && data.error) || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'directives.i2p.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      hideError();
+    } catch (e) {
+      showError(`Export failed: ${e.message}`);
+    }
+  };
+
+  const importDirectivesFromFile = async (file) => {
+    if (!file) return;
+    let envelope;
+    try {
+      const text = await file.text();
+      envelope = JSON.parse(text);
+    } catch (e) {
+      return showError('Import failed: file is not valid JSON.');
+    }
+    try {
+      const result = await apiCall('/api/directives/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(envelope)
+      });
+      // Refresh from server to get canonical state (fresh ids, etc).
+      state.directives = await apiCall('/api/directives');
+      renderDirectivesSelect();
+      renderDirectivesManagerList();
+      hideError();
+      showError(`Imported ${result.imported} directive${result.imported === 1 ? '' : 's'} (${result.total} total).`);
+    } catch (e) {
+      showError(`Import failed: ${e.message}`);
+    }
+  };
+
+  // ─── Wire up directives controls ──────────────────────────────────
+
+  dom.directivesManageBtn.addEventListener('click', openDirectivesManagerModal);
+  dom.directivesManagerModalClose.addEventListener('click', closeDirectivesManagerModal);
+  dom.directivesManagerCancel.addEventListener('click', closeDirectivesManagerModal);
+  dom.directivesManagerSearch.addEventListener('input', (e) => {
+    state.directiveManagerSearch = e.target.value;
+    renderDirectivesManagerList();
+  });
+  document.querySelectorAll('input[name="directive-sort"]').forEach((r) => {
+    r.addEventListener('change', (e) => {
+      state.directiveManagerSort = e.target.value;
+      renderDirectivesManagerList();
+    });
+  });
+  dom.directivesExportBtn.addEventListener('click', exportDirectives);
+  dom.directivesImportBtn.addEventListener('click', () => dom.directivesImportInput.click());
+  dom.directivesImportInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    importDirectivesFromFile(file);
+    e.target.value = '';
+  });
+
+  dom.editDirectiveModalClose.addEventListener('click', closeEditDirectiveModal);
+  dom.editDirectiveCancel.addEventListener('click', closeEditDirectiveModal);
+  dom.editDirectiveForm.addEventListener('submit', (e) => { e.preventDefault(); submitEditDirective(); });
+  dom.editDirectiveNameInput.addEventListener('input', updateEditDirectiveCounts);
+  dom.editDirectiveContentInput.addEventListener('input', updateEditDirectiveCounts);
+  dom.editDirectiveDelete.addEventListener('click', deleteDirectiveFromEdit);
+
+  // ─── Global keyboard handler — Esc closes any open modal ────────────
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!dom.saveDirectiveModal.hidden) {
+      e.preventDefault();
+      closeSaveDirectiveModal();
+    } else if (!dom.directivesManagerModal.hidden) {
+      e.preventDefault();
+      closeDirectivesManagerModal();
+    } else if (!dom.editDirectiveModal.hidden) {
+      e.preventDefault();
+      closeEditDirectiveModal();
+    } else if (!dom.savePaletteModal.hidden) {
+      e.preventDefault();
+      closeSavePaletteModal();
+    } else if (!dom.paletteManagerModal.hidden) {
+      e.preventDefault();
+      closePaletteManagerModal();
+    } else if (!dom.subjectPromptModal.hidden) {
+      e.preventDefault();
+      closeSubjectPromptModal();
+    } else if (!dom.presetModal.hidden) {
+      e.preventDefault();
+      closePresetModal();
+    } else if (state.chatIsSending) {
+      // Cancel-friendly UX: Esc while sending is a no-op (the user
+      // can't cancel an in-flight LLM call, but we don't want them
+      // to lose focus from the input by accident).
+      e.preventDefault();
+    }
+  });
+
+  // ─── Post-generation chat console (ADR 0011) ─────────────────────────
+
+  /**
+   * Hide + clear the chat console. Called when the user clears the
+   * image or switches preset (the chat is anchored to a specific
+   * generated prompt, so it loses its anchor when the inputs change).
+   * Does NOT delete the persisted session on disk — the user can
+   * resume it from the "Conversation" selector on the next run.
+   */
+  const resetChatConsole = () => {
+    state.chatSessionId = null;
+    if (dom.stepChat) dom.stepChat.hidden = true;
+    if (dom.chatMessages) dom.chatMessages.innerHTML = '';
+    if (dom.chatInput) {
+      dom.chatInput.value = '';
+      updateChatInputCount();
+    }
+    if (dom.chatFormStatus) {
+      dom.chatFormStatus.textContent = '';
+      dom.chatFormStatus.classList.remove('is-error');
+    }
+    if (dom.chatSessionStatus) {
+      dom.chatSessionStatus.hidden = true;
+      dom.chatSessionStatus.textContent = '';
+    }
+    updateChatSendButton();
+  };
+
+  /**
+   * Mirror of `formatRelativeDate` from the palette manager (ADR 0006)
+   * — duplicated here so the chat console stays self-contained. Used
+   * for inline message timestamps ("3m ago") alongside the absolute
+   * timestamp on hover.
+   */
+  const formatChatRelative = (iso) => {
+    if (!iso) return '';
+    const then = new Date(iso).getTime();
+    if (Number.isNaN(then)) return '';
+    const diffMs = Date.now() - then;
+    if (diffMs < 0) return 'just now';
+    const sec = Math.round(diffMs / 1000);
+    if (sec < 5) return 'just now';
+    if (sec < 60) return `${sec}s ago`;
+    const min = Math.round(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.round(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const day = Math.round(hr / 24);
+    return `${day}d ago`;
+  };
+
+  /**
+   * Render the chat-message thread into the scrollable history panel.
+   * Append-only render — re-rendering the whole list is cheap enough
+   * that we don't need a virtual list at the 200-message cap.
+   */
+  const renderChatMessages = (session) => {
+    if (!dom.chatMessages) return;
+    dom.chatMessages.innerHTML = '';
+    const messages = Array.isArray(session?.messages) ? session.messages : [];
+
+    if (messages.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'chat-empty';
+      empty.textContent = 'No messages yet. Ask for a tweak, refinement, expansion, or rewrite of any section.';
+      dom.chatMessages.appendChild(empty);
+      return;
+    }
+
+    const frag = document.createDocumentFragment();
+    messages.forEach((m) => frag.appendChild(buildChatMessageNode(m)));
+    dom.chatMessages.appendChild(frag);
+    // Scroll to bottom so the newest message is visible after a send.
+    dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
+  };
+
+  /**
+   * Build one chat-message DOM node. User vs assistant styling comes
+   * from a `chat-message--{role}` modifier class. Assistant messages
+   * with a non-null `suggested_prompt` get an Apply button; the button
+   * is disabled if `current_prompt` already matches `suggested_prompt`
+   * (prevents double-applies and gives the user a clear "applied"
+   * signal).
+   */
+  const buildChatMessageNode = (m) => {
+    const node = document.createElement('article');
+    node.className = `chat-message chat-message--${m.role === 'assistant' ? 'assistant' : 'user'}`;
+    node.dataset.messageId = m.id || '';
+
+    const header = document.createElement('div');
+    header.className = 'chat-message__header';
+
+    const role = document.createElement('span');
+    role.className = 'chat-message__role';
+    role.textContent = m.role === 'assistant' ? 'Assistant' : 'You';
+    header.appendChild(role);
+
+    const time = document.createElement('time');
+    time.className = 'chat-message__time';
+    time.dateTime = m.timestamp || '';
+    time.textContent = formatChatRelative(m.timestamp);
+    time.setAttribute('title', m.timestamp || '');
+    header.appendChild(time);
+
+    node.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'chat-message__content';
+    body.textContent = m.content || '';
+    node.appendChild(body);
+
+    if (m.role === 'assistant' && typeof m.suggested_prompt === 'string' && m.suggested_prompt.length > 0) {
+      const previewLabel = document.createElement('div');
+      previewLabel.className = 'chat-message__preview-label';
+      previewLabel.textContent = 'Proposed revision — click Apply to use it';
+      node.appendChild(previewLabel);
+
+      const preview = document.createElement('pre');
+      preview.className = 'chat-message__preview';
+      preview.textContent = m.suggested_prompt;
+      node.appendChild(preview);
+
+      const actions = document.createElement('div');
+      actions.className = 'chat-message__actions';
+
+      const apply = document.createElement('button');
+      apply.type = 'button';
+      apply.className = 'chat-message__apply';
+      apply.textContent = 'Apply revision';
+      apply.setAttribute('aria-label', 'Apply this revision to the generated prompt');
+      apply.dataset.messageId = m.id || '';
+      apply.addEventListener('click', () => applyChatRevision(m.id, m.suggested_prompt));
+      actions.appendChild(apply);
+
+      // Mark already-applied revisions so the user can tell at a glance.
+      const activeSession = state.chatSessions.find((s) => s.id === state.chatSessionId);
+      if (activeSession && activeSession.current_prompt === m.suggested_prompt) {
+        apply.disabled = true;
+        apply.textContent = 'Applied';
+        const note = document.createElement('span');
+        note.className = 'chat-message__applied';
+        note.textContent = 'This revision is the current working prompt.';
+        actions.appendChild(note);
+      }
+
+      node.appendChild(actions);
+    }
+
+    return node;
+  };
+
+  /**
+   * Live-updated char count for the chat input. Mirrors the
+   * directives-input counter pattern. Soft-warns at the cap so the
+   * user sees they're approaching the limit without being blocked
+   * before they hit it.
+   */
+  const updateChatInputCount = () => {
+    if (!dom.chatInput || !dom.chatInputCount) return;
+    dom.chatInputCount.textContent = `${dom.chatInput.value.length} / 2000`;
+  };
+
+  /**
+   * Disable the Send button while a request is in flight, and while
+   * there's no active session or no message text. Mirrors
+   * `updateDirectivesActions`.
+   */
+  const updateChatSendButton = () => {
+    if (!dom.chatSendBtn) return;
+    const hasSession = !!state.chatSessionId;
+    const hasText = !!(dom.chatInput && dom.chatInput.value && dom.chatInput.value.trim().length > 0);
+    dom.chatSendBtn.disabled = state.chatIsSending || !hasSession || !hasText;
+  };
+
+  /**
+   * Fetch all chat sessions from the server and refresh the
+   * conversation selector. Newest-first ordering is enforced by the
+   * server (`GET /api/chat/sessions`). A 404 from an older server
+   * build is treated like the palette/directive 404s — log a warning
+   * and render the chat as disabled rather than breaking the app.
+   */
+  const loadChatSessions = async () => {
+    try {
+      const res = await fetch('/api/chat/sessions');
+      if (res.status === 404) {
+        console.warn(
+          '[chat] GET /api/chat/sessions returned 404 — server is running an older ' +
+          'build without chat routes. Restart the server (npm start) to enable chat.'
+        );
+        state.chatSessions = [];
+        renderChatSessionSelect();
+        return;
+      }
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data || !data.success) {
+        throw new Error((data && data.error) || `HTTP ${res.status}`);
+      }
+      state.chatSessions = Array.isArray(data.data) ? data.data : [];
+      renderChatSessionSelect();
+    } catch (e) {
+      console.warn('Failed to load chat sessions:', e.message);
+      state.chatSessions = [];
+      renderChatSessionSelect();
+    }
+  };
+
+  /**
+   * Repaint the conversation `<select>` from `state.chatSessions`.
+   * Preserves the current selection if the session still exists.
+   */
+  const renderChatSessionSelect = () => {
+    if (!dom.chatSessionSelect) return;
+    const previous = state.chatSessionId || '';
+    dom.chatSessionSelect.innerHTML = '';
+
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = state.chatSessions.length === 0
+      ? '— No conversations yet —'
+      : '— This prompt\'s conversation —';
+    dom.chatSessionSelect.appendChild(placeholder);
+
+    state.chatSessions.forEach((s) => {
+      const opt = document.createElement('option');
+      opt.value = s.id;
+      const label = s.title || 'Untitled conversation';
+      const ts = formatChatRelative(s.updated_at || s.created_at);
+      opt.textContent = `${label} — ${ts}`;
+      dom.chatSessionSelect.appendChild(opt);
+    });
+
+    if (previous && state.chatSessions.some((s) => s.id === previous)) {
+      dom.chatSessionSelect.value = previous;
+    } else {
+      state.chatSessionId = null;
+    }
+
+    if (dom.chatSessionDeleteBtn) {
+      dom.chatSessionDeleteBtn.disabled = !state.chatSessionId;
+    }
+    updateChatSendButton();
+  };
+
+  /**
+   * Called from `displayResult` after Stage 2 returns. Creates a fresh
+   * chat session on the server, anchors the chat console to it, and
+   * shows the section. The console is hidden until this resolves so a
+   * slow network doesn't flash an empty history before the session is
+   * live.
+   */
+  const activateChatForResult = async (data) => {
+    const promptText = (data && typeof data.prompt === 'string') ? data.prompt : '';
+    if (!promptText.trim()) return;
+
+    const presetId = state.selectedPresetId;
+    if (!presetId) {
+      // No preset selected — shouldn't happen because the Generate
+      // button is disabled until a preset is picked, but guard anyway.
+      return;
+    }
+
+    const preset = state.presets.find((p) => p.id === presetId);
+    const body = {
+      prompt: promptText,
+      preset_id: presetId,
+      preset_name: preset?.name || data.preset_name || '',
+      run_id: state.currentRunId || null,
+      analysis_snapshot: state.currentAnalysis && typeof state.currentAnalysis === 'object'
+        ? state.currentAnalysis
+        : null
+    };
+
+    let session;
+    try {
+      session = await apiCall('/api/chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } catch (e) {
+      console.warn('Could not start chat session:', e.message);
+      showError(`Chat console unavailable: ${e.message}`);
+      return;
+    }
+
+    state.chatSessionId = session.id;
+    state.chatSessions = [session].concat(
+      state.chatSessions.filter((s) => s.id !== session.id)
+    );
+    renderChatSessionSelect();
+    renderChatMessages(session);
+    if (dom.stepChat) dom.stepChat.hidden = false;
+    if (dom.chatSessionStatus) {
+      dom.chatSessionStatus.hidden = false;
+      dom.chatSessionStatus.textContent = `Session "${session.title}" — ask for any change to refine the prompt.`;
+    }
+    if (dom.chatSessionDeleteBtn) {
+      dom.chatSessionDeleteBtn.disabled = false;
+    }
+    updateChatSendButton();
+    if (dom.chatInput) dom.chatInput.focus();
+  };
+
+  /**
+   * Map a server-side error string to a user-friendly chat-form
+   * status. The server emits very specific error text (e.g. "Chat
+   * reply missing non-empty 'reply' string") that's useful for
+   * debugging but unintelligible to end users. The mapper short-
+   * circuits specific known strings and falls back to a generic
+   * "couldn't reach the chat service" for everything else.
+   */
+  const friendlyChatError = (rawError) => {
+    if (!rawError || typeof rawError !== 'string') return 'The chat service is having trouble. Please try again.';
+    // Network / generic 5xx patterns from apiCall.
+    if (/failed to fetch|networkerror|load failed/i.test(rawError)) {
+      return 'Couldn\'t reach the chat service. Check your connection and try again.';
+    }
+    if (/429|rate limit/i.test(rawError)) {
+      return 'The chat service is busy right now. Please wait a moment and try again.';
+    }
+    if (/401|403|authentication/i.test(rawError)) {
+      return 'The chat service rejected the request. Please contact the operator.';
+    }
+    if (/timeout|timed out/i.test(rawError)) {
+      return 'The chat service took too long to respond. Please try again.';
+    }
+    if (/M3|minimax/i.test(rawError)) {
+      return 'The chat service returned an error. Please try again — your message was not sent.';
+    }
+    // Generic fallback — preserve the raw text but lead with a friendly
+    // note so the user understands it's a transient failure.
+    return `The chat service had trouble responding. Please try again. (${rawError.substring(0, 120)})`;
+  };
+
+  /**
+   * Send handler. Validates locally first (server re-validates), then
+   * POSTs the user message. The full updated session comes back from
+   * the server with the assistant's reply appended.
+   *
+   * Robustness (post-investigation 2026-06-23):
+   *  - On error, the user's text is preserved in `dom.chatInput` so
+   *    they can retry without retyping.
+   *  - The displayed error is mapped through `friendlyChatError` so
+   *    raw model-output parsing strings ("missing 'reply' string")
+   *    never reach the user.
+   *  - A retry button is shown after a transient failure so the user
+   *    doesn't have to click Send again.
+   */
+  const submitChatMessage = async (e) => {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (state.chatIsSending) return;
+    if (!state.chatSessionId) {
+      setChatFormStatus('No active conversation — generate a prompt first.', true);
+      return;
+    }
+    const text = (dom.chatInput.value || '').trim();
+    if (text.length === 0) {
+      setChatFormStatus('Message cannot be empty.', true);
+      return;
+    }
+    if (text.length > 2000) {
+      setChatFormStatus('Message must be 2000 characters or fewer.', true);
+      return;
+    }
+
+    state.chatIsSending = true;
+    setButtonLoading(dom.chatSendBtn, true, 'Sending…');
+    setChatFormStatus('Sending…', false);
+
+    // Track success OUTSIDE the try so the input-clear can run on
+    // confirmed success only. Preserves the user's text across
+    // transient failures so they can retry without retyping.
+    let sendSucceeded = false;
+    try {
+      const updated = await apiCall(`/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: text })
+      });
+      // Splice the updated session into state.chatSessions in place so
+      // the conversation selector reflects the new updated_at.
+      const idx = state.chatSessions.findIndex((s) => s.id === updated.id);
+      if (idx !== -1) state.chatSessions[idx] = updated;
+      else state.chatSessions.unshift(updated);
+      // Resort so newest is at the top.
+      state.chatSessions.sort((a, b) => {
+        const at = new Date(a.updated_at || a.created_at || 0).getTime();
+        const bt = new Date(b.updated_at || b.created_at || 0).getTime();
+        return bt - at;
+      });
+      renderChatSessionSelect();
+      renderChatMessages(updated);
+      sendSucceeded = true;
+    } catch (err) {
+      // Keep the user's text in the input so they can retry without
+      // retyping. Show a friendly error + a retry button.
+      const friendly = friendlyChatError(err.message);
+      setChatFormStatus(friendly + ' ', true);
+      showChatRetryButton(text);
+    } finally {
+      state.chatIsSending = false;
+      setButtonLoading(dom.chatSendBtn, false, 'Send');
+      // Input clear runs ONLY on confirmed success (post-investigation
+      // 2026-06-23). On failure the user's text is preserved so they
+      // can retry without retyping.
+      if (sendSucceeded) {
+        dom.chatInput.value = '';
+        updateChatInputCount();
+        setChatFormStatus('', false);
+      }
+      updateChatSendButton();
+    }
+  };
+
+  /**
+   * Inject (or refresh) a "Retry" button next to the chat status line.
+   * Clicking it re-submits the same message text — handy when the
+   * network blipped or the LLM flapped.
+   *
+   * Idempotent: removes any existing retry button before adding a new
+   * one so a second failure doesn't accumulate buttons.
+   */
+  const showChatRetryButton = (text) => {
+    if (!dom.chatFormStatus) return;
+    // Remove any previous retry button (no duplicates).
+    const existing = dom.chatFormStatus.parentNode?.querySelector('.chat-form-retry');
+    if (existing) existing.remove();
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chat-form-retry btn-secondary';
+    btn.textContent = 'Retry';
+    btn.setAttribute('aria-label', 'Retry sending the last message');
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      btn.remove();
+      // Reset status text before re-sending so the new attempt starts
+      // with a clean status line.
+      setChatFormStatus('', false);
+      submitChatMessage();
+    });
+    if (dom.chatFormStatus.parentNode) {
+      dom.chatFormStatus.parentNode.insertBefore(btn, dom.chatFormStatus.nextSibling);
+    }
+  };
+
+  /**
+   * Apply handler. POSTs to the apply endpoint, then updates the live
+   * result prompt text (Step 4) and the session's current_prompt on
+   * the client. The result prompt is what the user copies out, so it
+   * must reflect the latest applied revision without a refresh.
+   */
+  const applyChatRevision = async (messageId, suggestedPrompt) => {
+    if (!state.chatSessionId || !messageId) return;
+    try {
+      const updated = await apiCall(`/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}/apply/${encodeURIComponent(messageId)}`, {
+        method: 'POST'
+      });
+      // Update the live result prompt text. This is the user-visible
+      // "working prompt" — Step 4's <p id="result-prompt">. Apply
+      // doesn't regenerate through Stage 2; the chat revision IS the
+      // new prompt the user wants to copy.
+      dom.resultPrompt.textContent = updated.current_prompt;
+      // Splice the updated session into local state.
+      const idx = state.chatSessions.findIndex((s) => s.id === updated.id);
+      if (idx !== -1) state.chatSessions[idx] = updated;
+      else state.chatSessions.unshift(updated);
+      renderChatMessages(updated);
+      setChatFormStatus('Applied revision to the prompt.', false);
+    } catch (err) {
+      setChatFormStatus(err.message || 'Apply failed.', true);
+    }
+  };
+
+  /**
+   * Delete the active session. Confirmation prompt prevents accidental
+   * loss of long threads. After deletion, the console is hidden (no
+   * session to attach to); the result prompt stays as it was last
+   * applied.
+   */
+  const deleteChatSession = async () => {
+    if (!state.chatSessionId) return;
+    if (!confirm('Delete this conversation? The message history will be lost; the current prompt text will be kept.')) return;
+    const id = state.chatSessionId;
+    try {
+      await apiCall(`/api/chat/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      state.chatSessions = state.chatSessions.filter((s) => s.id !== id);
+      resetChatConsole();
+      renderChatSessionSelect();
+      setChatFormStatus('Conversation deleted.', false);
+    } catch (err) {
+      setChatFormStatus(err.message || 'Delete failed.', true);
+    }
+  };
+
+  /**
+   * Switch to a different saved conversation from the dropdown. Loads
+   * the full session (already in state.chatSessions since the list
+   * GET includes messages) and repaints the thread. Doesn't change
+   * the live result prompt — that's bound to the active generation,
+   * not the chat history.
+   */
+  const selectChatSession = (id) => {
+    if (!id) {
+      state.chatSessionId = null;
+      if (dom.chatMessages) dom.chatMessages.innerHTML = '';
+      if (dom.chatSessionStatus) {
+        dom.chatSessionStatus.hidden = true;
+        dom.chatSessionStatus.textContent = '';
+      }
+      if (dom.chatSessionDeleteBtn) dom.chatSessionDeleteBtn.disabled = true;
+      updateChatSendButton();
+      return;
+    }
+    const session = state.chatSessions.find((s) => s.id === id);
+    if (!session) return;
+    state.chatSessionId = id;
+    renderChatMessages(session);
+    if (dom.stepChat) dom.stepChat.hidden = false;
+    if (dom.chatSessionStatus) {
+      dom.chatSessionStatus.hidden = false;
+      dom.chatSessionStatus.textContent = `Session "${session.title}" — ${session.messages.length} message${session.messages.length === 1 ? '' : 's'}.`;
+    }
+    if (dom.chatSessionDeleteBtn) dom.chatSessionDeleteBtn.disabled = false;
+    updateChatSendButton();
+  };
+
+  /**
+   * Update the inline status line under the chat input. `isError`
+   * toggles the red styling; an empty message clears the line
+   * entirely.
+   */
+  const setChatFormStatus = (text, isError) => {
+    if (!dom.chatFormStatus) return;
+    dom.chatFormStatus.textContent = text || '';
+    dom.chatFormStatus.classList.toggle('is-error', !!isError);
+  };
+
+  // ─── Wire up chat console controls ──────────────────────────────────
+
+  if (dom.chatForm) {
+    dom.chatForm.addEventListener('submit', submitChatMessage);
+  }
+  if (dom.chatInput) {
+    dom.chatInput.addEventListener('input', () => {
+      updateChatInputCount();
+      updateChatSendButton();
+    });
+  }
+  if (dom.chatSessionSelect) {
+    dom.chatSessionSelect.addEventListener('change', (e) => {
+      selectChatSession(e.target.value || null);
+    });
+  }
+  if (dom.chatSessionDeleteBtn) {
+    dom.chatSessionDeleteBtn.addEventListener('click', deleteChatSession);
+  }
+
+// ─── Initialize ────────────────────────────────────────────────────────
 
   const init = async () => {
     // Load field palette
@@ -663,6 +2957,11 @@
     }
 
     await loadPresets();
+    await loadPalettes();
+    await loadDirectives();
+    await loadChatSessions();
+    updateDirectivesActions();
+    updateChatInputCount();
     updateButtons();
   };
 
