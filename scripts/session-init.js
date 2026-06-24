@@ -47,7 +47,7 @@ const README = path.join(PROJECT_ROOT, 'README.md');
 const PRESETS_FILE = path.join(PROJECT_ROOT, 'data', 'presets.json');
 const UPLOADS_DIR = path.join(PROJECT_ROOT, 'uploads');
 const PACKAGE_JSON = path.join(PROJECT_ROOT, 'package.json');
-const CLAUDE_MD = path.join(PROJECT_ROOT, 'CLAUDE.md');
+const AGENT_MD = path.join(PROJECT_ROOT, 'AGENTS.md');
 
 const STARTED_AT = new Date().toISOString();
 const SESSION_ID = `sess_${STARTED_AT.replace(/[:.]/g, '-')}_${crypto.randomBytes(3).toString('hex')}`;
@@ -106,7 +106,7 @@ function scanVersionControl() {
     return {
       available: false,
       status: 'not-a-git-repo',
-      drift_signal: 'CRITICAL: CLAUDE.md references GitHub Issues via `gh`, but project is not under git version control. All change tracking and `#N` commit references are impossible.',
+      drift_signal: 'CRITICAL: AGENTS.md references GitHub Issues via `gh`, but project is not under git version control. All change tracking and `#N` commit references are impossible.',
       last_commit: null,
       branch: null,
       uncommitted_changes: null
@@ -473,7 +473,7 @@ function normalizeStatus(raw) {
 function unifyState(scanners) {
   const issues = [];
 
-  // Critical: no git repo (but CLAUDE.md claims to use GitHub Issues)
+  // Critical: no git repo (but AGENTS.md claims to use GitHub Issues)
   if (scanners.version_control.status === 'not-a-git-repo') {
     issues.push({
       severity: 'critical',
@@ -636,20 +636,20 @@ function runValidationChecks(scanners, unified) {
     detail: highDrifts.length === 0 ? 'No high-severity drift' : `${highDrifts.length} high-severity drift(s)`
   });
 
-  // V6: CLAUDE.md references docs that exist
-  const claudeText = readText(CLAUDE_MD) || '';
+  // V6: AGENTS.md references docs that exist
+  const agentText = readText(AGENT_MD) || '';
   const referencedDocs = [];
   const refRegex = /docs\/agents\/([\w-]+\.md)/g;
   let m;
-  while ((m = refRegex.exec(claudeText)) !== null) referencedDocs.push(m[1]);
+  while ((m = refRegex.exec(agentText)) !== null) referencedDocs.push(m[1]);
   const missingRefs = referencedDocs.filter(d =>
     !fileExists(path.join(AGENT_DOCS_DIR, d))
   );
   checks.push({
-    id: 'V6-claude-md-refs-resolve',
+    id: 'V6-agents-md-refs-resolve',
     pass: missingRefs.length === 0,
     detail: missingRefs.length === 0
-      ? `All ${referencedDocs.length} CLAUDE.md refs resolve`
+      ? `All ${referencedDocs.length} AGENTS.md refs resolve`
       : `Missing: ${missingRefs.join(', ')}`
   });
 
@@ -662,7 +662,7 @@ function runValidationChecks(scanners, unified) {
 
   // V8: ADR log present if any code references it
   const hasAdrRefs = /docs\/adr\//.test(readText(README) || '') ||
-                     /docs\/adr\//.test(readText(CLAUDE_MD) || '');
+                     /docs\/adr\//.test(readText(AGENT_MD) || '');
   checks.push({
     id: 'V8-adr-log-present-if-referenced',
     pass: !hasAdrRefs || scanners.adr_log.status === 'ok',

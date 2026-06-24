@@ -21,7 +21,7 @@ validation report and the answer must be 10/10 every single time.
 | V3 | `presets-valid` | `data/presets.json` parses as an array |
 | V4 | `test-script-resolves` | `package.json` `test` script's path exists, OR no `tests/`-path reference |
 | V5 | `no-high-severity-drift` | Zero `high`-severity drifts in scanner 6 output |
-| V6 | `claude-md-refs-resolve` | Every `docs/agents/X.md` referenced from `CLAUDE.md` exists |
+| V6 | `agents-md-refs-resolve` | Every `docs/agents/X.md` referenced from `AGENTS.md` exists |
 | V7 | `no-leftover-uploads` | `uploads/` directory is empty (or absent) |
 | V8 | `adr-log-present-if-referenced` | `docs/adr/` exists iff any doc references it |
 | V9 | `issue-tracker-available` | `gh issue list` returns successfully and the project has a remote |
@@ -137,7 +137,7 @@ Every session that touches the project MUST start with:
 node scripts/session-init.js
 ```
 
-This is enforced socially by including the requirement in `CLAUDE.md`
+This is enforced socially by including the requirement in `AGENTS.md`
 (updated as part of this work) and architecturally by having every other
 operational protocol reference the snapshot at `.opencode/state/session-latest.json`.
 

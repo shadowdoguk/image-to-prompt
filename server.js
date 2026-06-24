@@ -85,6 +85,43 @@ const MAX_CHAT_MESSAGES_PER_SESSION = 200;
 const MAX_CHAT_SESSIONS_TOTAL = 200;
 const CHAT_TITLE_MAX_LENGTH = 80;
 
+// ─── Anchor-preserving chat refinements (ADR 0012) ────────────────
+// Wholesale-rewrite prevention: the validator below scores how much
+// of the current working prompt survives in the assistant's revision.
+// These thresholds were chosen empirically against the paint-spec use
+// case (see ADR 0012 §"Server-side validation") and other real
+// prompts. Short prompts get a more permissive bar because the
+// absolute number of unique content words is small and a 1-word miss
+// swings the ratio.
+const PRESERVATION_MIN_TOKEN_LENGTH = 3;
+const PRESERVATION_SHORT_PROMPT_LENGTH = 200;
+const PRESERVATION_KEYWORD_THRESHOLD_LONG = 0.70;
+const PRESERVATION_KEYWORD_THRESHOLD_SHORT = 0.50;
+const PRESERVATION_BIGRAM_THRESHOLD_LONG = 0.40;
+const PRESERVATION_BIGRAM_THRESHOLD_SHORT = 0.20;
+const PRESERVATION_FAILED_REPLY_NOTE =
+  " (Note: I'd proposed a revision but it would have dropped too much of the original context — paint application, the original values, and the production requirements. Try a more specific request, e.g. \"only change the colors to navy, gold, white; keep everything else exactly as is.\")";
+
+// Common English stop words plus chat noise ("hi", "ok", "thanks"). The
+// validator works on content words only; including these would inflate
+// both sides and mask the real signal.
+const PRESERVATION_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'but', 'by', 'for', 'from',
+  'has', 'have', 'he', 'her', 'his', 'i', 'in', 'is', 'it', 'its', 'me',
+  'my', 'of', 'on', 'or', 'our', 'she', 'so', 'that', 'the', 'their',
+  'them', 'they', 'this', 'to', 'was', 'we', 'were', 'what', 'when',
+  'where', 'which', 'who', 'why', 'will', 'with', 'you', 'your',
+  'hi', 'hey', 'hello', 'ok', 'okay', 'thanks', 'thank', 'please',
+  'just', 'only', 'also', 'can', 'could', 'would', 'should', 'may',
+  'might', 'must', 'shall', 'do', 'does', 'did', 'doing', 'done',
+  'have', 'having', 'had', 'get', 'got', 'getting', 'make', 'made',
+  'making', 'keep', 'kept', 'keeping', 'change', 'changed', 'changes',
+  'changing', 'use', 'used', 'using', 'want', 'wanted', 'wanting',
+  'need', 'needed', 'needing', 'like', 'liked', 'liking', 'now',
+  'then', 'than', 'very', 'really', 'much', 'more', 'less', 'most',
+  'least', 'some', 'any', 'all', 'each', 'every', 'no', 'not', 'yes'
+]);
+
 // Cap on Stage 2 output tokens. Raised from 800 → 960 (+20%) so the
 // final image-generation prompt has room for richer detail without
 // truncating mid-sentence. The LLM is free to use less if the analysis
@@ -2921,6 +2958,149 @@ app.post('/api/directives/import', (req, res) => {
 // Routes — Post-generation chat (ADR 0011)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─── Anchor-preservation helpers (ADR 0012) ────────────────────────
+
+/**
+ * Tokenize a prompt for anchor-preservation analysis. Lowercase,
+ * strip non-alphanumeric characters, drop tokens shorter than
+ * `PRESERVATION_MIN_TOKEN_LENGTH`, drop stop words. Returns a flat
+ * array of content tokens in original order. Used by both the
+ * keyword-retention and bigram-retention passes of
+ * `validatePromptPreservation`.
+ *
+ * Defensive: non-string input returns []. Whitespace-only returns
+ * []. Numbers are kept (hex codes, dimensions, sq-ft, etc. are
+ * content).
+ *
+ * @param {string} text
+ * @returns {string[]}
+ */
+const tokenizeForPreservation = (text) => {
+  if (typeof text !== 'string') return [];
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) =>
+      w.length >= PRESERVATION_MIN_TOKEN_LENGTH &&
+      !PRESERVATION_STOP_WORDS.has(w)
+    );
+};
+
+/**
+ * Extract a Set of bigrams (2-grams) from a tokenized array. Used to
+ * catch multi-word phrases — "interior wall", "eggshell finish",
+ * "low VOC" — that keyword overlap alone would miss when a rewrite
+ * keeps some of the words but reorders or drops the phrase.
+ *
+ * @param {string[]} tokens
+ * @returns {Set<string>}
+ */
+const extractPreservationBigrams = (tokens) => {
+  const out = new Set();
+  for (let i = 0; i < tokens.length - 1; i++) {
+    out.add(`${tokens[i]} ${tokens[i + 1]}`);
+  }
+  return out;
+};
+
+/**
+ * Round a number to 3 decimal places for human-readable ratios in the
+ * structured report. Avoids the noise of floating-point dust
+ * (0.6999999...).
+ */
+const roundPreservationRatio = (n) => Math.round(n * 1000) / 1000;
+
+/**
+ * Score how much of `original` survives in `revised`, with special
+ * consideration for what the user actually asked to change. Returns a
+ * structured report; callers decide what to do based on `preserved`.
+ *
+ * Algorithm (ADR 0012 §"Server-side validation"):
+ *  1. Tokenize both prompts (drop stop words, short tokens).
+ *  2. Compute keyword retention (unique content words in original
+ *     that appear in revised, divided by total unique).
+ *  3. Compute bigram retention (catches multi-word phrases).
+ *  4. Identify user-targeted tokens (tokens in the user's message that
+ *     also appear in the original — these are the parts the user
+ *     is allowed to drop).
+ *  5. Compute non-targeted retention (the headline metric: among
+ *     content words the user did NOT name, what fraction survived).
+ *  6. Pass criteria: nonTargetedRatio and bigramRatio both above
+ *     thresholds (long-prompt vs short-prompt thresholds differ).
+ *
+ * @param {string} original — the current working prompt (text the user is iterating on)
+ * @param {string} revised — the assistant's `suggested_prompt`
+ * @param {string} userRequest — the user's chat message that triggered the revision
+ * @returns {{preserved: boolean, keywordRatio: number, nonTargetedRatio: number, bigramRatio: number, missing: string[], nonTargetedMissing: string[], targetedMissing: string[], reason: string|null}}
+ */
+const validatePromptPreservation = (original, revised, userRequest) => {
+  if (typeof original !== 'string' || typeof revised !== 'string') {
+    return {
+      preserved: true,
+      keywordRatio: 1,
+      nonTargetedRatio: 1,
+      bigramRatio: 1,
+      missing: [],
+      nonTargetedMissing: [],
+      targetedMissing: [],
+      reason: 'invalid_input'
+    };
+  }
+
+  const origTokens = tokenizeForPreservation(original);
+  const revTokens = new Set(tokenizeForPreservation(revised));
+  const userTokens = new Set(tokenizeForPreservation(userRequest || ''));
+
+  const origUnique = Array.from(new Set(origTokens));
+  const missing = origUnique.filter((w) => !revTokens.has(w));
+
+  const keywordRatio = origUnique.length === 0
+    ? 1
+    : (origUnique.length - missing.length) / origUnique.length;
+
+  const origBigrams = extractPreservationBigrams(origTokens);
+  const revBigrams = extractPreservationBigrams(Array.from(revTokens));
+  let bigramMatched = 0;
+  for (const bg of origBigrams) {
+    if (revBigrams.has(bg)) bigramMatched++;
+  }
+  const bigramRatio = origBigrams.size === 0
+    ? 1
+    : bigramMatched / origBigrams.size;
+
+  const nonTargetedMissing = missing.filter((w) => !userTokens.has(w));
+  const targetedMissing = missing.filter((w) => userTokens.has(w));
+  const nonTargetedOrig = origUnique.filter((w) => !userTokens.has(w)).length;
+  const nonTargetedRatio = nonTargetedOrig === 0
+    ? 1
+    : (nonTargetedOrig - nonTargetedMissing.length) / nonTargetedOrig;
+
+  const isLong = original.length > PRESERVATION_SHORT_PROMPT_LENGTH;
+  const keywordThreshold = isLong
+    ? PRESERVATION_KEYWORD_THRESHOLD_LONG
+    : PRESERVATION_KEYWORD_THRESHOLD_SHORT;
+  const bigramThreshold = isLong
+    ? PRESERVATION_BIGRAM_THRESHOLD_LONG
+    : PRESERVATION_BIGRAM_THRESHOLD_SHORT;
+
+  const preserved = nonTargetedRatio >= keywordThreshold &&
+                    bigramRatio >= bigramThreshold;
+
+  return {
+    preserved,
+    keywordRatio: roundPreservationRatio(keywordRatio),
+    nonTargetedRatio: roundPreservationRatio(nonTargetedRatio),
+    bigramRatio: roundPreservationRatio(bigramRatio),
+    missing,
+    nonTargetedMissing,
+    targetedMissing,
+    reason: preserved
+      ? null
+      : (nonTargetedRatio < keywordThreshold ? 'non_targeted_loss' : 'bigram_loss')
+  };
+};
+
 /**
  * Default system prompt shipped for the post-generation chat console.
  * Mirrors the pattern of `DEFAULT_SUBJECT_PROMPT` (ADR 0004) and
@@ -2928,17 +3108,13 @@ app.post('/api/directives/import', (req, res) => {
  * route injects verbatim at runtime, so server restart picks up
  * prompt edits without ceremony.
  *
- * The model is told that:
- *  - the conversation is anchored to the current working prompt and
- *    the analysis snapshot, which are interpolated into the prompt at
- *    every turn;
- *  - it must respond with a JSON object `{ reply, suggested_prompt }`;
- *  - `suggested_prompt` is a string containing the FULL revised prompt
- *    text when the user asked for a revision;
- *  - `suggested_prompt` is an empty string "" when the user asked a
- *    pure question (no revision to apply). The defensive parser in
- *    `extractChatReply` collapses "" to null so the UI shows no
- *    Apply button for question-only replies.
+ * Updated 2026-06-24 (ADR 0012) with the anchor-preservation
+ * contract: the model is told to TREAT the current working prompt as
+ * an EDIT BASE, not a topic to write about, and to identify what the
+ * user asked to change vs what should be preserved before
+ * generating. The companion server-side validator
+ * (`validatePromptPreservation`) catches wholesale rewrites that
+ * slip through and declines them.
  */
 const DEFAULT_CHAT_SYSTEM_PROMPT = `You are a focused prompt-refinement assistant. The user has just generated an image-generation prompt through a two-stage pipeline. Your job is to converse with them about that prompt and propose concrete revisions when they ask for changes.
 
@@ -2953,29 +3129,45 @@ The latest applied revision. Starts equal to the original; advances whenever the
 ## Analysis snapshot
 The structured JSON Stage 1 returned (subject, style, lighting, etc.). Treat this as the source of truth for what facts the prompt is grounded in. Even if the user later edits the live analysis editor, the snapshot preserves the context Stage 2 actually used.
 
+# CORE CONTRACT — EDIT, DO NOT REGENERATE
+
+The current working prompt is an EDIT BASE, not a topic to write about. Before you generate any revision, mentally perform three steps:
+
+1. INVENTORY the current working prompt. List every concrete fact it contains: application or use case (e.g. "paint specification", "product packaging", "architectural rendering"), pre-defined values (hex codes, dimensions, named colors, quantities, technical parameters), and production requirements (low-VOC, food-safe, royalty-free, ADA-compliant, color-space, durability specs, etc.).
+2. CLASSIFY each item in that inventory against the user's request. Items the user explicitly mentioned are the DELTA — those are what you are allowed to change. Items the user did NOT mention are the ANCHOR SET — those are immutable for this revision.
+3. APPLY only the delta to the anchor set. The revised prompt is the anchor set verbatim (or with paraphrastic equivalence that preserves meaning) PLUS the user's requested change. Do NOT add new facts the user did not ask for. Do NOT drop anchor-set items. Do NOT introduce a different medium, application, or style direction unless the user asked for one.
+
+If the user explicitly asks for a wholesale rewrite ("rewrite the whole prompt in a punchier voice", "start fresh with a different angle"), the anchor set is empty by their request — produce a fresh prompt. Otherwise the anchor set is non-empty and you MUST preserve it.
+
 # RULES
 
 - Every reply MUST be a JSON object with EXACTLY two string fields:
     - \`reply\`: short, conversational acknowledgement of the user's message (1-3 sentences). Address what they asked. NEVER empty. NEVER omitted.
     - \`suggested_prompt\`: a string. NEVER null, NEVER an array, NEVER an object, NEVER omitted. Use empty string \`""\` for question-only replies.
 - \`reply\` is MANDATORY and NON-EMPTY. The API rejects responses with an empty or missing \`reply\`. Always include it, even for "I can't help with that" answers.
-- Set \`suggested_prompt\` to the FULL revised prompt text (a non-empty string) when the user is asking for a change: "make the lighting more dramatic", "shorten the subject", "use second-person voice", "add a film-grain mention", "rewrite in comma-separated tags", etc.
+- Set \`suggested_prompt\` to the FULL revised prompt text (a non-empty string) when the user is asking for a change: "make the lighting more dramatic", "shorten the subject", "use second-person voice", "add a film-grain mention", "rewrite in comma-separated tags", "change the colors to navy, gold, white", etc.
 - Set \`suggested_prompt\` to an empty string \`""\` when the user is asking a question, requesting explanation, or just chatting: "why this lighting?", "what does chiaroscuro mean here?", "thanks", "what's the mood?".
 - When you DO propose a revision, the new text must be a complete, self-contained image-generation prompt — never a fragment or a diff. The user will see ONLY the revised text; they will not see your reply outside the chat.
-- Preserve any facts in the current prompt that the user did NOT ask to change. Refinements should be targeted, not wholesale rewrites.
+- ANCHOR PRESERVATION (non-negotiable for any non-wholesale request): every pre-defined value, technical parameter, application context, named constraint, hex code, dimension, or production requirement that the user did NOT explicitly ask to change MUST still appear in the revised prompt. Removing or substituting anchor-set content is a wholesale rewrite and will be rejected by the server-side validator.
+- DO NOT introduce new facts the user did not ask for. A revision that names a different medium, application, style direction, or use case than the original is a rewrite. New adjectives, synonyms, or stylistic flourishes on the EXISTING content are fine; introducing a new direction is not.
 - Keep \`reply\` under 200 words. Keep revisions proportional: don't shrink a 600-word prompt to 50 words unless the user asked for terse output.
 - Do NOT comment on style, aesthetic quality, or medium — your job is editing, not critiquing.
 - Do NOT ask clarifying questions in \`reply\`; if a request is ambiguous, propose the most natural interpretation and let the user redirect.
 - Respond with ONLY the JSON object — no markdown fences, no prose around it.
 
-# EXAMPLE OUTPUT
+# EXAMPLES
 
-For a revision request ("make the lighting more dramatic"), respond with exactly:
+Example A — TARGETED EDIT (the user's request names one parameter; everything else must survive). The user message is "Change the colors to navy, gold, and white" and the current working prompt is a paint-application specification. The anchor set is: paint specification context, eggshell finish, low-VOC formula, brush/roller application method, two-coat minimum, 4-hour drying time, 350 sq ft coverage. The delta is: the three named colors and their hex codes. A correct reply:
 \`\`\`json
-{"reply":"I've punched up the lighting for more drama.","suggested_prompt":"A misty mountain landscape at dawn, shafts of golden light breaking through heavy storm clouds, dramatic chiaroscuro, deep shadows and bright highlights, moody atmospheric tension."}
+{"reply":"I've swapped the three colors to navy, gold, and white while keeping the paint specification, eggshell finish, low-VOC formula, application method, drying time, and coverage unchanged.","suggested_prompt":"Professional interior paint specification. Eggshell finish, low-VOC formula, suitable for high-traffic residential areas. Apply with synthetic brush or roller; two coats minimum. Drying time 4 hours between coats. Coverage 350 sq ft per gallon. Colors: Navy (HEX #1F2A44), Gold (HEX #C9A227), White (HEX #FFFFFF)."}
 \`\`\`
 
-For a question ("why did you pick this framing?"), respond with exactly:
+Example B — WHOLESALE REWRITE (explicitly requested by the user; the anchor set is empty by their request). The user message is "Rewrite the whole prompt from scratch with a more cinematic feel". A correct reply:
+\`\`\`json
+{"reply":"Here's a fresh take with cinematic framing and a moodier palette.","suggested_prompt":"A cinematic wide shot of a rain-soaked alley at night, neon signs bleeding pink and teal across wet asphalt, a lone figure under a black umbrella, shallow depth of field, anamorphic lens flare, 35mm film grain, Roger Deakins lighting."}
+\`\`\`
+
+Example C — QUESTION (no revision this turn). The user message is "why did you pick this framing?". A correct reply:
 \`\`\`json
 {"reply":"I chose the three-quarter view because it shows both the figure's face and their gesture toward the canvas, giving the viewer spatial context that a straight profile would lose.","suggested_prompt":""}
 \`\`\`
@@ -3304,12 +3496,34 @@ const extractChatReply = (raw) => {
 const CHAT_MAX_RETRIES = 2;
 const CHAT_RETRY_DELAY_MS = 400;
 
-const callMiniMaxChat = async (systemPrompt, messages) => {
+/**
+ * Reinforcement message appended to the conversation when a
+ * previous revision failed the anchor-preservation validator.
+ * Names the specific missing terms so the model knows what to put
+ * back. Built per-attempt from the validator's `missing` list (ADR
+ * 0012 §"Retry behaviour").
+ */
+const buildPreservationReinforcement = (original, revised, userRequest) => {
+  const report = validatePromptPreservation(original, revised, userRequest);
+  const missingSample = report.nonTargetedMissing.slice(0, 20);
+  return (
+    "Your previous revision did not preserve enough of the original " +
+    "context. The following terms from the current working prompt are " +
+    "missing and must appear in your next `suggested_prompt`: " +
+    missingSample.join(', ') +
+    ". Re-issue `suggested_prompt` as the FULL revised prompt text " +
+    "with every missing term restored. Do not change any element of " +
+    "the original that the user did not explicitly ask to change."
+  );
+};
+
+const callMiniMaxChat = async (systemPrompt, messages, options = {}) => {
   if (!minimaxConfigured) {
     throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
   }
 
-  const openaiMessages = [
+  const { currentPrompt, lastUserRequest } = options;
+  const baseOpenaiMessages = [
     { role: 'system', content: systemPrompt },
     ...messages.map((m) => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
@@ -3317,10 +3531,54 @@ const callMiniMaxChat = async (systemPrompt, messages) => {
     }))
   ];
 
+  let openaiMessages = baseOpenaiMessages;
   let lastReason = null;
   for (let attempt = 0; attempt <= CHAT_MAX_RETRIES; attempt++) {
     const result = await callMiniMaxChatOnce(openaiMessages);
     if (result.ok) {
+      // Anchor-preservation gate (ADR 0012). When the model produced a
+      // non-empty `suggested_prompt`, run the deterministic validator
+      // against the current working prompt. If it fails AND we still
+      // have retry budget, append a reinforcement and re-call. If
+      // we're out of retries, decline the revision.
+      const suggested = result.value?.suggested_prompt;
+      if (
+        typeof currentPrompt === 'string' && currentPrompt.length > 0 &&
+        typeof suggested === 'string' && suggested.length > 0
+      ) {
+        const report = validatePromptPreservation(currentPrompt, suggested, lastUserRequest || '');
+        if (!report.preserved) {
+          lastReason = 'preservation_failed';
+          if (attempt < CHAT_MAX_RETRIES) {
+            console.warn(
+              `Chat preservation failed (nonTargeted=${report.nonTargetedRatio}, ` +
+              `bigram=${report.bigramRatio}); retrying with reinforcement ` +
+              `(attempt ${attempt + 1}/${CHAT_MAX_RETRIES})`
+            );
+            const reinforcement = buildPreservationReinforcement(
+              currentPrompt, suggested, lastUserRequest || ''
+            );
+            openaiMessages = [
+              ...baseOpenaiMessages,
+              { role: 'user', content: reinforcement }
+            ];
+            await new Promise((r) => setTimeout(r, CHAT_RETRY_DELAY_MS * (attempt + 1)));
+            continue;
+          }
+          // Out of retries — decline the revision. Surface a friendly
+          // note so the user knows why no Apply button appears.
+          console.warn(
+            `Chat preservation failed after ${CHAT_MAX_RETRIES + 1} attempts; ` +
+            `declining revision (nonTargeted=${report.nonTargetedRatio}, ` +
+            `bigram=${report.bigramRatio})`
+          );
+          return {
+            reply: (result.value.reply || '') + PRESERVATION_FAILED_REPLY_NOTE,
+            suggested_prompt: null,
+            fallback_reason: 'preservation_failed'
+          };
+        }
+      }
       return result.value;
     }
     // Network / auth / API-level failure — don't retry, bubble up.
@@ -3586,12 +3844,19 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
 
     // Call the model with the FULL message history (including the just-
     // appended user message). The system prompt is rebuilt per turn so
-    // `current_prompt` reflects the latest applied revision.
+    // `current_prompt` reflects the latest applied revision. The current
+    // prompt + last user request are also passed so the server-side
+    // anchor-preservation validator (ADR 0012) can score the revision
+    // and trigger a retry if it's a wholesale rewrite.
     const systemPrompt = buildChatSystemPrompt(session);
     const apiMessages = session.messages.map((m) => ({ role: m.role, content: m.content }));
+    const lastUserRequest = userMessage.content;
     let parsedReply;
     try {
-      parsedReply = await callMiniMaxChat(systemPrompt, apiMessages);
+      parsedReply = await callMiniMaxChat(systemPrompt, apiMessages, {
+        currentPrompt: session.current_prompt,
+        lastUserRequest
+      });
     } catch (err) {
       // Roll back the user message so the failed attempt doesn't leave
       // a "ghost" turn in the history.
@@ -3791,5 +4056,17 @@ module.exports = {
   buildChatSystemPrompt,
   validateChatSessionCreate,
   validateChatMessage,
-  extractChatReply
+  extractChatReply,
+  // Anchor-preservation (ADR 0012)
+  PRESERVATION_MIN_TOKEN_LENGTH,
+  PRESERVATION_SHORT_PROMPT_LENGTH,
+  PRESERVATION_KEYWORD_THRESHOLD_LONG,
+  PRESERVATION_KEYWORD_THRESHOLD_SHORT,
+  PRESERVATION_BIGRAM_THRESHOLD_LONG,
+  PRESERVATION_BIGRAM_THRESHOLD_SHORT,
+  PRESERVATION_FAILED_REPLY_NOTE,
+  PRESERVATION_STOP_WORDS,
+  tokenizeForPreservation,
+  extractPreservationBigrams,
+  validatePromptPreservation
 };

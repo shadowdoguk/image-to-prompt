@@ -32,7 +32,7 @@ ten validation checks, and emits:
 | 3 | `adr_log` | `docs/adr/*.md` | Directory missing |
 | 4 | `domain_doc` | `CONTEXT.md` | File missing |
 | 5 | `runtime_logs` | `server.log` pattern detection | No log file or no signals of interest |
-| 6 | `code_drift` | README ↔ server.js, package.json ↔ filesystem, agent docs ↔ CLAUDE.md | Disagreements found |
+| 6 | `code_drift` | README ↔ server.js, package.json ↔ filesystem, agent docs ↔ AGENTS.md | Disagreements found |
 | 7 | `presets` | `data/presets.json` | Missing, corrupt, or wrong shape |
 | 8 | `uploads` | `uploads/` contents | Leftover files detected |
 
@@ -60,7 +60,7 @@ contribution.
 | V3 | presets.json parses as a valid array |
 | V4 | package.json `test` script path resolves |
 | V5 | Zero high-severity drifts |
-| V6 | Every docs/agents/*.md referenced from CLAUDE.md exists |
+| V6 | Every docs/agents/*.md referenced from AGENTS.md exists |
 | V7 | uploads/ is empty |
 | V8 | docs/adr/ present iff any doc references it |
 | V9 | Issue tracker (gh) is reachable |

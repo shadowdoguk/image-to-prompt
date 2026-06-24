@@ -3328,6 +3328,397 @@ test('Chat fallback never invents a revision (suggested_prompt stays null)', () 
   }
 });
 
+// ─── ADR 0012 — anchor-preserving chat refinements ────────────────
+
+// Reusable paint-spec fixture: a real prompt with paint-application
+// context, three named colors, and several production requirements.
+// Used across the ADR 0012 test group to exercise the same real
+// scenario that surfaced the bug (see ADR 0012 §"Context").
+const PAINT_SPEC_ORIGINAL =
+  'Professional interior paint specification. Eggshell finish, low-VOC formula, ' +
+  'suitable for high-traffic residential areas. Apply with synthetic brush or ' +
+  'roller; two coats minimum. Drying time 4 hours between coats. Coverage 350 ' +
+  'sq ft per gallon. Colors: Warm Beige (HEX #D4B896), Sage Green (HEX #9CAF88), ' +
+  'Soft White (HEX #F5F5F0).';
+
+const PAINT_SPEC_USER_REQUEST = 'change the colors to navy, gold, and white';
+
+// A targeted color-only revision that preserves every production
+// requirement and the paint-application context.
+const PAINT_SPEC_GOOD_REVISION =
+  'Professional interior paint specification. Eggshell finish, low-VOC formula, ' +
+  'suitable for high-traffic residential areas. Apply with synthetic brush or ' +
+  'roller; two coats minimum. Drying time 4 hours between coats. Coverage 350 ' +
+  'sq ft per gallon. Colors: Navy (HEX #1F2A44), Gold (HEX #C9A227), White (HEX #FFFFFF).';
+
+// A wholesale rewrite that drops the paint-application context and
+// all production requirements — the exact failure mode ADR 0012
+// fixes.
+const PAINT_SPEC_BAD_REVISION =
+  'Create a sophisticated paint palette featuring navy, gold, and white ' +
+  'tones for an elegant interior design scheme. Mix complementary shades to ' +
+  'evoke a serene, luxurious atmosphere in any room.';
+
+test('ADR 0012: server exports anchor-preservation constants and helpers', () => {
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  for (const key of [
+    'PRESERVATION_MIN_TOKEN_LENGTH',
+    'PRESERVATION_SHORT_PROMPT_LENGTH',
+    'PRESERVATION_KEYWORD_THRESHOLD_LONG',
+    'PRESERVATION_KEYWORD_THRESHOLD_SHORT',
+    'PRESERVATION_BIGRAM_THRESHOLD_LONG',
+    'PRESERVATION_BIGRAM_THRESHOLD_SHORT',
+    'PRESERVATION_FAILED_REPLY_NOTE',
+    'PRESERVATION_STOP_WORDS',
+    'tokenizeForPreservation',
+    'extractPreservationBigrams',
+    'validatePromptPreservation'
+  ]) {
+    assertTrue(
+      Object.prototype.hasOwnProperty.call(serverMod, key),
+      `server.js must export ${key}`
+    );
+  }
+  // Thresholds should be in (0, 1] and long ≥ short.
+  assertTrue(serverMod.PRESERVATION_KEYWORD_THRESHOLD_LONG > 0, 'long kw threshold > 0');
+  assertTrue(serverMod.PRESERVATION_KEYWORD_THRESHOLD_LONG <= 1, 'long kw threshold <= 1');
+  assertTrue(
+    serverMod.PRESERVATION_KEYWORD_THRESHOLD_LONG >=
+      serverMod.PRESERVATION_KEYWORD_THRESHOLD_SHORT,
+    'long kw threshold >= short kw threshold'
+  );
+  assertTrue(
+    serverMod.PRESERVATION_BIGRAM_THRESHOLD_LONG >=
+      serverMod.PRESERVATION_BIGRAM_THRESHOLD_SHORT,
+    'long bg threshold >= short bg threshold'
+  );
+  assertTrue(
+    serverMod.PRESERVATION_FAILED_REPLY_NOTE.length > 20,
+    'failure note is a real sentence, not a stub'
+  );
+  // Stop words is a real Set.
+  assertTrue(serverMod.PRESERVATION_STOP_WORDS instanceof Set, 'stop words is a Set');
+  assertTrue(serverMod.PRESERVATION_STOP_WORDS.has('the'), 'stop words includes "the"');
+  assertTrue(serverMod.PRESERVATION_STOP_WORDS.has('and'), 'stop words includes "and"');
+});
+
+test('ADR 0012: tokenizeForPreservation lowercases, strips punctuation, drops stop words', () => {
+  const { tokenizeForPreservation, PRESERVATION_MIN_TOKEN_LENGTH } =
+    require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const tokens = tokenizeForPreservation(
+    'Eggshell finish, LOW-VOC formula — apply with synthetic brush!'
+  );
+  // Should keep: eggshell, finish, low, voc, formula, apply, synthetic, brush
+  // (drop "with" as stop word; drop "low-voc" but "low" + "voc" remain as separate tokens)
+  assertTrue(tokens.includes('eggshell'), 'keeps "eggshell"');
+  assertTrue(tokens.includes('finish'), 'keeps "finish"');
+  assertTrue(tokens.includes('low'), 'keeps "low" (split from low-voc)');
+  assertTrue(tokens.includes('voc'), 'keeps "voc"');
+  assertTrue(tokens.includes('formula'), 'keeps "formula"');
+  assertTrue(tokens.includes('apply'), 'keeps "apply"');
+  assertTrue(tokens.includes('synthetic'), 'keeps "synthetic"');
+  assertTrue(tokens.includes('brush'), 'keeps "brush"');
+  // No stop words.
+  assertTrue(!tokens.includes('with'), 'drops stop word "with"');
+  // No short tokens.
+  assertTrue(
+    tokens.every((t) => t.length >= PRESERVATION_MIN_TOKEN_LENGTH),
+    'all tokens meet minimum length'
+  );
+
+  // Defensive: non-string returns empty.
+  assertEqual(tokenizeForPreservation(null).length, 0, 'null -> []');
+  assertEqual(tokenizeForPreservation(undefined).length, 0, 'undefined -> []');
+  assertEqual(tokenizeForPreservation(42).length, 0, 'number -> []');
+  assertEqual(tokenizeForPreservation('').length, 0, 'empty -> []');
+  assertEqual(tokenizeForPreservation('   ').length, 0, 'whitespace -> []');
+});
+
+test('ADR 0012: extractPreservationBigrams captures adjacent pairs in order', () => {
+  const { extractPreservationBigrams, tokenizeForPreservation } =
+    require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const tokens = tokenizeForPreservation('eggshell finish low voc');
+  const bigrams = extractPreservationBigrams(tokens);
+  assertTrue(bigrams.has('eggshell finish'), 'captures "eggshell finish"');
+  assertTrue(bigrams.has('finish low'), 'captures "finish low"');
+  assertTrue(bigrams.has('low voc'), 'captures "low voc"');
+  assertEqual(bigrams.size, 3, 'three bigrams for four tokens');
+
+  // Edge cases.
+  assertEqual(extractPreservationBigrams([]).size, 0, 'empty input -> empty bigram set');
+  assertEqual(
+    extractPreservationBigrams(['solo']).size, 0,
+    'single token -> empty bigram set'
+  );
+});
+
+test('ADR 0012: validatePromptPreservation passes the paint-spec targeted color edit', () => {
+  // This is the headline use case (ADR 0012 §"Test"): a color-only
+  // revision on a paint-application spec must be flagged as
+  // preserved. Every production requirement and the application
+  // context must survive.
+  const { validatePromptPreservation } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const report = validatePromptPreservation(
+    PAINT_SPEC_ORIGINAL,
+    PAINT_SPEC_GOOD_REVISION,
+    PAINT_SPEC_USER_REQUEST
+  );
+
+  assertEqual(report.preserved, true, 'good revision marked preserved');
+  assertEqual(report.reason, null, 'no failure reason');
+  assertTrue(
+    report.nonTargetedRatio >= 0.7,
+    `nonTargetedRatio >= 0.7 (got ${report.nonTargetedRatio})`
+  );
+  assertTrue(
+    report.bigramRatio >= 0.4,
+    `bigramRatio >= 0.4 (got ${report.bigramRatio})`
+  );
+
+  // The targeted tokens are the old color names + hex codes (the user
+  // asked to change the colors). They MAY be missing — that's the
+  // intended delta. But everything else must survive.
+  for (const mustKeep of [
+    'eggshell', 'finish', 'low', 'voc', 'formula', 'suitable',
+    'high', 'traffic', 'residential', 'synthetic', 'brush', 'roller',
+    'coats', 'drying', 'hours', 'coverage', '350', 'gallon',
+    'professional', 'interior', 'paint', 'specification'
+  ]) {
+    assertTrue(
+      !report.nonTargetedMissing.includes(mustKeep),
+      `non-targeted "${mustKeep}" preserved in revision`
+    );
+  }
+});
+
+test('ADR 0012: validatePromptPreservation REJECTS the wholesale rewrite of paint-spec', () => {
+  // The exact bug pattern ADR 0012 fixes: the assistant generates a
+  // generic "paint palette" prompt that loses the paint-application
+  // context, the production requirements, and all original values.
+  // The validator must flag this as wholesale rewrite.
+  const { validatePromptPreservation } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const report = validatePromptPreservation(
+    PAINT_SPEC_ORIGINAL,
+    PAINT_SPEC_BAD_REVISION,
+    PAINT_SPEC_USER_REQUEST
+  );
+
+  assertEqual(report.preserved, false, 'wholesale rewrite marked NOT preserved');
+  assertTrue(report.reason !== null, 'failure reason present');
+  // The headline metric must be very low.
+  assertTrue(
+    report.nonTargetedRatio < 0.3,
+    `nonTargetedRatio < 0.3 (got ${report.nonTargetedRatio})`
+  );
+  // Critical anchor terms must be in the missing list.
+  for (const lost of [
+    'eggshell', 'finish', 'voc', 'formula', 'synthetic', 'roller',
+    'coats', 'drying', 'hours', 'coverage', 'gallon', 'specification'
+  ]) {
+    assertTrue(
+      report.missing.includes(lost),
+      `wholesale rewrite dropped "${lost}"`
+    );
+  }
+});
+
+test('ADR 0012: validatePromptPreservation accepts identical-content revisions', () => {
+  const { validatePromptPreservation } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const original = 'A serene mountain landscape at dawn with golden light.';
+  const report = validatePromptPreservation(original, original, 'no change');
+  assertEqual(report.preserved, true, 'identical content passes');
+  assertEqual(report.nonTargetedRatio, 1, 'no missing keywords');
+  assertEqual(report.bigramRatio, 1, 'no missing bigrams');
+});
+
+test('ADR 0012: validatePromptPreservation counts user-targeted tokens as removable', () => {
+  // The headline "nonTargetedRatio" should treat tokens the user
+  // explicitly named as deletable, so a legitimate targeted edit
+  // doesn't get flagged just because it drops the targeted content.
+  //
+  // Note: the validator's notion of "targeted" is literal keyword
+  // overlap — tokens that appear in both the user's message and the
+  // original. It does NOT infer semantic relationships like
+  // "color" → "gray". The threshold is calibrated (0.7 long, 0.5
+  // short) so dropping the value of a targeted attribute still
+  // passes; the validator's job is to catch wholesale rewrites, not
+  // to be a semantic parser.
+  const { validatePromptPreservation } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // Case 1: user request LITERALLY mentions a token in the original.
+  // That token counts as targeted — its absence in the revised is
+  // expected, so nonTargetedRatio doesn't penalize it.
+  const original = 'Epoxy floor coating. Two-part resin with navy pigment, 24-hour cure.';
+  const revised = 'Epoxy floor coating. Two-part resin with gold pigment, 24-hour cure.';
+  const userRequest = 'change navy to gold';
+
+  const report = validatePromptPreservation(original, revised, userRequest);
+  assertEqual(report.preserved, true, 'literal "navy→gold" swap passes');
+  // "navy" was named by the user; its absence is allowed.
+  assertTrue(report.targetedMissing.includes('navy'),
+    'navy appears under targetedMissing (user named it)');
+  assertTrue(!report.nonTargetedMissing.includes('navy'),
+    'navy NOT under nonTargetedMissing (correctly classified)');
+  // "gold" was added — not in original, so it doesn't count against
+  // preservation.
+  assertTrue(!report.missing.includes('gold'),
+    'new "gold" not counted as missing');
+
+  // Case 2: same shape but the user names a token that doesn't
+  // exist in the original. The validator doesn't penalize that, and
+  // dropping non-targeted tokens is still subject to the threshold.
+  const original2 = 'Epoxy floor coating. Two-part resin, gray finish, 24-hour cure time.';
+  const revised2 = 'Epoxy floor coating. Two-part resin, navy finish, 24-hour cure time.';
+  const userRequest2 = 'change the color to navy';
+
+  const report2 = validatePromptPreservation(original2, revised2, userRequest2);
+  assertEqual(report2.preserved, true,
+    'semantic-but-not-literal color swap still passes (threshold calibrated)');
+  // "navy" was named by the user; if it had been in original it'd be
+  // targeted. It wasn't in original, so it's just absent.
+  // Critical: the production requirements (resin, finish, cure, etc.)
+  // must be retained.
+  for (const mustKeep of ['epoxy', 'floor', 'coating', 'resin', 'finish', 'cure']) {
+    assertTrue(
+      !report2.nonTargetedMissing.includes(mustKeep),
+      `non-targeted "${mustKeep}" preserved in semantic-swap case`
+    );
+  }
+});
+
+test('ADR 0012: validatePromptPreservation passes pure-question revisions with no changes', () => {
+  // Question-only turns (ADR 0011 contract: suggested_prompt = "") are
+  // never sent to the validator by the route (only non-empty
+  // suggested_prompt enters the gate). But the helper itself must
+  // behave sanely if asked: identical content is preserved.
+  const { validatePromptPreservation } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = 'A cat sitting on a windowsill in golden afternoon light.';
+  const report = validatePromptPreservation(prompt, prompt, 'why this framing?');
+  assertEqual(report.preserved, true, 'no-change revision is preserved');
+});
+
+test('ADR 0012: validatePromptPreservation handles short prompts with the relaxed threshold', () => {
+  // Prompts ≤ PRESERVATION_SHORT_PROMPT_LENGTH chars get the SHORT
+  // thresholds (0.5 keyword, 0.2 bigram). A short-prompt revision
+  // that drops one or two words should still pass.
+  const { validatePromptPreservation, PRESERVATION_SHORT_PROMPT_LENGTH } =
+    require(path.join(PROJECT_ROOT, 'server.js'));
+
+  assertTrue(
+    'A cat sitting on a warm windowsill.'.length <= PRESERVATION_SHORT_PROMPT_LENGTH,
+    'fixture is short enough to use SHORT threshold'
+  );
+
+  // Drop "warm" (non-targeted) — short threshold still passes.
+  const original = 'A cat sitting on a warm windowsill.';
+  const revised = 'A cat sitting on a windowsill.';
+  const report = validatePromptPreservation(original, revised, 'shorten slightly');
+  assertEqual(report.preserved, true,
+    'short prompt dropping one non-targeted word passes SHORT threshold');
+});
+
+test('ADR 0012: validatePromptPreservation REJECTS short-prompt wholesale rewrite', () => {
+  // Even with relaxed thresholds, a complete rewrite of a short
+  // prompt must fail.
+  const { validatePromptPreservation } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const original = 'A cat sitting on a warm windowsill.';
+  const revised = 'A dog running through a snowy field at night.';
+  const report = validatePromptPreservation(original, revised, 'change the scene');
+  assertEqual(report.preserved, false, 'short-prompt rewrite fails even with relaxed threshold');
+});
+
+test('ADR 0012: validatePromptPreservation is defensive on bad input', () => {
+  const { validatePromptPreservation } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // Non-string inputs return the "valid" sentinel (preserved=true,
+  // reason='invalid_input') so the caller never has to null-check
+  // before passing through. The route doesn't pass bad input but
+  // tests downstream might.
+  for (const v of [null, undefined, 42, [], {}]) {
+    const r = validatePromptPreservation(v, v, v);
+    assertEqual(r.preserved, true, 'bad input -> preserved sentinel');
+    assertEqual(r.reason, 'invalid_input', 'bad input tagged');
+  }
+});
+
+test('ADR 0012: validatePromptPreservation handles empty strings gracefully', () => {
+  const { validatePromptPreservation } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // Empty original = nothing to preserve = trivially preserved.
+  const r1 = validatePromptPreservation('', 'something', 'request');
+  assertEqual(r1.preserved, true, 'empty original -> trivially preserved');
+
+  // Empty revised = nothing retained = wholesale rewrite.
+  const r2 = validatePromptPreservation(
+    'A cat sitting on a windowsill in golden afternoon light.',
+    '',
+    'clear it'
+  );
+  assertEqual(r2.preserved, false, 'empty revised -> wholesale rewrite');
+  assertTrue(r2.keywordRatio === 0, 'keywordRatio is 0 when revised is empty');
+});
+
+test('ADR 0012: DEFAULT_CHAT_SYSTEM_PROMPT includes the anchor-preservation contract', () => {
+  const { DEFAULT_CHAT_SYSTEM_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // The new contract section (ADR 0012) must be present and the old
+  // soft rule must have been replaced with a hard contract.
+  assertTrue(/EDIT, DO NOT REGENERATE/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt has EDIT, DO NOT REGENERATE heading');
+  assertTrue(/ANCHOR SET/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt names the anchor set concept');
+  assertTrue(/INVENTORY/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt instructs the model to inventory first');
+  assertTrue(/non-negotiable/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'anchor preservation is marked non-negotiable');
+  assertTrue(/DO NOT introduce new facts/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt forbids adding new facts');
+
+  // The paint-spec example must be present as Example A so the
+  // model has an in-context reference for the targeted-edit shape.
+  assertTrue(/paint specification/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt includes paint-spec example');
+  assertTrue(/Navy \(HEX #1F2A44\)/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt paint example uses Navy/Gold/White colors');
+  assertTrue(/Wholesale/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt carves out the wholesale rewrite case (Example B)');
+
+  // The two contrasted examples (A and B) must both be present.
+  assertTrue(/Example A — TARGETED EDIT/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'Example A (targeted edit) present');
+  assertTrue(/Example B — WHOLESALE REWRITE/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'Example B (wholesale rewrite) present');
+  assertTrue(/Example C — QUESTION/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'Example C (question) present');
+});
+
+test('ADR 0012: callMiniMaxChat wires the validator into the retry loop', () => {
+  // We can't run a real LLM call in tests, but we can verify the
+  // call site passes the new options the validator needs.
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const callSite = serverText.match(/parsedReply = await callMiniMaxChat\([\s\S]*?\}\);/);
+  assertTrue(callSite, 'call site present');
+  assertTrue(/currentPrompt:\s*session\.current_prompt/.test(callSite[0]),
+    'call site passes session.current_prompt');
+  assertTrue(/lastUserRequest/.test(callSite[0]),
+    'call site passes lastUserRequest');
+});
+
+test('ADR 0012: PRESERVATION_FAILED_REPLY_NOTE is friendlier than the raw error', () => {
+  const { PRESERVATION_FAILED_REPLY_NOTE } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // Must contain a hint about what to do next.
+  assertTrue(/try a more specific request/i.test(PRESERVATION_FAILED_REPLY_NOTE),
+    'note guides the user to a more specific request');
+  // Must NOT contain any technical jargon the user won't understand.
+  assertTrue(!/validator|threshold|nonTargetedRatio/.test(PRESERVATION_FAILED_REPLY_NOTE),
+    'note uses plain English, no implementation details');
+});
+
 // ─── Final invariants — must pass AFTER everything else ran ─────────
 
 test('No stale upload files in uploads/', () => {

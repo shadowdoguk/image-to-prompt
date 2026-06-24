@@ -12,7 +12,7 @@ for the rationale.
 | Type | Example | Detection |
 |---|---|---|
 | `version_control` | No git repo; missing remote; dirty working tree | `session-init.js` scanner 1 |
-| `doc_contract` | `CONTEXT.md` missing; `docs/agents/X.md` referenced from CLAUDE.md but absent | scanner 4 + validation V1, V6 |
+| `doc_contract` | `CONTEXT.md` missing; `docs/agents/X.md` referenced from AGENTS.md but absent | scanner 4 + validation V1, V6 |
 | `endpoint_doc` | README documents endpoint X; server exposes endpoint Y | scanner 6 |
 | `code_doc` | package.json script references path that doesn't exist | scanner 6 |
 | `data_drift` | `presets.json` corrupt or shape changed without schema bump | scanner 7 |

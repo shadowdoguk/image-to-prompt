@@ -100,7 +100,16 @@ The product has two top-level surfaces:
   dramatic") return a non-null `suggested_prompt` and surface an Apply
   button that advances `current_prompt`. Pure questions ("why this
   framing?") return `suggested_prompt: null`. `messages[]` is
-  append-only; sessions survive server restarts.
+  append-only; sessions survive server restarts. ADR 0011a added a
+  defensive parser + retry loop + frontend hardening. **ADR 0012
+  (anchor-preservation)** layers a wholesale-rewrite guard on top:
+  the system prompt reframes the assistant's job as "edit, do not
+  regenerate" (with an inventory-classify-apply contract and
+  contrasted examples), and a server-side validator
+  (`validatePromptPreservation`) scores every revision against the
+  current working prompt and retries with a reinforcement message if
+  too much of the original context was lost — declining the revision
+  (no Apply button) if the model can't produce a targeted edit.
 
 ## Core entities
 
