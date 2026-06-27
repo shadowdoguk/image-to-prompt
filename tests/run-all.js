@@ -3274,6 +3274,146 @@ test('End-to-end: save → apply → edit → restore → export → import (dat
   }
 });
 
+// ─── ADR 0014 — Phase 3: edit modal UI (weight slider + accent + preview bars) ─
+//
+// Phase 3 ships the user-facing controls that drive ADR 0014's weighting
+// metadata: per-color weight slider (1-10), accent checkbox, palette-level
+// accent cap input, and a live "target distribution" bar chart under the
+// preview swatches. These tests assert the HTML template, CSS hooks, and
+// JS shape via file-string inspection — same pattern used for prior ADRs.
+
+// HTML structure — the edit modal now carries the new controls
+test('ADR 0014: edit modal HTML has the accent-cap input + distribution bar container (Phase 3)', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/id="edit-palette-accent-max"/.test(html), 'accent-cap number input exists');
+  assertTrue(/<label[^>]+for="edit-palette-accent-max"/.test(html),
+             'accent-cap input has a label');
+  assertTrue(/min="1"/.test(html.match(/<input[^>]*id="edit-palette-accent-max"[^>]*>/)[0]),
+             'accent-cap min=1');
+  assertTrue(/max="5"/.test(html.match(/<input[^>]*id="edit-palette-accent-max"[^>]*>/)[0]),
+             'accent-cap max=5');
+  assertTrue(/aria-describedby="edit-palette-accent-max-hint"/.test(html),
+             'accent-cap input has aria-describedby hint');
+  assertTrue(/id="edit-palette-distribution"/.test(html),
+             'distribution bar container exists');
+  assertTrue(/class="palette-preview__bars"/.test(html),
+             'distribution container uses palette-preview__bars class');
+  assertTrue(/aria-label="Live target distribution as you adjust weights and accents"/.test(html),
+             'distribution container has descriptive aria-label');
+  assertTrue(/id="edit-palette-distribution-sum"/.test(html),
+             'distribution sum annotation exists');
+});
+
+test('ADR 0014: edit modal hint mentions weight + accent (Phase 3)', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  const hint = html.match(/<p[^>]+id="edit-palette-modal-hint"[^>]*>([\s\S]*?)<\/p>/);
+  assertTrue(hint && hint[1], 'hint paragraph found');
+  assertTrue(/weight/i.test(hint[1]), 'hint mentions weight');
+  assertTrue(/accent/i.test(hint[1]), 'hint mentions accent');
+});
+
+test('ADR 0014: edit modal accessible role/label structure preserved (Phase 3)', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/id="edit-palette-modal"[^>]*role="dialog"/.test(html),
+             'modal still has role=dialog');
+  assertTrue(/aria-labelledby="edit-palette-modal-title"/.test(html),
+             'modal still has aria-labelledby');
+});
+
+// CSS — selectors that Phase 3 introduces
+test('ADR 0014: stylesheet has --color-accent + accent / weight / distribution bar rules (Phase 3)', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  assertTrue(/--color-accent:\s*#f59e0b/i.test(css), '--color-accent defined');
+  assertTrue(/--color-accent-soft/.test(css), '--color-accent-soft defined');
+  assertTrue(/\.edit-palette-color-row\[data-accent="true"\]/.test(css),
+             'accent row visual treatment');
+  assertTrue(/\.edit-palette-color-row__weight/.test(css),
+             'weight slider rule');
+  assertTrue(/\.edit-palette-color-row__accent\b/.test(css),
+             'accent checkbox rule');
+  assertTrue(/\.palette-preview__bar-row/.test(css),
+             'distribution bar row rule');
+  assertTrue(/\.palette-preview__bar-track/.test(css),
+             'distribution bar track rule');
+  assertTrue(/\.palette-preview__bar\[data-accent="true"\]/.test(css),
+             'accent bar outline rule');
+  assertTrue(/\.palette-preview__bar-star/.test(css),
+             'accent star badge rule');
+  assertTrue(/\.palette-preview__bars-sum/.test(css),
+             'distribution sum annotation rule');
+  assertTrue(/\.edit-palette-accent-cap-row/.test(css),
+             'accent cap row rule');
+  // Distinct from --accent (the UI blue)
+  assertTrue(/--accent:\s*#3b82f6/.test(css), '--accent UI blue preserved');
+});
+
+// JS — buffer shape + render functions exist
+test('ADR 0014: app.js handles weight + accent + accent_max_mentions in the edit buffer (Phase 3)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/clientNormalizeColorWeights/.test(js),
+             'client-side normalize helper exists');
+  assertTrue(/renderEditPaletteDistributionBars/.test(js),
+             'distribution bar renderer exists');
+  assertTrue(/editPaletteAccentMax/.test(js),
+             'accent cap DOM cache entry exists');
+  assertTrue(/editPaletteDistribution\b/.test(js),
+             'distribution bar DOM cache entry exists');
+  assertTrue(/editPaletteDistributionSum/.test(js),
+             'distribution sum DOM cache entry exists');
+  assertTrue(/data-accent="true"/.test(js),
+             'data-accent attribute is set when accent is checked');
+  assertTrue(/\.type\s*=\s*['"]range['"]/.test(js),
+             'weight slider rendered as range input');
+  assertTrue(/\.type\s*=\s*['"]checkbox['"]/.test(js) && /edit-palette-color-row__accent/.test(js),
+             'accent checkbox rendered');
+  assertTrue(/accent_max_mentions/.test(js),
+             'accent_max_mentions is sent in submit');
+  assertTrue(/\.min\s*=\s*['"]1['"]/.test(js) && /\.max\s*=\s*['"]10['"]/.test(js),
+             'slider min=1 max=10 in JS');
+});
+
+// HTTP round-trip — Phase 3 fields reach the server
+test('ADR 0014: PUT /api/palettes/:id accepts weight + accent + accent_max_mentions together (Phase 3 round-trip)', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const id = create.body.data.id;
+    const r = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Sunset palette v3',
+        colors: [
+          { hex: '#0ea5e9', name: 'sea',   weight: 7, accent: false },
+          { hex: '#dc2626', name: 'alert', weight: 4, accent: true }
+        ],
+        accent_max_mentions: 1
+      })
+    });
+    assertEqual(r.status, 200, 'PUT → 200');
+    assertEqual(r.body.data.name, 'Sunset palette v3', 'name updated');
+    assertEqual(r.body.data.colors[0].weight, 7, 'weight 7 round-tripped');
+    assertEqual(r.body.data.colors[0].accent, false, 'accent false round-tripped');
+    assertEqual(r.body.data.colors[1].weight, 4, 'weight 4 round-tripped');
+    assertEqual(r.body.data.colors[1].accent, true, 'accent true round-tripped');
+    assertEqual(r.body.data.accent_max_mentions, 1, 'accent_max_mentions 1 round-tripped');
+    // history v2 captures all three new fields so Restore is faithful
+    const v2 = r.body.data.history[r.body.data.history.length - 1];
+    assertEqual(v2.colors[0].weight, 7, 'history v2 captures weight');
+    assertEqual(v2.colors[1].accent, true, 'history v2 captures accent');
+    assertEqual(v2.accent_max_mentions, 1, 'history v2 captures cap');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
 // ── Frontend HTML / CSS / JS assertions
 
 test('Frontend HTML: directives actions row + 3 new modals exist with a11y attrs (ADR 0009)', () => {

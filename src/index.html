@@ -411,7 +411,7 @@
         </header>
         <form id="edit-palette-form" class="modal-body" novalidate>
           <p id="edit-palette-modal-hint" class="modal-hint">
-            Change the name, tweak the colors, or add a new color. Hex, rgb(), and hsl() inputs are all accepted.
+            Change the name, tweak the colors, or add a new color. Hex, rgb(), and hsl() inputs are all accepted. Adjust per-color weight (1–10) and flag any color as a punchy accent to influence distribution in generated prompts.
           </p>
 
           <div class="edit-palette-source-row" id="edit-palette-source-row" hidden>
@@ -437,8 +437,30 @@
             <div id="edit-palette-preview" class="palette-preview" aria-live="polite" aria-label="Live preview of the palette as you edit it"></div>
           </div>
 
+          <div class="edit-palette-distribution-row">
+            <span class="label-hint">Target distribution</span>
+            <div id="edit-palette-distribution" class="palette-preview__bars" aria-live="polite" aria-label="Live target distribution as you adjust weights and accents"></div>
+            <span id="edit-palette-distribution-sum" class="palette-preview__bars-sum" aria-live="polite"></span>
+          </div>
+
           <fieldset class="edit-palette-colors-fieldset">
             <legend class="label">Colors</legend>
+
+            <div class="edit-palette-accent-cap-row">
+              <label for="edit-palette-accent-max" class="label-hint">Accent cap</label>
+              <input
+                type="number"
+                id="edit-palette-accent-max"
+                class="text-input edit-palette-accent-cap-input"
+                min="1"
+                max="5"
+                step="1"
+                value="2"
+                aria-describedby="edit-palette-accent-max-hint"
+              >
+              <span id="edit-palette-accent-max-hint" class="field-action-hint">Max total mentions across all accent colors (1–5). Lower = sparser accents.</span>
+            </div>
+
             <ul id="edit-palette-colors-list" class="edit-palette-colors-list"></ul>
 
             <div class="edit-palette-add-row">

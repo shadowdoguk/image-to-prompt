@@ -12,6 +12,13 @@
   --accent-hover: #2563eb;
   --accent-active: #1d4ed8;
   --accent-soft: rgba(59, 130, 246, 0.12);
+
+  /* ADR 0014 — "punchy color" mark. Distinct from --accent (the UI's
+     blue) so a palette's flagged accent colors get a recognisable
+     warm outline that doesn't collide with primary buttons or focus
+     rings. */
+  --color-accent: #f59e0b;
+  --color-accent-soft: rgba(245, 158, 11, 0.18);
   --success: #10b981;
   --error: #ef4444;
   --error-bg: #2d1a1a;
@@ -1062,13 +1069,18 @@ body {
 
 .edit-palette-color-row {
   display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-columns: 48px minmax(0, 1.1fr) minmax(0, 1fr) minmax(160px, 1fr) auto auto;
   gap: 0.55rem;
   align-items: center;
   padding: 0.55rem 0.65rem;
   background: var(--bg-tertiary);
   border: 1px solid var(--border-color);
   border-radius: var(--radius);
+}
+
+.edit-palette-color-row[data-accent="true"] {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent-soft) inset;
 }
 
 .edit-palette-color-row[data-invalid="true"] { border-color: var(--error); }
@@ -1141,6 +1153,144 @@ body {
 #edit-palette-add-hex-hint { grid-column: 2 / 4; }
 
 #edit-palette-add-error { grid-column: 1 / 5; }
+
+/* ADR 0014 — accent cap input row sits at the top of the colors
+   fieldset so the cap is visible alongside the accent checkboxes
+   below. Number input is narrow with a hint to the right. */
+.edit-palette-accent-cap-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  margin: 0.25rem 0 0.65rem;
+}
+
+.edit-palette-accent-cap-row .label-hint { margin: 0; }
+
+.edit-palette-accent-cap-input {
+  width: 4.5rem;
+  text-align: center;
+  font-weight: 600;
+}
+
+/* ADR 0014 — per-color weight slider + label. Compact horizontal
+   layout: live "Weight N" label above the range. */
+.edit-palette-color-row__weight-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.15rem;
+  min-width: 120px;
+}
+
+.edit-palette-color-row__weight-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.edit-palette-color-row__weight {
+  width: 100%;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.edit-palette-color-row[data-accent="true"] .edit-palette-color-row__weight {
+  accent-color: var(--color-accent);
+}
+
+.edit-palette-color-row__accent-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.edit-palette-color-row__accent {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--color-accent);
+}
+
+.edit-palette-color-row[data-accent="true"] .edit-palette-color-row__accent-label {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+/* ADR 0014 — target distribution bar chart. Renders below the preview
+   swatches. Each row is a coloured bar + percent + name; accents get a
+   warm outline + ★ badge. */
+.edit-palette-distribution-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.3rem;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.palette-preview__bars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 8px;
+  padding: 6px;
+  background: var(--bg-tertiary);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius);
+}
+
+.palette-preview__bar-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.65rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.palette-preview__bar-track {
+  position: relative;
+  height: 10px;
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.palette-preview__bar {
+  height: 100%;
+  min-width: 2px;
+  border-radius: 4px;
+  transition: width 0.15s ease;
+}
+
+.palette-preview__bar[data-accent="true"] {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.palette-preview__bar-label {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.palette-preview__bar-star {
+  color: var(--color-accent);
+  font-size: 0.95rem;
+  margin-left: 0.2rem;
+}
+
+.palette-preview__bars-sum {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  align-self: flex-end;
+  font-variant-numeric: tabular-nums;
+}
 
 .visually-hidden-label {
   position: absolute;
@@ -1245,10 +1395,12 @@ body {
 @media (max-width: 640px) {
   .edit-palette-color-row {
     grid-template-columns: 48px 1fr auto;
-    grid-template-rows: auto auto;
+    grid-template-rows: auto auto auto;
   }
   .edit-palette-color-row__name { grid-column: 1 / 4; }
   .edit-palette-color-row__hex-error { grid-column: 1 / 4; }
+  .edit-palette-color-row__weight-wrap { grid-column: 1 / 4; min-width: 0; }
+  .edit-palette-color-row__accent-label { grid-column: 1 / 3; }
   .edit-palette-add-row {
     grid-template-columns: 48px 1fr;
     grid-template-rows: auto auto auto auto;

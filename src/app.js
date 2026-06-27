@@ -154,6 +154,9 @@
     editPaletteNameCount: $('edit-palette-name-count'),
     editPaletteNameError: $('edit-palette-name-error'),
     editPalettePreview: $('edit-palette-preview'),
+    editPaletteDistribution: $('edit-palette-distribution'),
+    editPaletteDistributionSum: $('edit-palette-distribution-sum'),
+    editPaletteAccentMax: $('edit-palette-accent-max'),
     editPaletteColorsList: $('edit-palette-colors-list'),
     editPaletteAddPicker: $('edit-palette-add-picker'),
     editPaletteAddHex: $('edit-palette-add-hex'),
@@ -1742,6 +1745,39 @@
     return { error: 'expected #hex, rgb(), or hsl()' };
   };
 
+  /**
+   * Client-side mirror of server `normalizeColorWeights` (ADR 0014).
+   * Returns `{ colors, fractions, displayPct, totalWeight }` so the
+   * preview bar chart can render the same target distribution the
+   * server will compute when the budget block is built. The server is
+   * still the source of truth — this client helper just lets the bar
+   * widths update live without a round-trip.
+   *
+   * Default weight = 5, default accent = false (mirrors readPalettes
+   * synthesis on the server).
+   */
+  const clientNormalizeColorWeights = (colors) => {
+    if (!Array.isArray(colors) || colors.length === 0) {
+      return { colors: [], fractions: [], displayPct: [], totalWeight: 0 };
+    }
+    const safe = colors.map((c) => ({
+      hex: c && typeof c.hex === 'string' ? c.hex : '',
+      name: c && typeof c.name === 'string' ? c.name : '',
+      weight: (c && Number.isInteger(c.weight) && c.weight >= 1 && c.weight <= 10)
+        ? c.weight : 5,
+      accent: !!(c && c.accent === true)
+    }));
+    const total = safe.reduce((s, c) => s + c.weight, 0);
+    if (total <= 0) {
+      const eq = 1 / safe.length;
+      return { colors: safe, fractions: safe.map(() => eq),
+               displayPct: safe.map(() => Math.round(eq * 100)), totalWeight: 0 };
+    }
+    const fractions = safe.map((c) => c.weight / total);
+    const displayPct = fractions.map((f) => Math.round(f * 100));
+    return { colors: safe, fractions, displayPct, totalWeight: total };
+  };
+
   const updateEditPaletteNameCount = () => {
     if (!dom.editPaletteNameCount || !dom.editPaletteNameInput) return;
     dom.editPaletteNameCount.textContent = `${dom.editPaletteNameInput.value.length} / 60`;
@@ -1750,7 +1786,10 @@
   /**
    * Re-render the live preview row at the top of the edit modal.
    * Reads from `state.editingPaletteBuffer.colors` — never from a DOM
-   * field that hasn't been committed to the buffer.
+   * field that hasn't been committed to the buffer. Also renders the
+   * target-distribution bar chart directly below the swatches so the
+   * user sees the fractions their weight/accent choices produce
+   * before saving (ADR 0014 §6b).
    */
   const renderEditPalettePreview = () => {
     if (!dom.editPalettePreview) return;
@@ -1762,6 +1801,7 @@
       empty.className = 'palette-preview__empty';
       empty.textContent = 'No colors yet — add one below.';
       dom.editPalettePreview.appendChild(empty);
+      renderEditPaletteDistributionBars([], 0);
       return;
     }
     colors.forEach((c) => {
@@ -1771,6 +1811,66 @@
       sw.title = `${c.name || ''} ${c.hex}`.trim();
       dom.editPalettePreview.appendChild(sw);
     });
+    const norm = clientNormalizeColorWeights(colors);
+    renderEditPaletteDistributionBars(norm.colors, norm.displayPct);
+  };
+
+  /**
+   * Render the target-distribution bar chart directly below the
+   * preview swatches. One row per color: a coloured bar whose width
+   * is proportional to the normalised fraction, followed by the
+   * display percentage and the color name. Accent colors get a `★`
+   * glyph and a coloured outline via `[data-accent="true"]`.
+   *
+   * The sum annotation is honest about rounding — display percentages
+   * may not sum to 100 after rounding (e.g. three equal weights →
+   * 33+33+33=99). The UI surfaces this as "Sum: 99% (rounded)" so
+   * the user isn't surprised.
+   */
+  const renderEditPaletteDistributionBars = (colors, displayPct) => {
+    const barHost = dom.editPaletteDistribution;
+    const sumHost = dom.editPaletteDistributionSum;
+    if (!barHost) return;
+    barHost.innerHTML = '';
+    if (!Array.isArray(colors) || colors.length === 0) {
+      if (sumHost) sumHost.textContent = '';
+      return;
+    }
+    colors.forEach((c, i) => {
+      const row = document.createElement('div');
+      row.className = 'palette-preview__bar-row';
+      row.dataset.colorIndex = String(i);
+      if (c.accent === true) row.dataset.accent = 'true';
+
+      const barWrap = document.createElement('div');
+      barWrap.className = 'palette-preview__bar-track';
+      const bar = document.createElement('div');
+      bar.className = 'palette-preview__bar';
+      if (c.accent === true) bar.dataset.accent = 'true';
+      bar.style.background = c.hex;
+      const pct = (Array.isArray(displayPct) && Number.isFinite(displayPct[i]))
+        ? displayPct[i] : 0;
+      bar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+      bar.setAttribute('role', 'progressbar');
+      bar.setAttribute('aria-valuemin', '0');
+      bar.setAttribute('aria-valuemax', '100');
+      bar.setAttribute('aria-valuenow', String(pct));
+      bar.setAttribute('aria-label',
+        `${c.name || 'color'}: ${pct} percent target${c.accent ? ' (accent)' : ''}`);
+      barWrap.appendChild(bar);
+      row.appendChild(barWrap);
+
+      const label = document.createElement('span');
+      label.className = 'palette-preview__bar-label';
+      const star = c.accent === true ? ' <span class="palette-preview__bar-star" aria-hidden="true">★</span>' : '';
+      label.innerHTML = `${pct}% · ${c.name || ''}${star}`;
+      row.appendChild(label);
+      barHost.appendChild(row);
+    });
+    if (sumHost) {
+      const sum = (displayPct || []).reduce((s, p) => s + (Number.isFinite(p) ? p : 0), 0);
+      sumHost.textContent = sum === 100 ? 'Sum: 100%' : `Sum: ${sum}% (rounded)`;
+    }
   };
 
   /**
@@ -1791,6 +1891,10 @@
       const row = document.createElement('li');
       row.className = 'edit-palette-color-row';
       row.dataset.colorIndex = String(i);
+      const currentWeight = (Number.isInteger(c.weight) && c.weight >= 1 && c.weight <= 10)
+        ? c.weight : 5;
+      const currentAccent = c.accent === true;
+      if (currentAccent) row.dataset.accent = 'true';
 
       const picker = document.createElement('input');
       picker.type = 'color';
@@ -1798,7 +1902,10 @@
       picker.className = 'edit-palette-color-row__picker';
       picker.setAttribute('aria-label', `Pick color for ${c.name || `entry ${i + 1}`}`);
       picker.addEventListener('input', () => {
-        buf.colors[i] = { hex: picker.value, name: c.name || '' };
+        buf.colors[i] = {
+          hex: picker.value, name: c.name || '',
+          weight: currentWeight, accent: currentAccent
+        };
         hex.value = picker.value;
         name.value = c.name || '';
         row.removeAttribute('data-invalid');
@@ -1830,7 +1937,10 @@
         hex.removeAttribute('aria-invalid');
         row.removeAttribute('data-invalid');
         hexError.hidden = true;
-        buf.colors[i] = { hex: parsed.hex, name: c.name || '' };
+        buf.colors[i] = {
+          hex: parsed.hex, name: c.name || '',
+          weight: currentWeight, accent: currentAccent
+        };
         picker.value = parsed.hex;
         renderEditPalettePreview();
       });
@@ -1845,9 +1955,77 @@
       name.className = 'text-input edit-palette-color-row__name';
       name.setAttribute('aria-label', `Name for color ${i + 1}`);
       name.addEventListener('input', () => {
-        buf.colors[i] = { hex: c.hex, name: name.value };
+        buf.colors[i] = {
+          hex: c.hex, name: name.value,
+          weight: currentWeight, accent: currentAccent
+        };
       });
       row.appendChild(name);
+
+      // ADR 0014 — weight slider (1-10, integer steps). Live label.
+      const weightWrap = document.createElement('div');
+      weightWrap.className = 'edit-palette-color-row__weight-wrap';
+      const weightLabel = document.createElement('label');
+      weightLabel.className = 'edit-palette-color-row__weight-label';
+      weightLabel.textContent = `Weight ${currentWeight}`;
+      weightLabel.setAttribute('for', `edit-palette-color-weight-${i}`);
+      const weight = document.createElement('input');
+      weight.type = 'range';
+      weight.min = '1';
+      weight.max = '10';
+      weight.step = '1';
+      weight.value = String(currentWeight);
+      weight.id = `edit-palette-color-weight-${i}`;
+      weight.className = 'edit-palette-color-row__weight';
+      weight.setAttribute('aria-label', `Weight for ${c.name || `color ${i + 1}`}`);
+      weight.setAttribute('aria-valuemin', '1');
+      weight.setAttribute('aria-valuemax', '10');
+      weight.setAttribute('aria-valuenow', String(currentWeight));
+      weight.setAttribute('aria-valuetext', `${currentWeight} out of 10`);
+      weight.addEventListener('input', () => {
+        const v = parseInt(weight.value, 10);
+        if (!Number.isInteger(v) || v < 1 || v > 10) return;
+        weightLabel.textContent = `Weight ${v}`;
+        weight.setAttribute('aria-valuenow', String(v));
+        weight.setAttribute('aria-valuetext', `${v} out of 10`);
+        buf.colors[i] = {
+          hex: c.hex, name: c.name || '',
+          weight: v, accent: currentAccent
+        };
+        renderEditPalettePreview();
+      });
+      weightWrap.appendChild(weightLabel);
+      weightWrap.appendChild(weight);
+      row.appendChild(weightWrap);
+
+      // ADR 0014 — accent checkbox. When checked, the row gets
+      // data-accent="true" (handled by CSS) and the accent count vs cap
+      // is reflected in the distribution chart (handled by
+      // renderEditPalettePreview).
+      const accentLabel = document.createElement('label');
+      accentLabel.className = 'edit-palette-color-row__accent-label';
+      const accent = document.createElement('input');
+      accent.type = 'checkbox';
+      accent.checked = currentAccent;
+      accent.className = 'edit-palette-color-row__accent';
+      accent.id = `edit-palette-color-accent-${i}`;
+      accent.setAttribute('aria-describedby', 'edit-palette-accent-max-hint');
+      accent.addEventListener('change', () => {
+        const v = accent.checked === true;
+        if (v) row.dataset.accent = 'true';
+        else row.removeAttribute('data-accent');
+        buf.colors[i] = {
+          hex: c.hex, name: c.name || '',
+          weight: currentWeight, accent: v
+        };
+        renderEditPalettePreview();
+      });
+      accentLabel.appendChild(accent);
+      const accentText = document.createElement('span');
+      accentText.textContent = 'Accent';
+      accentLabel.appendChild(accentText);
+      accentLabel.setAttribute('for', accent.id);
+      row.appendChild(accentLabel);
 
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -1965,7 +2143,7 @@
   const openNewPaletteModal = () => {
     state.editingPaletteId = null;
     state.editingPaletteIsNew = true;
-    state.editingPaletteBuffer = { name: '', colors: [] };
+    state.editingPaletteBuffer = { name: '', colors: [], accent_max_mentions: 2 };
     paintEditPaletteModal();
     dom.editPaletteModal.hidden = false;
     dom.editPaletteNameInput.focus();
@@ -1980,13 +2158,23 @@
 
   /**
    * Copy a palette's current state into the edit buffer. We deep-copy
-   * the colors so user edits don't mutate the cached palette until
-   * Save commits.
+   * the colors (including ADR 0014 weight + accent) so user edits
+   * don't mutate the cached palette until Save commits.
    */
   const populateEditPaletteBuffer = (palette) => {
     state.editingPaletteBuffer = {
       name: palette.name || '',
-      colors: (palette.colors || []).map((c) => ({ hex: c.hex, name: c.name || '' }))
+      colors: (palette.colors || []).map((c) => ({
+        hex: c.hex,
+        name: c.name || '',
+        weight: (Number.isInteger(c.weight) && c.weight >= 1 && c.weight <= 10)
+          ? c.weight : 5,
+        accent: c.accent === true
+      })),
+      accent_max_mentions: (Number.isInteger(palette.accent_max_mentions)
+                              && palette.accent_max_mentions >= 1
+                              && palette.accent_max_mentions <= 5)
+        ? palette.accent_max_mentions : 2
     };
   };
 
@@ -2022,6 +2210,14 @@
     updateEditPaletteNameCount();
     dom.editPaletteNameError.hidden = true;
     dom.editPaletteNameError.textContent = '';
+    // ADR 0014 — accent cap input. Set from the buffer (or 2 default).
+    if (dom.editPaletteAccentMax) {
+      const cap = (buf && Number.isInteger(buf.accent_max_mentions)
+                    && buf.accent_max_mentions >= 1
+                    && buf.accent_max_mentions <= 5)
+        ? buf.accent_max_mentions : 2;
+      dom.editPaletteAccentMax.value = String(cap);
+    }
     renderEditPaletteColors();
     renderEditPalettePreview();
     if (dom.editPaletteAddError) {
@@ -2091,15 +2287,45 @@
         }
         return;
       }
+      // ADR 0014 — weight range + accent type client-side mirrors of
+      // server validation. Keeps the UI from sending requests the
+      // server would 400 on a basic shape check.
+      if (c.weight !== undefined &&
+          (!Number.isInteger(c.weight) || c.weight < 1 || c.weight > 10)) {
+        if (dom.editPaletteAddError) {
+          dom.editPaletteAddError.textContent = `Color ${i + 1}: weight must be an integer 1-10 (got ${c.weight})`;
+          dom.editPaletteAddError.hidden = false;
+        }
+        return;
+      }
+      if (c.accent !== undefined && typeof c.accent !== 'boolean') {
+        if (dom.editPaletteAddError) {
+          dom.editPaletteAddError.textContent = `Color ${i + 1}: accent must be true or false (got ${typeof c.accent})`;
+          dom.editPaletteAddError.hidden = false;
+        }
+        return;
+      }
+    }
+    // ADR 0014 — palette-level accent cap range check (matches the
+    // server's validatePaletteAccentMaxMentions: integer 1..5).
+    const accentMaxMentions = (buf && Number.isInteger(buf.accent_max_mentions))
+      ? buf.accent_max_mentions : 2;
+    if (accentMaxMentions < 1 || accentMaxMentions > 5) {
+      if (dom.editPaletteAddError) {
+        dom.editPaletteAddError.textContent = `Accent cap must be between 1 and 5 (got ${accentMaxMentions}).`;
+        dom.editPaletteAddError.hidden = false;
+      }
+      return;
     }
 
     try {
       let saved;
+      const body = { name, colors: buf.colors, accent_max_mentions: accentMaxMentions };
       if (state.editingPaletteIsNew) {
         saved = await apiCall('/api/palettes/custom', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, colors: buf.colors })
+          body: JSON.stringify(body)
         });
       } else {
         const id = state.editingPaletteId;
@@ -2107,7 +2333,7 @@
         saved = await apiCall(`/api/palettes/${encodeURIComponent(id)}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, colors: buf.colors })
+          body: JSON.stringify(body)
         });
       }
       const idx = state.palettes.findIndex((p) => p.id === saved.id);
@@ -2124,7 +2350,7 @@
           dom.editPaletteNameError.textContent = msg;
           dom.editPaletteNameError.hidden = false;
         }
-      } else if (/colors/i.test(msg)) {
+      } else if (/colors/i.test(msg) || /accent_max_mentions/i.test(msg)) {
         if (dom.editPaletteAddError) {
           dom.editPaletteAddError.textContent = msg;
           dom.editPaletteAddError.hidden = false;
@@ -2214,7 +2440,7 @@
         }
         return;
       }
-      buf.colors.push({ hex: parsed.hex, name });
+      buf.colors.push({ hex: parsed.hex, name, weight: 5, accent: false });
       dom.editPaletteAddHex.value = '#3b82f6';
       dom.editPaletteAddName.value = '';
       if (dom.editPaletteAddPicker) dom.editPaletteAddPicker.value = '#3b82f6';
@@ -2236,6 +2462,20 @@
     dom.editPaletteNameInput.addEventListener('input', () => {
       if (state.editingPaletteBuffer) state.editingPaletteBuffer.name = dom.editPaletteNameInput.value;
       updateEditPaletteNameCount();
+    });
+  }
+  // ADR 0014 — accent cap input: integer 1..5. Clamps out-of-range
+  // values back into the valid range so the buffer stays clean for
+  // the next submit.
+  if (dom.editPaletteAccentMax) {
+    dom.editPaletteAccentMax.addEventListener('input', () => {
+      if (!state.editingPaletteBuffer) return;
+      const raw = parseInt(dom.editPaletteAccentMax.value, 10);
+      const clamped = Math.max(1, Math.min(5, Number.isInteger(raw) ? raw : 2));
+      state.editingPaletteBuffer.accent_max_mentions = clamped;
+      if (dom.editPaletteAccentMax.value !== String(clamped)) {
+        dom.editPaletteAccentMax.value = String(clamped);
+      }
     });
   }
   wireAddColorRow();
