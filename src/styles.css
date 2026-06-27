@@ -1292,6 +1292,98 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* ADR 0014 Phase 4 — distribution dashboard panel. Collapsible
+   <details> below the version history. Renders a target vs measured
+   table for the most recent Stage 2 run that used this palette. */
+.palette-distribution-details {
+  margin: 0.85rem 0 0;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+}
+
+.palette-distribution-details__summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-primary);
+  list-style: revert;
+}
+
+.palette-distribution-dashboard {
+  margin-top: 0.65rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.palette-distribution-empty {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 0.4rem 0;
+  margin: 0;
+}
+
+.palette-distribution-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.palette-distribution-recorded-at {
+  color: var(--text-secondary);
+}
+
+.palette-distribution-mentions {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.palette-distribution-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.palette-distribution-table th,
+.palette-distribution-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.palette-distribution-table thead th {
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.palette-distribution-table tbody tr[data-accent="true"] th {
+  color: var(--color-accent);
+}
+
+.palette-distribution-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+  vertical-align: middle;
+  margin-right: 0.35rem;
+}
+
+.palette-distribution-accent-mark {
+  color: var(--color-accent);
+  font-size: 0.95rem;
+  margin-left: 0.15rem;
+}
+
 .visually-hidden-label {
   position: absolute;
   width: 1px; height: 1px;

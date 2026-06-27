@@ -164,6 +164,13 @@
     editPaletteAddBtn: $('edit-palette-add-btn'),
     editPaletteAddError: $('edit-palette-add-error'),
     paletteHistoryList: $('palette-history-list'),
+    editPaletteDistributionDetails: $('edit-palette-distribution-details'),
+    editPaletteDistributionDashboard: $('edit-palette-distribution-dashboard'),
+    editPaletteDistributionEmpty: $('edit-palette-distribution-empty'),
+    editPaletteDistributionContent: $('edit-palette-distribution-content'),
+    editPaletteDistributionRecordedAt: $('edit-palette-distribution-recorded-at'),
+    editPaletteDistributionMentions: $('edit-palette-distribution-mentions'),
+    editPaletteDistributionTbody: $('edit-palette-distribution-tbody'),
 
     // ADR 0009 — saved directives
     directivesSelect: $('directives-select'),
@@ -2103,6 +2110,94 @@
   };
 
   /**
+   * Render the distribution dashboard panel inside the edit modal.
+   * ADR 0014 Phase 4 — fetches the latest telemetry entry from
+   * GET /api/palettes/:id/distribution and renders a target vs
+   * measured comparison table. Falls back to an "empty" message when
+   * the palette has no recorded runs yet (404 from the endpoint).
+   *
+   * The dashboard panel is hidden in "new palette" mode (no id yet,
+   * nothing to query) and shown in "edit existing" mode.
+   */
+  const renderDistributionPanel = async (paletteId) => {
+    const details = dom.editPaletteDistributionDetails;
+    const empty = dom.editPaletteDistributionEmpty;
+    const content = dom.editPaletteDistributionContent;
+    if (!details || !empty || !content) return;
+
+    if (!paletteId) {
+      details.hidden = true;
+      return;
+    }
+    details.hidden = false;
+    empty.hidden = true;
+    content.hidden = true;
+    if (dom.editPaletteDistributionRecordedAt) dom.editPaletteDistributionRecordedAt.textContent = '';
+    if (dom.editPaletteDistributionMentions) dom.editPaletteDistributionMentions.textContent = '';
+    if (dom.editPaletteDistributionTbody) dom.editPaletteDistributionTbody.innerHTML = '';
+
+    let data;
+    try {
+      const res = await apiCall(`/api/palettes/${encodeURIComponent(paletteId)}/distribution`);
+      data = res;
+    } catch (e) {
+      // 404 (no runs yet) is the expected state for newly-saved
+      // palettes; surface it as the empty message. Anything else is a
+      // genuine error and gets a small inline status note.
+      if (/not found|no distribution/i.test(e.message || '')) {
+        empty.hidden = false;
+        return;
+      }
+      empty.textContent = `Failed to load distribution: ${e.message}`;
+      empty.hidden = false;
+      return;
+    }
+
+    if (!data || !data.metrics || !Array.isArray(data.metrics.counts)) {
+      empty.hidden = false;
+      return;
+    }
+
+    // Compute target fractions from the palette's stored colors (using
+    // the same clientNormalizeColorWeights as the live preview, so
+    // target bars in the dashboard line up with the bars above).
+    const targetNorm = clientNormalizeColorWeights(data.colors || []);
+    const counts = data.metrics.counts;
+    const totalWords = Number.isFinite(data.metrics.totalWords) ? data.metrics.totalWords : 0;
+    const totalMentions = Number.isFinite(data.metrics.totalMentions) ? data.metrics.totalMentions : 0;
+
+    if (dom.editPaletteDistributionRecordedAt) {
+      const when = formatRelativeDate(data.recorded_at);
+      dom.editPaletteDistributionRecordedAt.textContent = `Last run ${when}`;
+    }
+    if (dom.editPaletteDistributionMentions) {
+      dom.editPaletteDistributionMentions.textContent =
+        `${totalMentions} mention${totalMentions === 1 ? '' : 's'} across ${totalWords} word${totalWords === 1 ? '' : 's'}`;
+    }
+    if (dom.editPaletteDistributionTbody) {
+      dom.editPaletteDistributionTbody.innerHTML = '';
+      targetNorm.colors.forEach((c, i) => {
+        const target = targetNorm.displayPct[i] || 0;
+        const measured = (counts[i] && Number.isFinite(counts[i].totalCount))
+          ? counts[i].totalCount : 0;
+        const accentTag = c.accent === true ? ' <span class="palette-distribution-accent-mark" aria-hidden="true">★</span>' : '';
+        const tr = document.createElement('tr');
+        if (c.accent === true) tr.dataset.accent = 'true';
+        tr.innerHTML = `
+          <th scope="row">
+            <span class="palette-distribution-swatch" style="background:${c.hex}" aria-hidden="true"></span>
+            ${c.name || ''}${accentTag}
+          </th>
+          <td class="palette-distribution-target-cell">${target}%</td>
+          <td class="palette-distribution-measured-cell">${measured}</td>
+        `;
+        dom.editPaletteDistributionTbody.appendChild(tr);
+      });
+    }
+    content.hidden = false;
+  };
+
+  /**
    * Open the edit modal in "edit existing palette" mode.
    * Loads the palette by id, copies its current state into the buffer,
    * and re-fetches in the background so a parallel editor's changes
@@ -2226,6 +2321,11 @@
     }
     if (palette) renderPaletteHistoryList(palette);
     else renderPaletteHistoryList({ history: [] });
+    // ADR 0014 Phase 4 — fetch + render the distribution dashboard.
+    // Only meaningful when editing an existing palette (paletteId is
+    // set). For "new palette" mode, renderDistributionPanel hides the
+    // details block entirely.
+    renderDistributionPanel(state.editingPaletteId);
   };
 
   /**

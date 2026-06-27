@@ -491,6 +491,31 @@
             <ul id="palette-history-list" class="palette-history-list"></ul>
           </fieldset>
 
+          <details id="edit-palette-distribution-details" class="palette-distribution-details">
+            <summary class="palette-distribution-details__summary">Distribution dashboard</summary>
+            <div id="edit-palette-distribution-dashboard" class="palette-distribution-dashboard" aria-live="polite">
+              <p id="edit-palette-distribution-empty" class="palette-distribution-empty" hidden>
+                No runs yet for this palette. Click <strong>Generate prompt</strong> from the main wizard with this palette selected, then reopen the edit modal to see the target vs measured comparison.
+              </p>
+              <div id="edit-palette-distribution-content" hidden>
+                <p class="palette-distribution-meta">
+                  <span id="edit-palette-distribution-recorded-at" class="palette-distribution-recorded-at"></span>
+                  <span id="edit-palette-distribution-mentions" class="palette-distribution-mentions"></span>
+                </p>
+                <table class="palette-distribution-table" aria-label="Target vs measured color distribution from the latest run">
+                  <thead>
+                    <tr>
+                      <th scope="col">Color</th>
+                      <th scope="col">Target</th>
+                      <th scope="col">Measured</th>
+                    </tr>
+                  </thead>
+                  <tbody id="edit-palette-distribution-tbody"></tbody>
+                </table>
+              </div>
+            </div>
+          </details>
+
           <div class="modal-actions">
             <button type="button" id="edit-palette-delete" class="btn-danger">Delete palette…</button>
             <button type="button" id="edit-palette-cancel" class="btn-secondary">Cancel</button>

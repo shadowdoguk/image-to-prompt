@@ -254,6 +254,7 @@ const PRESETS_FILE = path.join(DATA_DIR, 'presets.json');
 const PALETTES_FILE = path.join(DATA_DIR, 'palettes.json');
 const DIRECTIVES_FILE = path.join(DATA_DIR, 'directives.json');
 const CHAT_SESSIONS_FILE = path.join(DATA_DIR, 'chat_sessions.json');
+const PALETTE_RUNS_FILE = path.join(DATA_DIR, 'palette_runs.json');
 
 const ensureDataFileExists = () => {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -261,6 +262,7 @@ const ensureDataFileExists = () => {
   if (!fs.existsSync(PALETTES_FILE)) fs.writeFileSync(PALETTES_FILE, '[]', 'utf8');
   if (!fs.existsSync(DIRECTIVES_FILE)) fs.writeFileSync(DIRECTIVES_FILE, '[]', 'utf8');
   if (!fs.existsSync(CHAT_SESSIONS_FILE)) fs.writeFileSync(CHAT_SESSIONS_FILE, '[]', 'utf8');
+  if (!fs.existsSync(PALETTE_RUNS_FILE)) fs.writeFileSync(PALETTE_RUNS_FILE, '[]', 'utf8');
 };
 
 const readPresets = () => {
@@ -998,6 +1000,115 @@ const pushPaletteHistory = (palette) => {
     palette.history.shift();
   }
   palette.updated_at = new Date().toISOString();
+};
+
+// ─── ADR 0014 Phase 4 — palette run telemetry (data/palette_runs.json) ───
+//
+// Append-only log of Stage 2 runs that used a saved palette, capped at
+// MAX_PALETTE_RUNS_PER_PALETTE entries per palette (oldest trimmed).
+// Mirrors the data/presets.json / data/palettes.json pattern: atomic
+// tmp+rename write, forgiving read on parse failure.
+
+const MAX_PALETTE_RUNS_PER_PALETTE = 50;
+
+/**
+ * Read all palette runs from disk. Seeds `[]` on first read. Returns
+ * an empty array on parse failure (with a console warning) so a
+ * corrupt file doesn't break Stage 2 telemetry.
+ *
+ * @returns {Array<object>}
+ */
+const readPaletteRuns = () => {
+  ensureDataFileExists();
+  let raw;
+  try {
+    raw = fs.readFileSync(PALETTE_RUNS_FILE, 'utf8');
+  } catch (e) {
+    console.error('Failed to read palette runs file:', e.message);
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.error('Palette runs file is corrupt JSON; returning empty list:', e.message);
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    console.warn('Palette runs file is not an array; returning empty list');
+    return [];
+  }
+  return parsed.filter((r) => {
+    if (!r || typeof r !== 'object') return false;
+    if (typeof r.palette_id !== 'string' || !r.palette_id.startsWith('palette_')) return false;
+    if (typeof r.recorded_at !== 'string') return false;
+    if (!r.metrics || typeof r.metrics !== 'object') return false;
+    return true;
+  });
+};
+
+/**
+ * Atomic-ish write (tmp + rename) for the palette runs file.
+ */
+const writePaletteRuns = (runs) => {
+  ensureDataFileExists();
+  const tmpFile = `${PALETTE_RUNS_FILE}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(runs, null, 2), 'utf8');
+  fs.renameSync(tmpFile, PALETTE_RUNS_FILE);
+};
+
+/**
+ * Append a Stage 2 run entry to the telemetry log. Trims the oldest
+ * entries for THIS palette (FIFO from the front) so a single palette
+ * used heavily doesn't grow the file without bound. Per-palette cap is
+ * MAX_PALETTE_RUNS_PER_PALETTE; other palettes' entries are untouched.
+ *
+ * @param {object} entry - { palette_id, run_id?, prompt, metrics, recorded_at }
+ * @returns {boolean} true on success, false on validation failure
+ */
+const appendPaletteRun = (entry) => {
+  if (!entry || typeof entry !== 'object') return false;
+  if (typeof entry.palette_id !== 'string' || !entry.palette_id.startsWith('palette_')) return false;
+  if (typeof entry.prompt !== 'string') return false;
+  if (!entry.metrics || typeof entry.metrics !== 'object') return false;
+  if (typeof entry.recorded_at !== 'string') entry.recorded_at = new Date().toISOString();
+
+  const runs = readPaletteRuns();
+  runs.push(entry);
+
+  // Trim oldest entries for THIS palette only. We keep at most
+  // MAX_PALETTE_RUNS_PER_PALETTE entries with this palette_id, removing
+  // from the front (FIFO). Other palettes' entries are preserved.
+  const samePalette = runs
+    .map((r, idx) => ({ r, idx }))
+    .filter((e) => e.r.palette_id === entry.palette_id);
+  if (samePalette.length > MAX_PALETTE_RUNS_PER_PALETTE) {
+    const toRemove = samePalette
+      .slice(0, samePalette.length - MAX_PALETTE_RUNS_PER_PALETTE)
+      .map((e) => e.idx)
+      .sort((a, b) => b - a);
+    for (const idx of toRemove) runs.splice(idx, 1);
+  }
+
+  writePaletteRuns(runs);
+  return true;
+};
+
+/**
+ * Get the most recent run entry for a given palette. Returns null when
+ * no telemetry exists for the palette (caller → 404).
+ *
+ * @param {string} paletteId
+ * @returns {object|null}
+ */
+const getLatestPaletteRun = (paletteId) => {
+  if (typeof paletteId !== 'string') return null;
+  const runs = readPaletteRuns();
+  // Reverse-iterate to find the newest match.
+  for (let i = runs.length - 1; i >= 0; i--) {
+    if (runs[i].palette_id === paletteId) return runs[i];
+  }
+  return null;
 };
 
 // ─── ADR 0014 — weighted color distribution and accent highlighting ─────
@@ -3174,6 +3285,21 @@ app.post('/api/generate-prompt', async (req, res) => {
       responseData.palette_id = appliedPalette.id;
       responseData.palette_name = appliedPalette.name;
       responseData.distribution_metrics = distribution_metrics;
+      // ADR 0014 Phase 4 — append telemetry to data/palette_runs.json
+      // so the Phase 4 dashboard has a target-vs-measured comparison
+      // surface for this palette. The append is best-effort: a write
+      // failure must NOT break the response (the user already got
+      // their prompt). Trim is handled inside appendPaletteRun.
+      try {
+        appendPaletteRun({
+          palette_id: appliedPalette.id,
+          prompt: finalPrompt,
+          metrics: distribution_metrics,
+          recorded_at: new Date().toISOString()
+        });
+      } catch (e) {
+        console.error('Failed to append palette run telemetry:', e.message);
+      }
     }
 
     res.json({ success: true, data: responseData });
@@ -3210,6 +3336,53 @@ app.get('/api/palettes/:id', (req, res) => {
     const palette = palettes.find((p) => p.id === req.params.id);
     if (!palette) return res.status(404).json({ success: false, error: `Palette "${req.params.id}" not found.` });
     res.json({ success: true, data: palette });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `GET /api/palettes/:id/distribution` — return the latest distribution
+ * telemetry for a palette (Phase 4 dashboard data source). Returns
+ * the most recent Stage 2 run entry's metrics, prompt, and timestamp
+ * so the frontend can render target vs measured bars. 404 when the
+ * palette has no recorded runs yet.
+ *
+ * ADR 0014 §4 — the response shape mirrors `distribution_metrics` from
+ * /api/generate-prompt so the dashboard can render the same fields
+ * without shape translation. `palette` is also returned so the
+ * dashboard can show accent cap + per-color weighting alongside the
+ * measurement.
+ */
+app.get('/api/palettes/:id/distribution', (req, res) => {
+  try {
+    const paletteId = req.params.id;
+    if (typeof paletteId !== 'string' || !paletteId.startsWith('palette_')) {
+      return res.status(400).json({ success: false, error: 'palette id must start with "palette_".' });
+    }
+    const palettes = readPalettes();
+    const palette = palettes.find((p) => p.id === paletteId);
+    if (!palette) return res.status(404).json({ success: false, error: `Palette "${paletteId}" not found.` });
+
+    const latest = getLatestPaletteRun(paletteId);
+    if (!latest) {
+      return res.status(404).json({
+        success: false,
+        error: `no distribution metrics recorded yet for palette "${paletteId}".`
+      });
+    }
+    res.json({
+      success: true,
+      data: {
+        palette_id: paletteId,
+        palette_name: palette.name,
+        accent_max_mentions: palette.accent_max_mentions,
+        colors: palette.colors,
+        metrics: latest.metrics,
+        prompt: latest.prompt,
+        recorded_at: latest.recorded_at
+      }
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: sanitizeError(error.message) });
   }
@@ -4800,6 +4973,12 @@ module.exports = {
   buildColorBudgetBlock,
   buildStage2Envelope,
   measureColorDistribution,
+  // ADR 0014 Phase 4 — palette run telemetry
+  MAX_PALETTE_RUNS_PER_PALETTE,
+  readPaletteRuns,
+  writePaletteRuns,
+  appendPaletteRun,
+  getLatestPaletteRun,
   readStage2Overrides,
   writeStage2Overrides,
   getStage2Override,

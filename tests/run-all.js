@@ -3414,7 +3414,307 @@ test('ADR 0014: PUT /api/palettes/:id accepts weight + accent + accent_max_menti
   }
 });
 
-// ── Frontend HTML / CSS / JS assertions
+// ─── ADR 0014 — Phase 4: distribution dashboard ────────────────────────
+//
+// Phase 4 wires the telemetry log (`data/palette_runs.json`) and the
+// dashboard panel that reads it. Tests cover:
+//   - Pure helpers (readPaletteRuns / writePaletteRuns / appendPaletteRun
+//     / getLatestPaletteRun) including the per-palette 50-entry cap.
+//   - HTTP integration: telemetry append on /api/generate-prompt success
+//     + GET /api/palettes/:id/distribution (404 when no runs yet, 200
+//     + payload shape when telemetry exists).
+//   - HTML/CSS/JS assertions for the dashboard panel structure.
+
+test('ADR 0014: appendPaletteRun + getLatestPaletteRun — basic round-trip', () => {
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const tmpFile = path2.join(PROJECT_ROOT, 'data', 'palette_runs.json');
+  const before = fs2.existsSync(tmpFile) ? fs2.readFileSync(tmpFile, 'utf8') : '[]';
+  try {
+    fs2.writeFileSync(tmpFile, '[]', 'utf8');
+    // Clear require cache so we get a fresh readPaletteRuns closure bound
+    // to the now-empty file.
+    delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+    const { appendPaletteRun, getLatestPaletteRun, readPaletteRuns } =
+      require(path.join(PROJECT_ROOT, 'server.js'));
+
+    const paletteId = 'palette_aabbccdd00000001';
+    assertEqual(getLatestPaletteRun(paletteId), null, 'no runs yet → null');
+
+    const ok = appendPaletteRun({
+      palette_id: paletteId,
+      prompt: 'A burnt orange sky.',
+      metrics: { counts: [{ hex: '#d97706', name: 'burnt orange', nameCount: 2, hexCount: 0, totalCount: 2 }], totalMentions: 2, totalWords: 4, measuredAt: '2026-06-27T12:00:00.000Z' },
+      recorded_at: '2026-06-27T12:00:00.000Z'
+    });
+    assertEqual(ok, true, 'append succeeds');
+    const runs = readPaletteRuns();
+    assertEqual(runs.length, 1, 'one run stored');
+    assertEqual(runs[0].palette_id, paletteId, 'palette_id preserved');
+    const latest = getLatestPaletteRun(paletteId);
+    assertTrue(latest && latest.prompt === 'A burnt orange sky.', 'latest found');
+  } finally {
+    fs2.writeFileSync(tmpFile, before, 'utf8');
+    delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+  }
+});
+
+test('ADR 0014: appendPaletteRun — validates required fields', () => {
+  const { appendPaletteRun } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(appendPaletteRun(null), false, 'null rejected');
+  assertEqual(appendPaletteRun({}), false, 'empty rejected');
+  assertEqual(appendPaletteRun({ palette_id: 'bad' }), false, 'missing prompt/metrics rejected');
+  assertEqual(appendPaletteRun({
+    palette_id: 'palette_aa', prompt: 'x', metrics: null
+  }), false, 'null metrics rejected');
+  assertEqual(appendPaletteRun({
+    palette_id: 'not-prefixed', prompt: 'x', metrics: { counts: [] }
+  }), false, 'invalid palette_id prefix rejected');
+});
+
+test('ADR 0014: appendPaletteRun — caps per-palette history at MAX_PALETTE_RUNS_PER_PALETTE', () => {
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const tmpFile = path2.join(PROJECT_ROOT, 'data', 'palette_runs.json');
+  const before = fs2.existsSync(tmpFile) ? fs2.readFileSync(tmpFile, 'utf8') : '[]';
+  try {
+    fs2.writeFileSync(tmpFile, '[]', 'utf8');
+    delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+    const { appendPaletteRun, readPaletteRuns, MAX_PALETTE_RUNS_PER_PALETTE } =
+      require(path.join(PROJECT_ROOT, 'server.js'));
+    const paletteA = 'palette_aaaaaaaaaaaaaaa1';
+    const paletteB = 'palette_bbbbbbbbbbbbbbb1';
+    // Append MAX + 5 to palette A (older should be trimmed from front).
+    for (let i = 0; i < MAX_PALETTE_RUNS_PER_PALETTE + 5; i++) {
+      appendPaletteRun({
+        palette_id: paletteA,
+        prompt: `run ${i} for A`,
+        metrics: { counts: [], totalMentions: 0, totalWords: 0, measuredAt: 'x' },
+        recorded_at: new Date(2026, 0, 1, 0, i).toISOString()
+      });
+    }
+    // And 3 to palette B (untouched).
+    for (let i = 0; i < 3; i++) {
+      appendPaletteRun({
+        palette_id: paletteB,
+        prompt: `run ${i} for B`,
+        metrics: { counts: [], totalMentions: 0, totalWords: 0, measuredAt: 'x' },
+        recorded_at: new Date(2026, 0, 2, 0, i).toISOString()
+      });
+    }
+    const runs = readPaletteRuns();
+    const aRuns = runs.filter((r) => r.palette_id === paletteA);
+    const bRuns = runs.filter((r) => r.palette_id === paletteB);
+    assertEqual(aRuns.length, MAX_PALETTE_RUNS_PER_PALETTE, 'palette A capped at MAX');
+    assertEqual(bRuns.length, 3, 'palette B unaffected (3 runs preserved)');
+    // Oldest entries for A were trimmed — the earliest "run N" prompt
+    // should be run N = 5 (first 5 were trimmed).
+    assertTrue(/run 5/.test(aRuns[0].prompt), `oldest kept prompt: ${aRuns[0].prompt}`);
+    assertTrue(/run \d+ for A$/.test(aRuns[aRuns.length - 1].prompt), 'newest A prompt is the last');
+  } finally {
+    fs2.writeFileSync(tmpFile, before, 'utf8');
+    delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+  }
+});
+
+test('ADR 0014: readPaletteRuns — forgives corrupt JSON + filters malformed entries', () => {
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const tmpFile = path2.join(PROJECT_ROOT, 'data', 'palette_runs.json');
+  const before = fs2.existsSync(tmpFile) ? fs2.readFileSync(tmpFile, 'utf8') : '[]';
+  try {
+    fs2.writeFileSync(tmpFile, JSON.stringify([
+      { palette_id: 'palette_valid0000001', prompt: 'p', metrics: { counts: [] }, recorded_at: '2026-06-27T00:00:00.000Z' },
+      { palette_id: 'not-a-palette-id', prompt: 'p', metrics: { counts: [] }, recorded_at: '2026-06-27T00:00:00.000Z' },
+      { palette_id: 'palette_valid0000001', prompt: 'p' /* missing metrics */ },
+      'not-an-object',
+      null
+    ]), 'utf8');
+    delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+    const { readPaletteRuns } = require(path.join(PROJECT_ROOT, 'server.js'));
+    const runs = readPaletteRuns();
+    assertEqual(runs.length, 1, 'only the fully-valid entry survives');
+    assertEqual(runs[0].palette_id, 'palette_valid0000001', 'survivor is the valid one');
+  } finally {
+    fs2.writeFileSync(tmpFile, before, 'utf8');
+    delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+  }
+});
+
+// HTTP integration
+
+test('ADR 0014: GET /api/palettes/:id/distribution returns 404 when no telemetry exists', async () => {
+  const snapshotPalettes = snapshotPalettesFile();
+  resetPalettesFile();
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const runsFile = path2.join(PROJECT_ROOT, 'data', 'palette_runs.json');
+  const beforeRuns = fs2.existsSync(runsFile) ? fs2.readFileSync(runsFile, 'utf8') : '[]';
+  fs2.writeFileSync(runsFile, '[]', 'utf8');
+  const srv = await startTestServer();
+  try {
+    // Seed a palette so the endpoint can validate the id format +
+    // palette existence before checking telemetry.
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const paletteId = create.body.data.id;
+    const r = await fetchJson(`${srv.base}/api/palettes/${paletteId}/distribution`);
+    assertEqual(r.status, 404, 'no telemetry → 404');
+    assertTrue(/no distribution metrics/.test(r.body.error), 'error mentions missing telemetry');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshotPalettes);
+    fs2.writeFileSync(runsFile, beforeRuns, 'utf8');
+  }
+});
+
+test('ADR 0014: GET /api/palettes/:id/distribution returns 404 for unknown palette', async () => {
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/palettes/palette_unknown_aaaaa/distribution`);
+    assertEqual(r.status, 404, 'unknown palette → 404');
+    assertTrue(/palette_unknown_aaaaa/.test(r.body.error), 'error names the palette id');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('ADR 0014: GET /api/palettes/:id/distribution returns 400 for malformed id', async () => {
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/palettes/not-prefixed/distribution`);
+    assertEqual(r.status, 400, 'malformed id → 400');
+    assertTrue(/palette_/.test(r.body.error), 'error mentions expected prefix');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('ADR 0014: GET /api/palettes/:id/distribution returns the latest telemetry payload', async () => {
+  // Seed a palette, manually inject two telemetry entries (newer +
+  // older), and assert the endpoint returns the newer one with the
+  // documented payload shape (palette_id, palette_name,
+  // accent_max_mentions, colors, metrics, prompt, recorded_at).
+  const snapshotPalettes = snapshotPalettesFile();
+  resetPalettesFile();
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const runsFile = path2.join(PROJECT_ROOT, 'data', 'palette_runs.json');
+  const beforeRuns = fs2.existsSync(runsFile) ? fs2.readFileSync(runsFile, 'utf8') : '[]';
+  const srv = await startTestServer();
+  try {
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...validPaletteBody(),
+        colors: [
+          { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
+          { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+        ],
+        accent_max_mentions: 2
+      })
+    });
+    const paletteId = create.body.data.id;
+
+    // Inject two telemetry entries; newer first in file order so the
+    // reverse-iterating getLatestPaletteRun picks the most recent.
+    const entries = [
+      {
+        palette_id: paletteId,
+        prompt: 'Older run',
+        metrics: {
+          counts: [
+            { hex: '#d97706', name: 'burnt orange', nameCount: 1, hexCount: 0, totalCount: 1 },
+            { hex: '#dc2626', name: 'signal red', nameCount: 3, hexCount: 0, totalCount: 3 }
+          ],
+          totalMentions: 4, totalWords: 12, measuredAt: '2026-06-27T10:00:00.000Z'
+        },
+        recorded_at: '2026-06-27T10:00:00.000Z'
+      },
+      {
+        palette_id: paletteId,
+        prompt: 'Newer run',
+        metrics: {
+          counts: [
+            { hex: '#d97706', name: 'burnt orange', nameCount: 4, hexCount: 0, totalCount: 4 },
+            { hex: '#dc2626', name: 'signal red', nameCount: 1, hexCount: 0, totalCount: 1 }
+          ],
+          totalMentions: 5, totalWords: 20, measuredAt: '2026-06-27T12:00:00.000Z'
+        },
+        recorded_at: '2026-06-27T12:00:00.000Z'
+      }
+    ];
+    fs2.writeFileSync(runsFile, JSON.stringify(entries), 'utf8');
+
+    const r = await fetchJson(`${srv.base}/api/palettes/${paletteId}/distribution`);
+    assertEqual(r.status, 200, 'telemetry exists → 200');
+    assertEqual(r.body.data.palette_id, paletteId, 'palette_id returned');
+    assertEqual(r.body.data.palette_name, 'Sunset ochres', 'palette_name returned');
+    assertEqual(r.body.data.accent_max_mentions, 2, 'accent_max_mentions returned');
+    assertEqual(r.body.data.colors.length, 2, 'colors returned');
+    assertEqual(r.body.data.prompt, 'Newer run', 'latest prompt returned (not older)');
+    assertEqual(r.body.data.metrics.totalMentions, 5, 'latest metrics returned');
+    assertEqual(r.body.data.metrics.counts.length, 2, 'count entries per color');
+    assertEqual(r.body.data.recorded_at, '2026-06-27T12:00:00.000Z', 'recorded_at returned');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshotPalettes);
+    fs2.writeFileSync(runsFile, beforeRuns, 'utf8');
+  }
+});
+
+// HTML/CSS/JS for the dashboard panel
+
+test('ADR 0014: edit modal dashboard panel structure exists with a11y attributes (Phase 4)', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/<details[^>]*id="edit-palette-distribution-details"/.test(html),
+             'collapsible <details> wrapper present');
+  assertTrue(/<summary[^>]*class="palette-distribution-details__summary"[^>]*>Distribution dashboard<\/summary>/.test(html),
+             'summary text "Distribution dashboard" present');
+  assertTrue(/id="edit-palette-distribution-empty"/.test(html),
+             'empty-state element present');
+  assertTrue(/id="edit-palette-distribution-content"/.test(html),
+             'content element present');
+  assertTrue(/<table[^>]*class="palette-distribution-table"/.test(html),
+             'comparison table present');
+  assertTrue(/<th scope="col">Target<\/th>/.test(html), 'Target column header present');
+  assertTrue(/<th scope="col">Measured<\/th>/.test(html), 'Measured column header present');
+  assertTrue(/aria-label="Target vs measured color distribution from the latest run"/.test(html),
+             'table aria-label present');
+  assertTrue(/<tbody id="edit-palette-distribution-tbody">/.test(html),
+             'tbody present for JS to fill rows');
+});
+
+test('ADR 0014: stylesheet has dashboard panel rules (Phase 4)', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  assertTrue(/\.palette-distribution-details/.test(css), 'details wrapper rule');
+  assertTrue(/\.palette-distribution-table/.test(css), 'comparison table rule');
+  assertTrue(/\.palette-distribution-swatch/.test(css), 'inline swatch rule');
+  assertTrue(/\.palette-distribution-accent-mark/.test(css), 'accent star rule');
+  assertTrue(/tr\[data-accent="true"\]/.test(css), 'accent row visual treatment');
+});
+
+test('ADR 0014: app.js wires renderDistributionPanel into the edit modal flow (Phase 4)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/renderDistributionPanel/.test(js), 'renderDistributionPanel function exists');
+  assertTrue(/editPaletteDistributionDetails/.test(js), 'details DOM cache entry exists');
+  assertTrue(/editPaletteDistributionTbody/.test(js), 'tbody DOM cache entry exists');
+  assertTrue(/apiCall\(`\/api\/palettes\/\$\{encodeURIComponent\(paletteId\)\}\/distribution`/.test(js) ||
+             /\/api\/palettes\/\$\{encodeURIComponent\(paletteId\)\}\/distribution/.test(js),
+             'fetches /api/palettes/:id/distribution');
+  assertTrue(/renderDistributionPanel\(state\.editingPaletteId\)/.test(js),
+             'invoked from paintEditPaletteModal');
+});
+
+test('ADR 0014: README documents the new /api/palettes/:id/distribution endpoint (Phase 4)', () => {
+  const readme = fs.readFileSync(path.join(PROJECT_ROOT, 'README.md'), 'utf8');
+  assertTrue(/\/api\/palettes\/:id\/distribution/.test(readme),
+             'README mentions the new endpoint');
+});
 
 test('Frontend HTML: directives actions row + 3 new modals exist with a11y attrs (ADR 0009)', () => {
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');

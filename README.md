@@ -336,9 +336,10 @@ Edit, custom-create, and version history are covered by ADR 0013.
 |---|---|---|
 | `GET` | `/api/palettes` | List all saved palettes |
 | `GET` | `/api/palettes/:id` | Get a single palette (with history) |
+| `GET` | `/api/palettes/:id/distribution` | Latest distribution telemetry (Phase 4 dashboard data) |
 | `POST` | `/api/palettes` | Save a new palette from a finished run |
 | `POST` | `/api/palettes/custom` | Create a brand-new palette from scratch (no source run required) |
-| `PUT` | `/api/palettes/:id` | Partial edit — body: `{ name?, colors? }` |
+| `PUT` | `/api/palettes/:id` | Partial edit — body: `{ name?, colors?, accent_max_mentions? }` |
 | `POST` | `/api/palettes/:id/restore/:version` | Roll back to a specific history version |
 | `DELETE` | `/api/palettes/:id` | Hard-delete a palette |
 
