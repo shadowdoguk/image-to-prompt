@@ -12,7 +12,7 @@ An AI-powered web application that transforms uploaded images into refined, deta
 - **Copy-to-clipboard** for generated prompts
 - **Error handling** for API timeouts, rate limits, and invalid responses
 - **Responsive design** — works on mobile, tablet, and desktop
-- **Saved color palettes** — name and reuse a palette from any run. After analyze, a "Save palette…" button sits directly under the analyzed colors — click it, name the palette, and it becomes available in the Step 1 picker to override the auto-analyzed colors on the next job.
+- **Saved color palettes** — name and reuse a palette from any run. After analyze, a "Save palette…" button sits directly under the analyzed colors — click it, name the palette, and it becomes available in the Step 1 picker to override the auto-analyzed colors on the next job. Per-color **weight** (1–10) + **accent flag** + palette-level **accent cap** shape how the palette influences generated prompts: the server appends a deterministic `Color usage budget` block to the Stage 2 user message, and a distribution dashboard panel surfaces measured vs target mention counts per color (ADR 0014).
 - **Saved directives** — name, tag, version, search, share, and reuse your favorite Stage 2 directives. Below the directives textarea, a "Save directive…" button captures the current text as a named, tagged directive; a "Manage directives…" modal lets you edit, search, filter, restore prior versions, and import/export directive sets as `.i2p.json` files. Usage frequency and last-used date are tracked automatically each time you apply a directive.
 
 ## Architecture
@@ -439,6 +439,53 @@ accepts any of the three color formats, and a version history list with
 one-click **Restore** per prior version. Edits are committed via
 `PUT /api/palettes/:id`; new palettes are committed via
 `POST /api/palettes/custom`.
+
+### Weighted distribution and accents (ADR 0014)
+
+Each color in a palette carries an optional integer `weight` (1–10,
+default 5) and an optional boolean `accent` flag (default false). The
+palette as a whole carries an optional `accent_max_mentions` (1–5,
+default 2). These shape how the saved palette influences generated
+prompts:
+
+- **Weight** sets the color's relative fraction of the prompt's color
+  budget. Higher-weighted colors are emphasised more; the server
+  appends a deterministic `Color usage budget` block to the Stage 2
+  user message listing each color's fraction as a percentage.
+- **Accent** flags a color as a "punchy" highlight. The budget block
+  caps total accent mentions at `accent_max_mentions` and tags the
+  line `(ACCENT — mention at most N times total; place where it adds
+  focus)`.
+- **Legacy palettes** (created before ADR 0014, with no weighting
+  fields) keep their pre-ADR behaviour: no budget block is sent, the
+  response envelope is the same shape as before.
+
+In the edit modal, each color row gains a **weight slider** (1–10
+with a live `Weight N` label) and an **accent checkbox**. The legend
+of the colors fieldset gains an **Accent cap** number input (1–5).
+Below the swatch preview, a **Target distribution** bar chart renders
+one row per color with a coloured bar whose width matches the
+normalised fraction; accent rows get a ★ badge and a warm outline.
+
+The `Distribution dashboard` collapsible panel under the version
+history fetches `GET /api/palettes/:id/distribution` on open and
+renders a target vs measured comparison table for the most recent
+Stage 2 run that used this palette. Measured counts come from
+`measureColorDistribution`, which tokenizes the LLM output for color
+names (case-insensitive, hyphen/space normalised) and hex strings
+(with or without leading `#`). Telemetry is appended automatically
+on every successful `/api/generate-prompt` run that used a palette;
+entries are capped at 50 per palette (FIFO trim).
+
+### Rollout gate
+
+ADR 0014 ships behind a UAT sign-off rather than a runtime feature
+flag (no flag infrastructure exists in this codebase). The full
+checklist is at `docs/adr/0014-uat-checklist.md`. The feature is
+"live" in the sense that all server endpoints + UI controls are
+shipped, but rollout is treated as "pending reviewer sign-off" until
+the UAT pass is recorded against the three reference palettes
+(Sunset ochres, Brand Q3, Legacy test).
 
 ## Saved Directive API
 

@@ -2,8 +2,15 @@
 
 ## Status
 
-Proposed. Feasibility study accepted by author 2026-06-27; awaiting
-implementation in the phased rollout at the foot of this document.
+Accepted. Phases 1–4 implemented 2026-06-27:
+- Phase 1 (data layer + pure helpers) — landed.
+- Phase 2 (Stage 2 injection + telemetry envelope) — landed.
+- Phase 3 (edit modal: weight slider + accent toggle + accent cap +
+  live preview bars) — landed.
+- Phase 4 (distribution dashboard: telemetry log + endpoint +
+  collapsible panel) — landed.
+- Phase 5 (UAT + rollout gate) — checklist below; rollout behind a
+  feature flag until UAT signs off.
 
 ## Type
 
