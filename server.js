@@ -534,6 +534,29 @@ const readPalettes = () => {
     // the first PUT on such an entry pushes v1 to history. Keeping them
     // visible avoids forcing the user to re-save existing palettes.
     if (!Array.isArray(p.history)) p.history = [];
+    // ADR 0014 — synthesize defaults for the optional weighting fields on
+    // legacy colors. After this point every palette on disk has the full
+    // shape: per-color { hex, name, weight, accent } and palette-level
+    // accent_max_mentions. The first PUT writes them back to disk so the
+    // on-disk shape normalizes over time. The validation layer accepts
+    // input without these fields (they're optional on write too) — this
+    // synthesis is purely a read-side courtesy.
+    p.colors = p.colors.map((c) => {
+      if (!c || typeof c !== 'object') return c;
+      const out = { ...c };
+      if (typeof out.weight !== 'number' || !Number.isInteger(out.weight) ||
+          out.weight < MIN_COLOR_WEIGHT || out.weight > MAX_COLOR_WEIGHT) {
+        out.weight = DEFAULT_COLOR_WEIGHT;
+      }
+      if (typeof out.accent !== 'boolean') out.accent = false;
+      return out;
+    });
+    if (typeof p.accent_max_mentions !== 'number' ||
+        !Number.isInteger(p.accent_max_mentions) ||
+        p.accent_max_mentions < MIN_ACCENT_MAX_MENTIONS ||
+        p.accent_max_mentions > MAX_ACCENT_MAX_MENTIONS) {
+      p.accent_max_mentions = DEFAULT_ACCENT_MAX_MENTIONS;
+    }
     return true;
   });
 };
@@ -627,6 +650,14 @@ const validatePalette = (body, { existingNames, excludeId } = {}) => {
     return `source_preset_id must be a string starting with "${PRESET_ID_PREFIX}" (got ${JSON.stringify(body.source_preset_id)})`;
   }
 
+  // ADR 0014 — optional palette-level accent_max_mentions. Only
+  // validated when present so callers that don't supply it keep working
+  // (readPalettes will synthesize the default on the next read).
+  if (body.accent_max_mentions !== undefined) {
+    const amErr = validatePaletteAccentMaxMentions(body.accent_max_mentions);
+    if (amErr) return `accent_max_mentions: ${amErr}`;
+  }
+
   return null;
 };
 
@@ -685,6 +716,22 @@ const applyPaletteToAnalysis = (analysis, palette) => {
 //   - per-palette history push (ADR 0013 §1)
 
 const MAX_PALETTE_HISTORY = 200;
+
+// ─── ADR 0014 — weighted color distribution and accent highlighting ────────
+//
+// Each color in a palette carries an optional integer `weight` (1–10,
+// default 5) and an optional boolean `accent` (default false). The
+// palette as a whole carries an optional integer `accent_max_mentions`
+// (1–5, default 2) that caps how often the LLM is told to mention an
+// accent color. The numeric ranges are deliberately tight so the UI
+// can render meaningful sliders and the server can validate cheaply.
+
+const MIN_COLOR_WEIGHT = 1;
+const MAX_COLOR_WEIGHT = 10;
+const DEFAULT_COLOR_WEIGHT = 5;
+const MIN_ACCENT_MAX_MENTIONS = 1;
+const MAX_ACCENT_MAX_MENTIONS = 5;
+const DEFAULT_ACCENT_MAX_MENTIONS = 2;
 
 /**
  * Parse a single user-entered color string into canonical hex form.
@@ -806,7 +853,23 @@ const validatePaletteColorsFlexible = (colors) => {
     if (typeof c.name !== 'string') {
       return { colors: null, error: `colors[${i}].name must be a string` };
     }
-    out.push({ hex: parsed.hex, name: c.name });
+    // ADR 0014 — optional per-color weight/accent. Only validated when
+    // present so callers that don't supply them keep working unchanged.
+    // Invalid values produce a 400 — the user is asking for something
+    // we can't honour, so fail loud at the boundary.
+    const entry = { hex: parsed.hex, name: c.name };
+    if (c.weight !== undefined) {
+      const wErr = validatePaletteColorWeight(c.weight);
+      if (wErr) return { colors: null, error: `colors[${i}].weight: ${wErr}` };
+      entry.weight = c.weight;
+    }
+    if (c.accent !== undefined) {
+      if (typeof c.accent !== 'boolean') {
+        return { colors: null, error: `colors[${i}].accent must be a boolean (got ${typeof c.accent})` };
+      }
+      entry.accent = c.accent;
+    }
+    out.push(entry);
   }
   return { colors: out, error: null };
 };
@@ -832,8 +895,12 @@ const validatePaletteEdit = (body, { existingNames, excludeId } = {}) => {
   }
   const hasName = body.name !== undefined;
   const hasColors = body.colors !== undefined;
-  if (!hasName && !hasColors) {
-    return 'At least one of "name" or "colors" must be provided.';
+  // ADR 0014 — accent_max_mentions is also a valid partial-body field.
+  // A user with a palette that only needs the cap adjusted shouldn't
+  // be forced to resend name+colors.
+  const hasAccentMax = body.accent_max_mentions !== undefined;
+  if (!hasName && !hasColors && !hasAccentMax) {
+    return 'At least one of "name", "colors", or "accent_max_mentions" must be provided.';
   }
   if (hasName) {
     const nameError = validatePaletteName({ name: body.name }, { existingNames, excludeId });
@@ -842,6 +909,12 @@ const validatePaletteEdit = (body, { existingNames, excludeId } = {}) => {
   if (hasColors) {
     const r = validatePaletteColorsFlexible(body.colors);
     if (r.error) return r.error;
+  }
+  // ADR 0014 — optional palette-level accent_max_mentions. Same
+  // partial-body pattern as name/colors: validated only when present.
+  if (body.accent_max_mentions !== undefined) {
+    const amErr = validatePaletteAccentMaxMentions(body.accent_max_mentions);
+    if (amErr) return `accent_max_mentions: ${amErr}`;
   }
   return null;
 };
@@ -871,19 +944,42 @@ const applyPaletteUpdate = (palette, body) => {
     if (r.error) return r.error;
     palette.colors = r.colors;
   }
+  // ADR 0014 — palette-level accent_max_mentions. Only applied when
+  // explicitly provided; readPalettes has already synthesized the
+  // default on the in-memory palette, so an absent field means "leave
+  // the synthesized default alone" (consistent with how missing name/
+  // colors is handled).
+  if (body.accent_max_mentions !== undefined) {
+    const amErr = validatePaletteAccentMaxMentions(body.accent_max_mentions);
+    if (amErr) return `accent_max_mentions: ${amErr}`;
+    palette.accent_max_mentions = body.accent_max_mentions;
+  }
   return null;
 };
 
 /**
  * Build a fresh history entry from the current top-level state of a
- * palette. Captures `name` + `colors` (the only mutable top-level
- * fields). Caller has already mutated `palette` to its new state; we
+ * palette. Captures `name`, `colors`, and `accent_max_mentions` (ADR
+ * 0014 — the palette-level accent cap), so a rollback via
+ * POST /:id/restore/:version faithfully restores the weighting state
+ * too. Caller has already mutated `palette` to its new state; we
  * capture the snapshot for history.
  */
 const snapshotPalette = (palette) => ({
   version: (Array.isArray(palette.history) ? palette.history.length : 0) + 1,
   name: palette.name,
-  colors: palette.colors.map((c) => ({ hex: c.hex, name: c.name })),
+  colors: palette.colors.map((c) => {
+    // ADR 0014 — preserve weight/accent on the snapshot. readPalettes
+    // has already synthesized defaults, so every color we see here has
+    // at least the defaults; copying the full shape is safe.
+    const snap = { hex: c.hex, name: c.name };
+    if (typeof c.weight === 'number') snap.weight = c.weight;
+    if (typeof c.accent === 'boolean') snap.accent = c.accent;
+    return snap;
+  }),
+  accent_max_mentions: typeof palette.accent_max_mentions === 'number'
+    ? palette.accent_max_mentions
+    : DEFAULT_ACCENT_MAX_MENTIONS,
   saved_at: new Date().toISOString()
 });
 
@@ -902,6 +998,247 @@ const pushPaletteHistory = (palette) => {
     palette.history.shift();
   }
   palette.updated_at = new Date().toISOString();
+};
+
+// ─── ADR 0014 — weighted color distribution and accent highlighting ─────
+//
+// The helpers below implement the pure data layer for ADR 0014:
+//   - validatePaletteColorWeight / validatePaletteAccentMaxMentions:
+//     boundary checks for the two new integer ranges.
+//   - normalizeColorWeights: single source of truth for distribution
+//     arithmetic. Always returns a valid result, even on garbage input,
+//     so callers can never be surprised by NaN or division by zero.
+//   - buildColorBudgetBlock: deterministic string appended to the
+//     Stage 2 user message in Phase 2.
+//   - measureColorDistribution: tokenizes the LLM output for the
+//     dashboard. Read-only — never mutates the prompt.
+// The pure helpers are all exported so tests/run-all.js can cover the
+// edge-case matrix without spinning up the server.
+
+/**
+ * Validate a per-color `weight` value. Returns an error string or null.
+ * Accepts: integer in [MIN_COLOR_WEIGHT, MAX_COLOR_WEIGHT]. Rejects:
+ * non-numbers, non-integers, NaN/Infinity, out-of-range. The check is
+ * deliberately strict so the slider's integer steps always produce
+ * valid input on the wire.
+ */
+const validatePaletteColorWeight = (weight) => {
+  if (typeof weight !== 'number') return `must be a number (got ${typeof weight})`;
+  if (!Number.isFinite(weight)) return `must be a finite number (got ${weight})`;
+  if (!Number.isInteger(weight)) return `must be an integer (got ${weight})`;
+  if (weight < MIN_COLOR_WEIGHT) return `must be ${MIN_COLOR_WEIGHT} or greater (got ${weight})`;
+  if (weight > MAX_COLOR_WEIGHT) return `must be ${MAX_COLOR_WEIGHT} or less (got ${weight})`;
+  return null;
+};
+
+/**
+ * Validate a palette-level `accent_max_mentions` value. Returns an
+ * error string or null. Same strictness rules as
+ * `validatePaletteColorWeight`.
+ */
+const validatePaletteAccentMaxMentions = (n) => {
+  if (typeof n !== 'number') return `must be a number (got ${typeof n})`;
+  if (!Number.isFinite(n)) return `must be a finite number (got ${n})`;
+  if (!Number.isInteger(n)) return `must be an integer (got ${n})`;
+  if (n < MIN_ACCENT_MAX_MENTIONS) return `must be ${MIN_ACCENT_MAX_MENTIONS} or greater (got ${n})`;
+  if (n > MAX_ACCENT_MAX_MENTIONS) return `must be ${MAX_ACCENT_MAX_MENTIONS} or less (got ${n})`;
+  return null;
+};
+
+/**
+ * Check whether the palette has any user-customized weighting — used
+ * to decide whether `buildColorBudgetBlock` should emit anything. A
+ * palette is "untouched" when every weight is the default AND no color
+ * is an accent AND accent_max_mentions is the default. This is the
+ * "pure legacy" case from ADR 0014 §4: the user hasn't expressed a
+ * preference, so we leave the LLM to balance the palette as before.
+ */
+const isPaletteUnweighted = (palette) => {
+  if (!palette || !Array.isArray(palette.colors) || palette.colors.length === 0) return true;
+  if (typeof palette.accent_max_mentions === 'number' &&
+      palette.accent_max_mentions !== DEFAULT_ACCENT_MAX_MENTIONS) {
+    return false;
+  }
+  for (const c of palette.colors) {
+    if (typeof c.weight === 'number' && c.weight !== DEFAULT_COLOR_WEIGHT) return false;
+    if (c.accent === true) return false;
+  }
+  return true;
+};
+
+/**
+ * Single source of truth for distribution arithmetic. Takes an array
+ * of palette colors (already through readPalettes synthesis, so every
+ * entry has weight/accent defined) and returns:
+ *   - colors: same array, untouched (pure)
+ *   - fractions[i]: float in [0, 1] summing to 1.0 (within float epsilon)
+ *   - displayPct[i]: integer in [0, 100] (rounded); may not sum to 100
+ *     due to rounding — UI labels this as "sums to N%" honestly
+ *   - totalWeight: integer sum of weights
+ *
+ * Edge cases (all return valid output — never throws):
+ *   - Empty array → empty output, totalWeight: 0
+ *   - One color with any weight → fraction 1.0, displayPct 100
+ *   - All weights at default → equal fractions (1/N each)
+ *   - Mixed valid/garbage weights → already handled upstream by the
+ *     validators; this helper trusts its input. Defense in depth is
+ *     provided by clamping in the (read-side) readPalettes synthesis.
+ */
+const normalizeColorWeights = (colors) => {
+  if (!Array.isArray(colors) || colors.length === 0) {
+    return { colors: [], fractions: [], displayPct: [], totalWeight: 0 };
+  }
+  const safeColors = colors.map((c) => ({
+    hex: c && typeof c.hex === 'string' ? c.hex : '',
+    name: c && typeof c.name === 'string' ? c.name : '',
+    weight: (c && typeof c.weight === 'number' && Number.isInteger(c.weight) &&
+              c.weight >= MIN_COLOR_WEIGHT && c.weight <= MAX_COLOR_WEIGHT)
+              ? c.weight : DEFAULT_COLOR_WEIGHT,
+    accent: !!(c && c.accent === true)
+  }));
+  const totalWeight = safeColors.reduce((s, c) => s + c.weight, 0);
+  if (totalWeight <= 0) {
+    // All-zero or negative weights shouldn't be reachable (validators
+    // reject them) but defense in depth: return equal fractions so the
+    // budget block still renders something sensible.
+    const equal = 1 / safeColors.length;
+    return {
+      colors: safeColors,
+      fractions: safeColors.map(() => equal),
+      displayPct: safeColors.map(() => Math.round(equal * 100)),
+      totalWeight: 0
+    };
+  }
+  const fractions = safeColors.map((c) => c.weight / totalWeight);
+  const displayPct = fractions.map((f) => Math.round(f * 100));
+  return { colors: safeColors, fractions, displayPct, totalWeight };
+};
+
+/**
+ * Render the deterministic color-budget block that gets appended to
+ * the Stage 2 user message. Returns a plain string (no trailing
+ * newline — the caller decides how to join). Returns '' when:
+ *   - palette is missing / has no colors
+ *   - palette is "pure legacy" (no user-customized weighting; see
+ *     isPaletteUnweighted)
+ *
+ * The block format is documented in ADR 0014 §4. Order follows
+ * palette.colors order (matches the chip order in the UI). Accent
+ * colors get the explicit "(ACCENT — mention at most N times total;
+ * place where it adds focus)" clause.
+ */
+const buildColorBudgetBlock = (palette) => {
+  if (!palette || !Array.isArray(palette.colors) || palette.colors.length === 0) return '';
+  if (isPaletteUnweighted(palette)) return '';
+
+  const norm = normalizeColorWeights(palette.colors);
+  const accentMax = typeof palette.accent_max_mentions === 'number'
+    ? palette.accent_max_mentions
+    : DEFAULT_ACCENT_MAX_MENTIONS;
+  const accentCount = palette.colors.filter((c) => c.accent === true).length;
+
+  const lines = [];
+  lines.push('Color usage budget (use these fractions as a guide; do not invent colors not on this list):');
+  for (let i = 0; i < norm.colors.length; i++) {
+    const c = norm.colors[i];
+    const pct = norm.displayPct[i];
+    const accentTag = c.accent
+      ? ` (ACCENT — mention at most ${accentMax} time${accentMax === 1 ? '' : 's'} total; place where it adds focus)`
+      : '';
+    lines.push(`  - ${c.name} ${c.hex}: ${pct}%${accentTag}`);
+  }
+  const sum = norm.displayPct.reduce((s, p) => s + p, 0);
+  const sumNote = sum === 100 ? 'Sum: 100%' : `Sum: ${sum}% (rounded)`;
+  const capNote = accentCount > 0 ? ` (accent cap: ${accentMax} mention${accentMax === 1 ? '' : 's'})` : '';
+  lines.push(`${sumNote}${capNote}`);
+  return lines.join('\n');
+};
+
+/**
+ * Tokenize an LLM output and count occurrences of each color's name
+ * and hex. Read-only — never mutates the prompt. Used by the Phase 4
+ * dashboard to show observed distribution next to the target budget.
+ *
+ * Matching rules (case-insensitive, whole-word for names, substring for
+ * hex with and without leading '#'):
+ *   - Name: \b<name>\b in lowercase, ignoring hyphen/space boundaries
+ *     (so "burnt-orange" matches "burnt orange" and vice versa)
+ *   - Hex: both "#rrggbb" and "rrggbb" forms; we lowercase and compare
+ *
+ * Returns:
+ *   - counts[i]: { hex, name, nameCount, hexCount, totalCount } — one
+ *     entry per palette color, in palette order. Zero-count entries
+ *     are returned for empty/missing prompts so the dashboard can
+ *     iterate `palette.colors` and always find a matching measurement.
+ *   - totalMentions: sum of totalCount across colors
+ *   - totalWords: rough word count of the prompt (split on whitespace)
+ *   - measuredAt: ISO timestamp
+ *
+ * Empty palette → empty counts array (no colors to measure).
+ */
+const measureColorDistribution = (prompt, palette) => {
+  const measuredAt = new Date().toISOString();
+  const totalWords = (typeof prompt === 'string' && prompt.trim().length > 0)
+    ? prompt.trim().split(/\s+/).length
+    : 0;
+  if (!palette || !Array.isArray(palette.colors) || palette.colors.length === 0) {
+    return { counts: [], totalMentions: 0, totalWords, measuredAt };
+  }
+  if (typeof prompt !== 'string' || prompt.length === 0) {
+    // Return one zero-count entry per palette color so the dashboard
+    // can iterate over palette.colors and always find a matching
+    // measurement, regardless of whether the prompt was non-empty.
+    return {
+      counts: palette.colors.map((c) => ({
+        hex: c.hex, name: c.name, nameCount: 0, hexCount: 0, totalCount: 0
+      })),
+      totalMentions: 0,
+      totalWords,
+      measuredAt
+    };
+  }
+  const lower = prompt.toLowerCase();
+
+  const escapeForRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const counts = palette.colors.map((c) => {
+    const nameLower = (c.name || '').toLowerCase().trim();
+    const hexLower = (c.hex || '').toLowerCase();
+    const hexBare = hexLower.startsWith('#') ? hexLower.slice(1) : hexLower;
+
+    let nameCount = 0;
+    if (nameLower.length > 0) {
+      // Normalize whitespace and hyphens to a single \s+ in the matcher
+      // so "burnt orange" still matches "burnt-orange" or "burnt  orange"
+      const pattern = nameLower.split(/\s+/).map(escapeForRegex).join('[\\s-]+');
+      const re = new RegExp(`\\b${pattern}\\b`, 'g');
+      const m = lower.match(re);
+      nameCount = m ? m.length : 0;
+    }
+
+    let hexCount = 0;
+    if (/^#[0-9a-f]{6}$/.test(hexLower)) {
+      const reHashed = new RegExp(escapeForRegex(hexLower), 'g');
+      const m1 = lower.match(reHashed);
+      const reBare = new RegExp(`(?<![0-9a-f])${escapeForRegex(hexBare)}(?![0-9a-f])`, 'g');
+      const m2 = lower.match(reBare);
+      // Subtract the bare matches that are also part of a # match to
+      // avoid double-counting "#d97706 and d97706" when only one is
+      // present. Simplest: count distinct occurrences of each form
+      // independently, then subtract overlap (rare in practice).
+      const hashHits = m1 ? m1.length : 0;
+      const bareHits = m2 ? m2.length : 0;
+      // Overlap = number of times the bare hex appears immediately
+      // preceded by '#'
+      const overlapRe = new RegExp(escapeForRegex('#' + hexBare), 'g');
+      const overlapMatches = lower.match(overlapRe);
+      const overlap = overlapMatches ? overlapMatches.length : 0;
+      hexCount = hashHits + Math.max(0, bareHits - overlap);
+    }
+    return { hex: c.hex, name: c.name, nameCount, hexCount, totalCount: nameCount + hexCount };
+  });
+
+  const totalMentions = counts.reduce((s, c) => s + c.totalCount, 0);
+  return { counts, totalMentions, totalWords, measuredAt };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2838,6 +3175,12 @@ app.post('/api/palettes', (req, res) => {
       colors: colorsResult.colors,
       source_run_id: body.source_run_id,
       source_preset_id: body.source_preset_id,
+      // ADR 0014 — palette-level accent cap. Falls back to the default
+      // when the client didn't supply one (consistent with how missing
+      // per-color weight/accent is handled by the read-side synthesis).
+      accent_max_mentions: typeof body.accent_max_mentions === 'number'
+        ? body.accent_max_mentions
+        : DEFAULT_ACCENT_MAX_MENTIONS,
       created_at: now,
       updated_at: now,
       history: []
@@ -2893,6 +3236,11 @@ app.post('/api/palettes/custom', (req, res) => {
       colors: colorsResult.colors,
       source_run_id: null,
       source_preset_id: typeof body.source_preset_id === 'string' ? body.source_preset_id : null,
+      // ADR 0014 — palette-level accent cap (same default behaviour
+      // as POST /api/palettes above).
+      accent_max_mentions: typeof body.accent_max_mentions === 'number'
+        ? body.accent_max_mentions
+        : DEFAULT_ACCENT_MAX_MENTIONS,
       created_at: now,
       updated_at: now,
       history: []
@@ -2967,7 +3315,21 @@ app.post('/api/palettes/:id/restore/:version', (req, res) => {
     }
 
     palettes[idx].name = target.name;
-    palettes[idx].colors = (target.colors || []).map((c) => ({ hex: c.hex, name: c.name }));
+    palettes[idx].colors = (target.colors || []).map((c) => {
+      // ADR 0014 — preserve per-color weight/accent from the snapshot
+      // so a Restore faithfully returns to the weighted state. Older
+      // snapshots may lack these fields; readPalettes synthesis adds
+      // them on the next read.
+      const out = { hex: c.hex, name: c.name };
+      if (typeof c.weight === 'number') out.weight = c.weight;
+      if (typeof c.accent === 'boolean') out.accent = c.accent;
+      return out;
+    });
+    // ADR 0014 — restore palette-level accent_max_mentions too.
+    // Older snapshots may not have it; default keeps the palette valid.
+    palettes[idx].accent_max_mentions = typeof target.accent_max_mentions === 'number'
+      ? target.accent_max_mentions
+      : DEFAULT_ACCENT_MAX_MENTIONS;
     pushPaletteHistory(palettes[idx]);
     writePalettes(palettes);
     res.json({ success: true, data: palettes[idx] });
@@ -4359,6 +4721,19 @@ module.exports = {
   pushPaletteHistory,
   MAX_PALETTE_HISTORY,
   applyPaletteToAnalysis,
+  // ADR 0014 — weighted color distribution and accent highlighting
+  MIN_COLOR_WEIGHT,
+  MAX_COLOR_WEIGHT,
+  DEFAULT_COLOR_WEIGHT,
+  MIN_ACCENT_MAX_MENTIONS,
+  MAX_ACCENT_MAX_MENTIONS,
+  DEFAULT_ACCENT_MAX_MENTIONS,
+  validatePaletteColorWeight,
+  validatePaletteAccentMaxMentions,
+  isPaletteUnweighted,
+  normalizeColorWeights,
+  buildColorBudgetBlock,
+  measureColorDistribution,
   readStage2Overrides,
   writeStage2Overrides,
   getStage2Override,

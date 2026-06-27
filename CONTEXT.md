@@ -88,7 +88,11 @@ The product has two top-level surfaces:
   The `directives` field sent to Stage 2 is the current textarea content
   at click time — saved directives (ADR 0009) are a library of pre-written
   inputs that the user loads into the textarea via Apply; the textarea is
-  always the source of truth at generation time.
+  always the source of truth at generation time. **Proposed in ADR 0014
+  (not yet implemented):** the Stage 2 user message is augmented with a
+  deterministic `buildColorBudgetBlock` derived from the palette's per-color
+  weights + accents; the response envelope gains a `distribution_metrics`
+  field from `measureColorDistribution` for the dashboard.
 - **Stage 2.5 (Post-generation chat, ADR 0011)** activates the moment
   Stage 2 returns successfully. The frontend posts the new prompt +
   analysis snapshot to `/api/chat/sessions`; the server mints a fresh
@@ -121,7 +125,8 @@ The product has two top-level surfaces:
 | Stage 1 output | transient (response) | field names match palette | Validated against `FIELD_INPUT_MIN_LENGTH` |
 | Analysis | transient (response) | JSON w/ palette fields | Edited by user in UI between Stage 1 and Stage 2 |
 | Run | transient (response) | `id` (`run_<16 hex>`) | Minted on every `POST /api/analyze`; returned in response envelope. Captured by the "Save palette" modal as `source_run_id`. |
-| Saved palette | `data/palettes.json` | `id` (`palette_<16 hex>`) | name, colors, source_run_id, source_preset_id, created_at, updated_at, history[] (ADR 0006, ADR 0013). Colors input accepts hex / rgb() / hsl(); stored canonically as `{ hex: '#rrggbb', name }`. Selected via the Step 1 picker; overrides the auto-analyzed `colors` field when applied. Editable in place via the edit modal (name + add/remove/rename colors); every write appends a `history[]` entry capturing the post-write state, and `POST /:id/restore/:version` rolls back to a prior entry. Brand-new palettes from scratch are created via `POST /api/palettes/custom` (no source_run_id required; `source_preset_id` optional). |
+| Saved palette | `data/palettes.json` | `id` (`palette_<16 hex>`) | name, colors, source_run_id, source_preset_id, created_at, updated_at, history[] (ADR 0006, ADR 0013). Colors input accepts hex / rgb() / hsl(); stored canonically as `{ hex: '#rrggbb', name }`. Selected via the Step 1 picker; overrides the auto-analyzed `colors` field when applied. Editable in place via the edit modal (name + add/remove/rename colors); every write appends a `history[]` entry capturing the post-write state, and `POST /:id/restore/:version` rolls back to a prior entry. Brand-new palettes from scratch are created via `POST /api/palettes/custom` (no source_run_id required; `source_preset_id` optional). **Proposed in ADR 0014 (not yet implemented):** per-color `weight` (1–10, default 5), per-color `accent` boolean (default false), palette-level `accent_max_mentions` (1–5, default 2). The server synthesises defaults for legacy palettes on read; the first PUT normalises the on-disk shape. |
+| Palette run telemetry | `data/palette_runs.json` | n/a (append log) | **Proposed in ADR 0014.** Per-palette capped log (≤50 entries) of `measureColorDistribution` outputs from each Stage 2 run. Drives the distribution dashboard. |
 | Subject prompt | `data/subject_prompt.json` | n/a (single global) | System prompt for `POST /api/subject` (ADR 0005). Editable from UI; seeded with the shipped default on first read. |
 | Camera-angle prompt | code constant `DEFAULT_CAMERA_ANGLE_PROMPT` in `server.js` | n/a (single global) | System prompt for `POST /api/camera-angle` (ADR 0008). NOT persisted to disk — the shipped default is the source of truth at runtime. UI editor is out of scope for ADR 0008. |
 | Stage 2 override | `data/stage2_overrides.json` | `presetId` | Per-preset override of `preset.stage2_system_prompt` (ADR 0007). Editable from UI via the "Edit prompt" button beside "Generate prompt". When present, used instead of the preset's built-in Stage 2 prompt on the next `POST /api/generate-prompt`. |
