@@ -394,9 +394,87 @@
           <ul id="palette-manager-list" class="palette-manager-list" hidden></ul>
 
           <div class="modal-actions">
+            <button type="button" id="palette-manager-new-btn" class="btn-primary">New palette…</button>
             <button type="button" id="palette-manager-cancel" class="btn-secondary">Close</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- ─── Edit palette modal (ADR 0013) ──────────────────────────── -->
+    <div id="edit-palette-modal" class="modal" hidden role="dialog" aria-labelledby="edit-palette-modal-title" aria-describedby="edit-palette-modal-hint">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content modal-content--wide">
+        <header class="modal-header">
+          <h3 id="edit-palette-modal-title">Edit palette</h3>
+          <button type="button" id="edit-palette-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+        </header>
+        <form id="edit-palette-form" class="modal-body" novalidate>
+          <p id="edit-palette-modal-hint" class="modal-hint">
+            Change the name, tweak the colors, or add a new color. Hex, rgb(), and hsl() inputs are all accepted.
+          </p>
+
+          <div class="edit-palette-source-row" id="edit-palette-source-row" hidden>
+            <span class="label-hint">Source:</span>
+            <span id="edit-palette-source" class="edit-palette-source"></span>
+          </div>
+
+          <label for="edit-palette-name-input" class="label">Palette name</label>
+          <input
+            type="text"
+            id="edit-palette-name-input"
+            class="text-input"
+            maxlength="60"
+            required
+            autocomplete="off"
+            aria-describedby="edit-palette-name-count edit-palette-name-error"
+          >
+          <span id="edit-palette-name-count" class="char-count char-count--inline">0 / 60</span>
+          <span id="edit-palette-name-error" class="edit-palette-error" role="alert" hidden></span>
+
+          <div class="edit-palette-preview-row">
+            <span class="label-hint">Preview</span>
+            <div id="edit-palette-preview" class="palette-preview" aria-live="polite" aria-label="Live preview of the palette as you edit it"></div>
+          </div>
+
+          <fieldset class="edit-palette-colors-fieldset">
+            <legend class="label">Colors</legend>
+            <ul id="edit-palette-colors-list" class="edit-palette-colors-list"></ul>
+
+            <div class="edit-palette-add-row">
+              <label for="edit-palette-add-picker" class="visually-hidden-label">Pick a color</label>
+              <input type="color" id="edit-palette-add-picker" class="edit-palette-add-picker" value="#3b82f6" aria-label="Pick a color for the new entry">
+
+              <label for="edit-palette-add-hex" class="visually-hidden-label">Color value</label>
+              <input
+                type="text"
+                id="edit-palette-add-hex"
+                class="text-input edit-palette-add-hex"
+                placeholder="#d97706 / rgb(245,158,11) / hsl(36,91%,56%)"
+                value="#3b82f6"
+                aria-describedby="edit-palette-add-hex-hint"
+              >
+              <span id="edit-palette-add-hex-hint" class="field-action-hint">Accepts #hex, rgb(), or hsl().</span>
+
+              <label for="edit-palette-add-name" class="visually-hidden-label">Color name</label>
+              <input type="text" id="edit-palette-add-name" class="text-input edit-palette-add-name" placeholder="Color name" maxlength="60" autocomplete="off">
+
+              <button type="button" id="edit-palette-add-btn" class="btn-secondary">+ Add color</button>
+              <span id="edit-palette-add-error" class="edit-palette-error" role="alert" hidden></span>
+            </div>
+          </fieldset>
+
+          <fieldset class="palette-history-fieldset">
+            <legend class="label">Version history</legend>
+            <ul id="palette-history-list" class="palette-history-list"></ul>
+          </fieldset>
+
+          <div class="modal-actions">
+            <button type="button" id="edit-palette-delete" class="btn-danger">Delete palette…</button>
+            <button type="button" id="edit-palette-cancel" class="btn-secondary">Cancel</button>
+            <button type="submit" id="edit-palette-save" class="btn-primary">Save changes</button>
+          </div>
+        </form>
       </div>
     </div>
 

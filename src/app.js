@@ -31,6 +31,9 @@
     selectedPaletteId: null,    // ADR 0006 — null = no override, auto-analyze
     paletteManagerSearch: '',   // ADR 0006 — manager modal filter text
     paletteManagerSort: 'newest', // ADR 0006 — 'newest' | 'oldest'
+    editingPaletteId: null,     // ADR 0013 — id of palette being edited (null when closed)
+    editingPaletteIsNew: false, // ADR 0013 — true when the edit modal is in "new palette" mode
+    editingPaletteBuffer: null, // ADR 0013 — { name, colors } being edited (decoupled from state.palettes)
     directives: [],             // ADR 0009 — saved directives
     selectedDirectiveId: null,  // ADR 0009 — id of currently-selected directive in the apply <select>
     directiveManagerSearch: '', // ADR 0009 — manager modal search text
@@ -132,9 +135,32 @@
     paletteManagerModal: $('palette-manager-modal'),
     paletteManagerModalClose: $('palette-manager-modal-close'),
     paletteManagerCancel: $('palette-manager-cancel'),
+    paletteManagerNewBtn: $('palette-manager-new-btn'),
     paletteManagerSearch: $('palette-manager-search'),
     paletteManagerList: $('palette-manager-list'),
     paletteManagerStatus: $('palette-manager-status'),
+
+    // ADR 0013 — edit palette modal
+    editPaletteModal: $('edit-palette-modal'),
+    editPaletteModalClose: $('edit-palette-modal-close'),
+    editPaletteModalTitle: $('edit-palette-modal-title'),
+    editPaletteCancel: $('edit-palette-cancel'),
+    editPaletteDelete: $('edit-palette-delete'),
+    editPaletteSave: $('edit-palette-save'),
+    editPaletteForm: $('edit-palette-form'),
+    editPaletteSourceRow: $('edit-palette-source-row'),
+    editPaletteSource: $('edit-palette-source'),
+    editPaletteNameInput: $('edit-palette-name-input'),
+    editPaletteNameCount: $('edit-palette-name-count'),
+    editPaletteNameError: $('edit-palette-name-error'),
+    editPalettePreview: $('edit-palette-preview'),
+    editPaletteColorsList: $('edit-palette-colors-list'),
+    editPaletteAddPicker: $('edit-palette-add-picker'),
+    editPaletteAddHex: $('edit-palette-add-hex'),
+    editPaletteAddName: $('edit-palette-add-name'),
+    editPaletteAddBtn: $('edit-palette-add-btn'),
+    editPaletteAddError: $('edit-palette-add-error'),
+    paletteHistoryList: $('palette-history-list'),
 
     // ADR 0009 — saved directives
     directivesSelect: $('directives-select'),
@@ -1589,6 +1615,13 @@
       meta.appendChild(when);
       main.appendChild(meta);
 
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'palette-manager-item__edit';
+      edit.textContent = 'Edit';
+      edit.setAttribute('aria-label', `Edit palette ${p.name}`);
+      edit.addEventListener('click', () => openEditPaletteModal(p.id));
+
       const del = document.createElement('button');
       del.type = 'button';
       del.className = 'palette-manager-item__delete';
@@ -1597,6 +1630,7 @@
       del.addEventListener('click', () => deletePalette(p.id, p.name));
 
       li.appendChild(main);
+      li.appendChild(edit);
       li.appendChild(del);
       dom.paletteManagerList.appendChild(li);
     });
@@ -1631,6 +1665,568 @@
       renderPaletteManagerList();
     });
   });
+
+  // ─── Edit palette modal (ADR 0013) ───────────────────────────────────
+
+  /**
+   * Mirror the server's parseColorInput for client-side preview only.
+   * Returns `{ hex }` on success or `{ error }` on failure. Used to
+   * keep the live swatch + the saved form in sync as the user types.
+   *
+   * The server's parseColorInput is the source of truth — this client
+   * helper just prevents the UI from showing fake success on an input
+   * the server would reject. If the rules ever diverge, the server
+   * 400 is still the final word.
+   */
+  const clientParseColorInput = (raw) => {
+    if (typeof raw !== 'string') return { error: 'color value must be a string' };
+    const s = raw.trim().toLowerCase();
+    if (s.length === 0) return { error: 'color value must not be empty' };
+
+    if (/^#?[0-9a-f]{3}$/.test(s)) {
+      const d = s.replace(/^#/, '');
+      return { hex: `#${d[0]}${d[0]}${d[1]}${d[1]}${d[2]}${d[2]}` };
+    }
+    if (/^#?[0-9a-f]{6}$/.test(s)) {
+      return { hex: `#${s.replace(/^#/, '')}` };
+    }
+
+    const rgbMatch = s.match(/^rgba?\(\s*([+-]?\d+)\s*,\s*([+-]?\d+)\s*,\s*([+-]?\d+)\s*\)$/);
+    if (rgbMatch) {
+      if (s.startsWith('rgba(')) return { error: 'rgba() not supported' };
+      const r = +rgbMatch[1], g = +rgbMatch[2], b = +rgbMatch[3];
+      if ([r, g, b].some((v) => !Number.isInteger(v) || v < 0 || v > 255)) {
+        return { error: 'rgb() channels must be 0..255' };
+      }
+      const toHex = (n) => n.toString(16).padStart(2, '0');
+      return { hex: `#${toHex(r)}${toHex(g)}${toHex(b)}` };
+    }
+
+    const hslMatch = s.match(/^hsla?\(\s*([+-]?[\d.]+)\s*,\s*([+-]?[\d.]+)%\s*,\s*([+-]?[\d.]+)%\s*\)$/);
+    if (hslMatch) {
+      if (s.startsWith('hsla(')) return { error: 'hsla() not supported' };
+      const h = +hslMatch[1], sPct = +hslMatch[2], lPct = +hslMatch[3];
+      if (!Number.isFinite(h) || h < 0 || h > 360) return { error: 'hsl() hue must be 0..360' };
+      if (!Number.isFinite(sPct) || sPct < 0 || sPct > 100) return { error: 'hsl() sat must be 0..100%' };
+      if (!Number.isFinite(lPct) || lPct < 0 || lPct > 100) return { error: 'hsl() light must be 0..100%' };
+      const sn = sPct / 100, ln = lPct / 100;
+      const c = (1 - Math.abs(2 * ln - 1)) * sn;
+      const hh = h / 60;
+      const x = c * (1 - Math.abs((hh % 2) - 1));
+      let r1 = 0, g1 = 0, b1 = 0;
+      if (hh < 1) [r1, g1, b1] = [c, x, 0];
+      else if (hh < 2) [r1, g1, b1] = [x, c, 0];
+      else if (hh < 3) [r1, g1, b1] = [0, c, x];
+      else if (hh < 4) [r1, g1, b1] = [0, x, c];
+      else if (hh < 5) [r1, g1, b1] = [x, 0, c];
+      else [r1, g1, b1] = [c, 0, x];
+      const m = ln - c / 2;
+      const clamp = (n) => Math.max(0, Math.min(255, n));
+      const toHex = (n) => clamp(Math.round((n + m) * 255)).toString(16).padStart(2, '0');
+      return { hex: `#${toHex(r1)}${toHex(g1)}${toHex(b1)}` };
+    }
+
+    return { error: 'expected #hex, rgb(), or hsl()' };
+  };
+
+  const updateEditPaletteNameCount = () => {
+    if (!dom.editPaletteNameCount || !dom.editPaletteNameInput) return;
+    dom.editPaletteNameCount.textContent = `${dom.editPaletteNameInput.value.length} / 60`;
+  };
+
+  /**
+   * Re-render the live preview row at the top of the edit modal.
+   * Reads from `state.editingPaletteBuffer.colors` — never from a DOM
+   * field that hasn't been committed to the buffer.
+   */
+  const renderEditPalettePreview = () => {
+    if (!dom.editPalettePreview) return;
+    dom.editPalettePreview.innerHTML = '';
+    const buf = state.editingPaletteBuffer;
+    const colors = (buf && Array.isArray(buf.colors)) ? buf.colors : [];
+    if (colors.length === 0) {
+      const empty = document.createElement('span');
+      empty.className = 'palette-preview__empty';
+      empty.textContent = 'No colors yet — add one below.';
+      dom.editPalettePreview.appendChild(empty);
+      return;
+    }
+    colors.forEach((c) => {
+      const sw = document.createElement('span');
+      sw.className = 'palette-preview__swatch';
+      sw.style.background = c.hex;
+      sw.title = `${c.name || ''} ${c.hex}`.trim();
+      dom.editPalettePreview.appendChild(sw);
+    });
+  };
+
+  /**
+   * Re-render the in-line color editor rows. Reads from
+   * `state.editingPaletteBuffer.colors`. Each row binds back to the
+   * buffer on input (text), input (color picker), and click (remove).
+   * The hex text input is validated live — invalid entries mark
+   * `aria-invalid="true"` and show an inline error, but the buffer
+   * only changes when the entry is valid (the previous valid hex is
+   * preserved in the swatch + the actual stored value until then).
+   */
+  const renderEditPaletteColors = () => {
+    if (!dom.editPaletteColorsList) return;
+    dom.editPaletteColorsList.innerHTML = '';
+    const buf = state.editingPaletteBuffer;
+    if (!buf) return;
+    buf.colors.forEach((c, i) => {
+      const row = document.createElement('li');
+      row.className = 'edit-palette-color-row';
+      row.dataset.colorIndex = String(i);
+
+      const picker = document.createElement('input');
+      picker.type = 'color';
+      picker.value = c.hex;
+      picker.className = 'edit-palette-color-row__picker';
+      picker.setAttribute('aria-label', `Pick color for ${c.name || `entry ${i + 1}`}`);
+      picker.addEventListener('input', () => {
+        buf.colors[i] = { hex: picker.value, name: c.name || '' };
+        hex.value = picker.value;
+        name.value = c.name || '';
+        row.removeAttribute('data-invalid');
+        if (hexError) hexError.hidden = true;
+        hex.removeAttribute('aria-invalid');
+        renderEditPalettePreview();
+      });
+      row.appendChild(picker);
+
+      const hex = document.createElement('input');
+      hex.type = 'text';
+      hex.value = c.hex;
+      hex.placeholder = '#d97706 / rgb(245,158,11) / hsl(36,91%,56%)';
+      hex.className = 'text-input edit-palette-color-row__hex';
+      hex.setAttribute('aria-label', `Hex/rgb/hsl for ${c.name || `entry ${i + 1}`}`);
+      const hexError = document.createElement('span');
+      hexError.className = 'edit-palette-color-row__hex-error';
+      hexError.setAttribute('role', 'alert');
+      hexError.hidden = true;
+      hex.addEventListener('input', () => {
+        const parsed = clientParseColorInput(hex.value);
+        if (parsed.error) {
+          hex.setAttribute('aria-invalid', 'true');
+          row.dataset.invalid = 'true';
+          hexError.textContent = parsed.error;
+          hexError.hidden = false;
+          return;
+        }
+        hex.removeAttribute('aria-invalid');
+        row.removeAttribute('data-invalid');
+        hexError.hidden = true;
+        buf.colors[i] = { hex: parsed.hex, name: c.name || '' };
+        picker.value = parsed.hex;
+        renderEditPalettePreview();
+      });
+      row.appendChild(hex);
+      row.appendChild(hexError);
+
+      const name = document.createElement('input');
+      name.type = 'text';
+      name.value = c.name || '';
+      name.placeholder = 'Color name';
+      name.maxLength = 60;
+      name.className = 'text-input edit-palette-color-row__name';
+      name.setAttribute('aria-label', `Name for color ${i + 1}`);
+      name.addEventListener('input', () => {
+        buf.colors[i] = { hex: c.hex, name: name.value };
+      });
+      row.appendChild(name);
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'edit-palette-color-row__remove';
+      remove.textContent = '×';
+      remove.setAttribute('aria-label', `Remove color ${c.name || `entry ${i + 1}`}`);
+      remove.addEventListener('click', () => {
+        buf.colors.splice(i, 1);
+        renderEditPaletteColors();
+        renderEditPalettePreview();
+      });
+      row.appendChild(remove);
+
+      dom.editPaletteColorsList.appendChild(row);
+    });
+  };
+
+  /**
+   * Render the version history list. Each entry shows version + relative
+   * time + a row of swatches; non-current entries expose a Restore
+   * button. The current entry (highest version) is marked.
+   */
+  const renderPaletteHistoryList = (palette) => {
+    if (!dom.paletteHistoryList) return;
+    dom.paletteHistoryList.innerHTML = '';
+    const history = Array.isArray(palette.history) ? palette.history : [];
+    if (history.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'palette-history-item palette-history-item--empty';
+      empty.textContent = 'No history yet.';
+      dom.paletteHistoryList.appendChild(empty);
+      return;
+    }
+    const sorted = history.slice().sort((a, b) => b.version - a.version);
+    const latest = Math.max(...history.map((h) => h.version));
+    sorted.forEach((h) => {
+      const li = document.createElement('li');
+      li.className = 'palette-history-item';
+      if (h.version === latest) li.classList.add('is-current');
+
+      const v = document.createElement('span');
+      v.className = 'palette-history-item__version';
+      v.textContent = `v${h.version}${h.version === latest ? ' (current)' : ''}`;
+      li.appendChild(v);
+
+      const when = document.createElement('span');
+      when.className = 'palette-history-item__when';
+      when.textContent = formatRelativeDate(h.saved_at);
+      li.appendChild(when);
+
+      const swatches = document.createElement('span');
+      swatches.className = 'palette-history-item__swatches';
+      swatches.setAttribute('aria-hidden', 'true');
+      (h.colors || []).forEach((c) => {
+        const sw = document.createElement('span');
+        sw.className = 'palette-history-item__swatch';
+        sw.style.background = c.hex;
+        sw.title = `${c.name || ''} ${c.hex}`.trim();
+        swatches.appendChild(sw);
+      });
+      li.appendChild(swatches);
+
+      if (h.version !== latest) {
+        const restore = document.createElement('button');
+        restore.type = 'button';
+        restore.className = 'btn-secondary palette-history-item__restore';
+        restore.textContent = 'Restore';
+        restore.setAttribute('aria-label', `Restore version ${h.version} from ${formatRelativeDate(h.saved_at)}`);
+        restore.addEventListener('click', () => restorePaletteVersion(h.version));
+        li.appendChild(restore);
+      }
+
+      dom.paletteHistoryList.appendChild(li);
+    });
+  };
+
+  /**
+   * Open the edit modal in "edit existing palette" mode.
+   * Loads the palette by id, copies its current state into the buffer,
+   * and re-fetches in the background so a parallel editor's changes
+   * surface (mirrors the directive pattern).
+   */
+  const openEditPaletteModal = async (id) => {
+    let palette = state.palettes.find((p) => p.id === id);
+    if (!palette) {
+      showError('That palette no longer exists.');
+      return;
+    }
+    state.editingPaletteId = id;
+    state.editingPaletteIsNew = false;
+    populateEditPaletteBuffer(palette);
+    paintEditPaletteModal();
+    dom.editPaletteModal.hidden = false;
+    dom.editPaletteNameInput.focus();
+
+    try {
+      const fresh = await apiCall(`/api/palettes/${encodeURIComponent(id)}`);
+      const idx = state.palettes.findIndex((p) => p.id === id);
+      if (idx !== -1) state.palettes[idx] = fresh;
+      // Only re-populate if the modal is still open and editing this id
+      // (user may have closed it during the fetch).
+      if (!dom.editPaletteModal.hidden && state.editingPaletteId === id) {
+        populateEditPaletteBuffer(fresh);
+        paintEditPaletteModal();
+      }
+    } catch (e) {
+      console.warn('Failed to refresh palette in edit modal:', e.message);
+    }
+  };
+
+  /**
+   * Open the edit modal in "new palette" mode (empty fields, no history).
+   * The save path goes through `POST /api/palettes/custom`.
+   */
+  const openNewPaletteModal = () => {
+    state.editingPaletteId = null;
+    state.editingPaletteIsNew = true;
+    state.editingPaletteBuffer = { name: '', colors: [] };
+    paintEditPaletteModal();
+    dom.editPaletteModal.hidden = false;
+    dom.editPaletteNameInput.focus();
+  };
+
+  const closeEditPaletteModal = () => {
+    dom.editPaletteModal.hidden = true;
+    state.editingPaletteId = null;
+    state.editingPaletteIsNew = false;
+    state.editingPaletteBuffer = null;
+  };
+
+  /**
+   * Copy a palette's current state into the edit buffer. We deep-copy
+   * the colors so user edits don't mutate the cached palette until
+   * Save commits.
+   */
+  const populateEditPaletteBuffer = (palette) => {
+    state.editingPaletteBuffer = {
+      name: palette.name || '',
+      colors: (palette.colors || []).map((c) => ({ hex: c.hex, name: c.name || '' }))
+    };
+  };
+
+  /**
+   * Push the current buffer into the form fields and re-render the
+   * dynamic sub-views (preview, color editor, history). Called on
+   * open and after a Restore.
+   */
+  const paintEditPaletteModal = () => {
+    const buf = state.editingPaletteBuffer;
+    const palette = state.editingPaletteId
+      ? state.palettes.find((p) => p.id === state.editingPaletteId)
+      : null;
+
+    if (state.editingPaletteIsNew) {
+      dom.editPaletteModalTitle.textContent = 'New palette';
+      dom.editPaletteDelete.hidden = true;
+      if (dom.editPaletteSourceRow) dom.editPaletteSourceRow.hidden = true;
+    } else {
+      dom.editPaletteModalTitle.textContent = 'Edit palette';
+      dom.editPaletteDelete.hidden = false;
+      if (dom.editPaletteSourceRow && palette) {
+        const parts = [];
+        if (palette.source_preset_id) parts.push(`preset ${palette.source_preset_id}`);
+        if (palette.source_run_id) parts.push(`run ${palette.source_run_id}`);
+        else parts.push('custom');
+        dom.editPaletteSource.textContent = parts.join(' · ');
+        dom.editPaletteSourceRow.hidden = false;
+      }
+    }
+
+    dom.editPaletteNameInput.value = (buf && buf.name) || '';
+    updateEditPaletteNameCount();
+    dom.editPaletteNameError.hidden = true;
+    dom.editPaletteNameError.textContent = '';
+    renderEditPaletteColors();
+    renderEditPalettePreview();
+    if (dom.editPaletteAddError) {
+      dom.editPaletteAddError.hidden = true;
+      dom.editPaletteAddError.textContent = '';
+    }
+    if (palette) renderPaletteHistoryList(palette);
+    else renderPaletteHistoryList({ history: [] });
+  };
+
+  /**
+   * Save handler — branches between "new" (POST /api/palettes/custom)
+   * and "edit" (PUT /api/palettes/:id). Client-side validates first so
+   * we never fire a request that the server would 400 on a basic
+   * shape check.
+   */
+  const submitEditPalette = async () => {
+    const buf = state.editingPaletteBuffer;
+    if (!buf) return;
+
+    hideError();
+    if (dom.editPaletteNameError) {
+      dom.editPaletteNameError.hidden = true;
+      dom.editPaletteNameError.textContent = '';
+    }
+    if (dom.editPaletteAddError) {
+      dom.editPaletteAddError.hidden = true;
+      dom.editPaletteAddError.textContent = '';
+    }
+
+    const name = (buf.name || '').trim();
+    if (!name) {
+      if (dom.editPaletteNameError) {
+        dom.editPaletteNameError.textContent = 'Palette name is required.';
+        dom.editPaletteNameError.hidden = false;
+      }
+      dom.editPaletteNameInput.focus();
+      return;
+    }
+    if (name.length > 60) {
+      if (dom.editPaletteNameError) {
+        dom.editPaletteNameError.textContent = 'Palette name must be 60 characters or fewer.';
+        dom.editPaletteNameError.hidden = false;
+      }
+      return;
+    }
+    if (!Array.isArray(buf.colors) || buf.colors.length === 0) {
+      if (dom.editPaletteAddError) {
+        dom.editPaletteAddError.textContent = 'At least one color is required.';
+        dom.editPaletteAddError.hidden = false;
+      }
+      return;
+    }
+    if (buf.colors.length > 50) {
+      if (dom.editPaletteAddError) {
+        dom.editPaletteAddError.textContent = 'A palette can have at most 50 colors.';
+        dom.editPaletteAddError.hidden = false;
+      }
+      return;
+    }
+    for (let i = 0; i < buf.colors.length; i++) {
+      const c = buf.colors[i];
+      if (!c || typeof c.hex !== 'string' || !/^#[0-9a-f]{6}$/.test(c.hex)) {
+        if (dom.editPaletteAddError) {
+          dom.editPaletteAddError.textContent = `Color ${i + 1}: invalid hex "${c && c.hex}"`;
+          dom.editPaletteAddError.hidden = false;
+        }
+        return;
+      }
+    }
+
+    try {
+      let saved;
+      if (state.editingPaletteIsNew) {
+        saved = await apiCall('/api/palettes/custom', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, colors: buf.colors })
+        });
+      } else {
+        const id = state.editingPaletteId;
+        if (!id) return;
+        saved = await apiCall(`/api/palettes/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, colors: buf.colors })
+        });
+      }
+      const idx = state.palettes.findIndex((p) => p.id === saved.id);
+      if (idx !== -1) state.palettes[idx] = saved;
+      else state.palettes.push(saved);
+      renderPalettePicker();
+      populateApplySelect();
+      renderPaletteManagerList();
+      closeEditPaletteModal();
+    } catch (e) {
+      const msg = (e && e.message) || 'Save failed.';
+      if (/name/i.test(msg) && /already in use/i.test(msg)) {
+        if (dom.editPaletteNameError) {
+          dom.editPaletteNameError.textContent = msg;
+          dom.editPaletteNameError.hidden = false;
+        }
+      } else if (/colors/i.test(msg)) {
+        if (dom.editPaletteAddError) {
+          dom.editPaletteAddError.textContent = msg;
+          dom.editPaletteAddError.hidden = false;
+        }
+      } else {
+        showError(`Save failed: ${msg}`);
+      }
+    }
+  };
+
+  const deletePaletteFromEdit = async () => {
+    const id = state.editingPaletteId;
+    if (!id) return;
+    const palette = state.palettes.find((p) => p.id === id);
+    if (!palette) return;
+    await deletePalette(id, palette.name);
+    if (!dom.paletteManagerModal.hidden) {
+      renderPaletteManagerList();
+    }
+    closeEditPaletteModal();
+  };
+
+  const restorePaletteVersion = async (version) => {
+    const id = state.editingPaletteId;
+    if (!id) return;
+    if (!confirm(`Restore version ${version}? The current values will be saved as a new version before the rollback takes effect.`)) return;
+    try {
+      const updated = await apiCall(`/api/palettes/${encodeURIComponent(id)}/restore/${encodeURIComponent(version)}`, { method: 'POST' });
+      const idx = state.palettes.findIndex((p) => p.id === id);
+      if (idx !== -1) state.palettes[idx] = updated;
+      populateEditPaletteBuffer(updated);
+      paintEditPaletteModal();
+      renderPalettePicker();
+      populateApplySelect();
+      hideError();
+    } catch (e) {
+      showError(`Restore failed: ${e.message}`);
+    }
+  };
+
+  /**
+   * Wire the add-color row at the bottom of the edit modal. The color
+   * picker and the hex text input stay in sync; on Add we parse the
+   * text (any of the three formats) and append to the buffer.
+   */
+  const wireAddColorRow = () => {
+    if (!dom.editPaletteAddPicker) return;
+    dom.editPaletteAddPicker.addEventListener('input', () => {
+      dom.editPaletteAddHex.value = dom.editPaletteAddPicker.value;
+      if (dom.editPaletteAddError) {
+        dom.editPaletteAddError.hidden = true;
+        dom.editPaletteAddError.textContent = '';
+      }
+    });
+    dom.editPaletteAddHex.addEventListener('input', () => {
+      const parsed = clientParseColorInput(dom.editPaletteAddHex.value);
+      if (!parsed.error && dom.editPaletteAddPicker) {
+        dom.editPaletteAddPicker.value = parsed.hex;
+      }
+      if (dom.editPaletteAddError) {
+        if (parsed.error) {
+          dom.editPaletteAddError.textContent = parsed.error;
+          dom.editPaletteAddError.hidden = false;
+        } else {
+          dom.editPaletteAddError.hidden = true;
+          dom.editPaletteAddError.textContent = '';
+        }
+      }
+    });
+    dom.editPaletteAddBtn.addEventListener('click', () => {
+      const hexRaw = dom.editPaletteAddHex.value;
+      const parsed = clientParseColorInput(hexRaw);
+      if (parsed.error) {
+        if (dom.editPaletteAddError) {
+          dom.editPaletteAddError.textContent = parsed.error;
+          dom.editPaletteAddError.hidden = false;
+        }
+        return;
+      }
+      const name = dom.editPaletteAddName.value.trim() || 'color';
+      const buf = state.editingPaletteBuffer;
+      if (!buf.colors) buf.colors = [];
+      if (buf.colors.length >= 50) {
+        if (dom.editPaletteAddError) {
+          dom.editPaletteAddError.textContent = 'A palette can have at most 50 colors.';
+          dom.editPaletteAddError.hidden = false;
+        }
+        return;
+      }
+      buf.colors.push({ hex: parsed.hex, name });
+      dom.editPaletteAddHex.value = '#3b82f6';
+      dom.editPaletteAddName.value = '';
+      if (dom.editPaletteAddPicker) dom.editPaletteAddPicker.value = '#3b82f6';
+      if (dom.editPaletteAddError) {
+        dom.editPaletteAddError.hidden = true;
+        dom.editPaletteAddError.textContent = '';
+      }
+      renderEditPaletteColors();
+      renderEditPalettePreview();
+    });
+  };
+
+  // Wire the edit modal once at startup.
+  if (dom.editPaletteModalClose) dom.editPaletteModalClose.addEventListener('click', closeEditPaletteModal);
+  if (dom.editPaletteCancel) dom.editPaletteCancel.addEventListener('click', closeEditPaletteModal);
+  if (dom.editPaletteDelete) dom.editPaletteDelete.addEventListener('click', deletePaletteFromEdit);
+  if (dom.editPaletteForm) dom.editPaletteForm.addEventListener('submit', (e) => { e.preventDefault(); submitEditPalette(); });
+  if (dom.editPaletteNameInput) {
+    dom.editPaletteNameInput.addEventListener('input', () => {
+      if (state.editingPaletteBuffer) state.editingPaletteBuffer.name = dom.editPaletteNameInput.value;
+      updateEditPaletteNameCount();
+    });
+  }
+  wireAddColorRow();
+  if (dom.paletteManagerNewBtn) dom.paletteManagerNewBtn.addEventListener('click', () => openNewPaletteModal());
 
   // ─── Saved directives (ADR 0009) ────────────────────────────────────
 
@@ -2372,6 +2968,9 @@
     } else if (!dom.paletteManagerModal.hidden) {
       e.preventDefault();
       closePaletteManagerModal();
+    } else if (!dom.editPaletteModal.hidden) {
+      e.preventDefault();
+      closeEditPaletteModal();
     } else if (!dom.subjectPromptModal.hidden) {
       e.preventDefault();
       closeSubjectPromptModal();

@@ -529,6 +529,11 @@ const readPalettes = () => {
     if (typeof p.id !== 'string' || !p.id.startsWith('palette_')) return false;
     if (typeof p.name !== 'string' || p.name.trim().length === 0) return false;
     if (!Array.isArray(p.colors)) return false;
+    // history[] is required by ADR 0013, but we tolerate legacy entries
+    // that pre-date the field. They get a synthesized empty array here;
+    // the first PUT on such an entry pushes v1 to history. Keeping them
+    // visible avoids forcing the user to re-save existing palettes.
+    if (!Array.isArray(p.history)) p.history = [];
     return true;
   });
 };
@@ -669,6 +674,234 @@ const applyPaletteToAnalysis = (analysis, palette) => {
     name: typeof c.name === 'string' ? c.name : ''
   }));
   return analysis;
+};
+
+// ─── ADR 0013 — palette editing, custom-create, version tracking ────────
+//
+// The existing palette helpers above (validatePalette, writePalettes,
+// etc.) are reused. The helpers below add:
+//   - color parsing in hex / rgb / hsl (ADR 0013 §2)
+//   - partial edit validation (ADR 0013 §3)
+//   - per-palette history push (ADR 0013 §1)
+
+const MAX_PALETTE_HISTORY = 200;
+
+/**
+ * Parse a single user-entered color string into canonical hex form.
+ * Accepts:
+ *   - `#rrggbb`, `#rgb` (with or without the leading `#`)
+ *   - `rgb(r, g, b)` / `rgb(r,g,b)` (case-insensitive, whitespace-tolerant)
+ *   - `hsl(h, s%, l%)` (same tolerance rules)
+ * Rejects `rgba(...)`, `hsla(...)`, out-of-range channels, and anything
+ * that doesn't match the three accepted shapes. Returns `{ hex }` on
+ * success or `{ error }` on failure. `hex` is always lowercase and 7
+ * characters (`#rrggbb`).
+ *
+ * @param {*} raw
+ * @returns {{ hex: string } | { error: string }}
+ */
+const parseColorInput = (raw) => {
+  if (typeof raw !== 'string') {
+    return { error: 'color value must be a string' };
+  }
+  const s = raw.trim().toLowerCase();
+  if (s.length === 0) {
+    return { error: 'color value must not be empty' };
+  }
+
+  // Hex form (3 or 6 hex chars, optional leading `#`).
+  if (/^#?[0-9a-f]{3}$/.test(s)) {
+    const digits = s.replace(/^#/, '');
+    const expanded = digits[0] + digits[0] + digits[1] + digits[1] + digits[2] + digits[2];
+    return { hex: `#${expanded}` };
+  }
+  if (/^#?[0-9a-f]{6}$/.test(s)) {
+    return { hex: `#${s.replace(/^#/, '')}` };
+  }
+
+  // rgb(r, g, b)
+  const rgbMatch = s.match(/^rgba?\(\s*([+-]?\d+)\s*,\s*([+-]?\d+)\s*,\s*([+-]?\d+)\s*\)$/);
+  if (rgbMatch) {
+    if (s.startsWith('rgba(')) {
+      return { error: 'rgba() is not supported (alpha channel not implemented yet)' };
+    }
+    const r = parseInt(rgbMatch[1], 10);
+    const g = parseInt(rgbMatch[2], 10);
+    const b = parseInt(rgbMatch[3], 10);
+    if ([r, g, b].some((v) => !Number.isInteger(v) || v < 0 || v > 255)) {
+      return { error: `rgb() channels must be integers in 0..255 (got rgb(${rgbMatch[1]},${rgbMatch[2]},${rgbMatch[3]}))` };
+    }
+    const toHex = (n) => n.toString(16).padStart(2, '0');
+    return { hex: `#${toHex(r)}${toHex(g)}${toHex(b)}` };
+  }
+
+  // hsl(h, s%, l%)
+  const hslMatch = s.match(/^hsla?\(\s*([+-]?[\d.]+)\s*,\s*([+-]?[\d.]+)%\s*,\s*([+-]?[\d.]+)%\s*\)$/);
+  if (hslMatch) {
+    if (s.startsWith('hsla(')) {
+      return { error: 'hsla() is not supported (alpha channel not implemented yet)' };
+    }
+    const h = parseFloat(hslMatch[1]);
+    const sPct = parseFloat(hslMatch[2]);
+    const lPct = parseFloat(hslMatch[3]);
+    if (!Number.isFinite(h) || h < 0 || h > 360) {
+      return { error: `hsl() hue must be in 0..360 (got ${hslMatch[1]})` };
+    }
+    if (!Number.isFinite(sPct) || sPct < 0 || sPct > 100) {
+      return { error: `hsl() saturation must be 0..100% (got ${hslMatch[2]}%)` };
+    }
+    if (!Number.isFinite(lPct) || lPct < 0 || lPct > 100) {
+      return { error: `hsl() lightness must be 0..100% (got ${hslMatch[3]}%)` };
+    }
+    const sNorm = sPct / 100;
+    const lNorm = lPct / 100;
+    const c = (1 - Math.abs(2 * lNorm - 1)) * sNorm;
+    const hh = h / 60;
+    const x = c * (1 - Math.abs((hh % 2) - 1));
+    let r1 = 0, g1 = 0, b1 = 0;
+    if (hh < 1) [r1, g1, b1] = [c, x, 0];
+    else if (hh < 2) [r1, g1, b1] = [x, c, 0];
+    else if (hh < 3) [r1, g1, b1] = [0, c, x];
+    else if (hh < 4) [r1, g1, b1] = [0, x, c];
+    else if (hh < 5) [r1, g1, b1] = [x, 0, c];
+    else [r1, g1, b1] = [c, 0, x];
+    const m = lNorm - c / 2;
+    const r = Math.round((r1 + m) * 255);
+    const g = Math.round((g1 + m) * 255);
+    const b = Math.round((b1 + m) * 255);
+    const clamp = (n) => Math.max(0, Math.min(255, n));
+    const toHex = (n) => clamp(n).toString(16).padStart(2, '0');
+    return { hex: `#${toHex(r)}${toHex(g)}${toHex(b)}` };
+  }
+
+  return { error: `unsupported color format: ${JSON.stringify(raw)} (expected #RRGGBB, rgb(r,g,b), or hsl(h,s%,l%))` };
+};
+
+/**
+ * Validate + normalize the `colors` array on an incoming palette body,
+ * accepting any of the three input formats (hex / rgb / hsl). Returns
+ * `{ colors, error }` — on success `colors` is the canonicalized
+ * `[{ hex, name }]` array ready to persist. On failure `colors` is
+ * null. Mirrors `validatePaletteColors` but with the parser inside.
+ *
+ * @param {*} colors
+ * @returns {{ colors: Array<object>|null, error: string|null }}
+ */
+const validatePaletteColorsFlexible = (colors) => {
+  if (!Array.isArray(colors)) return { colors: null, error: 'colors must be an array' };
+  if (colors.length === 0) return { colors: null, error: 'colors must contain at least one entry' };
+  if (colors.length > MAX_PALETTE_COLORS) {
+    return { colors: null, error: `colors must contain ${MAX_PALETTE_COLORS} or fewer entries (got ${colors.length})` };
+  }
+  const out = [];
+  for (let i = 0; i < colors.length; i++) {
+    const c = colors[i];
+    if (!c || typeof c !== 'object' || Array.isArray(c)) {
+      return { colors: null, error: `colors[${i}] must be an object` };
+    }
+    const parsed = parseColorInput(c.hex);
+    if (parsed.error) {
+      return { colors: null, error: `colors[${i}].hex: ${parsed.error}` };
+    }
+    if (typeof c.name !== 'string') {
+      return { colors: null, error: `colors[${i}].name must be a string` };
+    }
+    out.push({ hex: parsed.hex, name: c.name });
+  }
+  return { colors: out, error: null };
+};
+
+/**
+ * Validate a partial edit body for `PUT /api/palettes/:id` (ADR 0013
+ * §3). Empty body → 400. Each present field is validated; name
+ * uniqueness is checked against `existingNames` minus the palette
+ * being edited (passed via `excludeId`).
+ *
+ * Returns an error string, or null when valid. The caller is expected
+ * to use `applyPaletteUpdate` to mutate the palette in place.
+ *
+ * @param {*} body
+ * @param {object} opts
+ * @param {Set<string>} [opts.existingNames]
+ * @param {string} [opts.excludeId]
+ * @returns {string|null}
+ */
+const validatePaletteEdit = (body, { existingNames, excludeId } = {}) => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return 'Request body must be a JSON object.';
+  }
+  const hasName = body.name !== undefined;
+  const hasColors = body.colors !== undefined;
+  if (!hasName && !hasColors) {
+    return 'At least one of "name" or "colors" must be provided.';
+  }
+  if (hasName) {
+    const nameError = validatePaletteName({ name: body.name }, { existingNames, excludeId });
+    if (nameError) return nameError;
+  }
+  if (hasColors) {
+    const r = validatePaletteColorsFlexible(body.colors);
+    if (r.error) return r.error;
+  }
+  return null;
+};
+
+/**
+ * Pure helper: apply validated edit fields to an existing palette in
+ * place. Caller has already validated `body` via `validatePaletteEdit`
+ * and ensured the colors are normalized (use
+ * `validatePaletteColorsFlexible(...).colors`). Returns null on success
+ * or an error string. Caller is responsible for pushing the history
+ * entry AFTER this function returns (so the history captures the NEW
+ * state, not the pre-update state).
+ *
+ * @param {object} palette
+ * @param {object} body
+ * @returns {string|null}
+ */
+const applyPaletteUpdate = (palette, body) => {
+  if (body.name !== undefined) {
+    palette.name = body.name.trim();
+  }
+  if (body.colors !== undefined) {
+    // body.colors should already be the normalized array from
+    // validatePaletteColorsFlexible, but we re-normalize defensively in
+    // case the caller skipped that path.
+    const r = validatePaletteColorsFlexible(body.colors);
+    if (r.error) return r.error;
+    palette.colors = r.colors;
+  }
+  return null;
+};
+
+/**
+ * Build a fresh history entry from the current top-level state of a
+ * palette. Captures `name` + `colors` (the only mutable top-level
+ * fields). Caller has already mutated `palette` to its new state; we
+ * capture the snapshot for history.
+ */
+const snapshotPalette = (palette) => ({
+  version: (Array.isArray(palette.history) ? palette.history.length : 0) + 1,
+  name: palette.name,
+  colors: palette.colors.map((c) => ({ hex: c.hex, name: c.name })),
+  saved_at: new Date().toISOString()
+});
+
+/**
+ * Append a new history entry to a palette using its CURRENT top-level
+ * values, then bump `updated_at`. Used both on initial POST and on
+ * PUT/restore — every write that produces a new user-visible state
+ * records it in history. Caps history length at MAX_PALETTE_HISTORY
+ * (FIFO from the front) so a heavily-edited palette doesn't grow
+ * without bound.
+ */
+const pushPaletteHistory = (palette) => {
+  if (!Array.isArray(palette.history)) palette.history = [];
+  palette.history.push(snapshotPalette(palette));
+  while (palette.history.length > MAX_PALETTE_HISTORY) {
+    palette.history.shift();
+  }
+  palette.updated_at = new Date().toISOString();
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2583,6 +2816,9 @@ app.get('/api/palettes/:id', (req, res) => {
 /**
  * `POST /api/palettes` — save a new palette from a finished run.
  * Validates name uniqueness, colors shape, source ids.
+ * Body shape: `{ name, colors, source_run_id, source_preset_id }`.
+ * The colors field accepts hex / rgb / hsl (ADR 0013 §2); the stored
+ * format is always hex. Initial save pushes v1 to history.
  */
 app.post('/api/palettes', (req, res) => {
   try {
@@ -2592,14 +2828,21 @@ app.post('/api/palettes', (req, res) => {
     const validationError = validatePalette(body, { existingNames });
     if (validationError) return res.status(400).json({ success: false, error: validationError });
 
+    const colorsResult = validatePaletteColorsFlexible(body.colors);
+    if (colorsResult.error) return res.status(400).json({ success: false, error: colorsResult.error });
+
+    const now = new Date().toISOString();
     const newPalette = {
       id: generatePaletteId(),
       name: body.name.trim(),
-      colors: body.colors.map((c) => ({ hex: c.hex.toLowerCase(), name: c.name })),
+      colors: colorsResult.colors,
       source_run_id: body.source_run_id,
       source_preset_id: body.source_preset_id,
-      created_at: new Date().toISOString()
+      created_at: now,
+      updated_at: now,
+      history: []
     };
+    pushPaletteHistory(newPalette);
 
     palettes.push(newPalette);
     writePalettes(palettes);
@@ -2610,9 +2853,70 @@ app.post('/api/palettes', (req, res) => {
 });
 
 /**
- * `PUT /api/palettes/:id` — rename an existing palette. Body shape:
- * `{ name }`. Name uniqueness check excludes the palette being
- * renamed (so renaming to the same name is a no-op success).
+ * `POST /api/palettes/custom` — create a palette from scratch with no
+ * `source_run_id`. Body: `{ name, colors, source_preset_id? }`. The
+ * palette is otherwise identical to one saved from a run: same shape,
+ * same name/colors validation, history starts at v1.
+ *
+ * Why a separate endpoint (ADR 0013 §4): the original POST is
+ * "save from a run" — `source_run_id` is the whole point. A
+ * custom-created palette has no run. Two endpoints with disjoint
+ * contracts is clearer than one endpoint with a "is this from a run?"
+ * boolean.
+ */
+app.post('/api/palettes/custom', (req, res) => {
+  try {
+    const body = req.body || {};
+    const palettes = readPalettes();
+    const existingNames = new Set(palettes.map((p) => p.name.toLowerCase()));
+
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ success: false, error: 'Request body must be a JSON object.' });
+    }
+
+    const nameError = validatePaletteName({ name: body.name }, { existingNames });
+    if (nameError) return res.status(400).json({ success: false, error: nameError });
+
+    const colorsResult = validatePaletteColorsFlexible(body.colors);
+    if (colorsResult.error) return res.status(400).json({ success: false, error: colorsResult.error });
+
+    if (body.source_preset_id !== undefined && body.source_preset_id !== null && body.source_preset_id !== '') {
+      if (typeof body.source_preset_id !== 'string' || !body.source_preset_id.startsWith(PRESET_ID_PREFIX)) {
+        return res.status(400).json({ success: false, error: `source_preset_id must be a string starting with "${PRESET_ID_PREFIX}" (got ${JSON.stringify(body.source_preset_id)})` });
+      }
+    }
+
+    const now = new Date().toISOString();
+    const newPalette = {
+      id: generatePaletteId(),
+      name: body.name.trim(),
+      colors: colorsResult.colors,
+      source_run_id: null,
+      source_preset_id: typeof body.source_preset_id === 'string' ? body.source_preset_id : null,
+      created_at: now,
+      updated_at: now,
+      history: []
+    };
+    pushPaletteHistory(newPalette);
+
+    palettes.push(newPalette);
+    writePalettes(palettes);
+    res.status(201).json({ success: true, data: newPalette });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `PUT /api/palettes/:id` — partial edit. Body shape (ADR 0013 §3):
+ * `{ name?, colors? }`. At least one field is required. Each present
+ * field is validated; name uniqueness is enforced against other
+ * palettes (excluding self). A successful edit pushes a new history
+ * entry so the rollback path has something to restore to.
+ *
+ * The original rename-only behavior is preserved — `PUT { name: "x" }`
+ * still works exactly as before, with the addition of a v2 history
+ * entry.
  */
 app.put('/api/palettes/:id', (req, res) => {
   try {
@@ -2624,13 +2928,47 @@ app.put('/api/palettes/:id', (req, res) => {
     const existingNames = new Set(
       palettes.filter((p) => p.id !== req.params.id).map((p) => p.name.toLowerCase())
     );
-    const validationError = validatePaletteName(body, { existingNames });
+
+    const validationError = validatePaletteEdit(body, { existingNames });
     if (validationError) return res.status(400).json({ success: false, error: validationError });
 
-    palettes[idx] = {
-      ...palettes[idx],
-      name: body.name.trim()
-    };
+    const applyError = applyPaletteUpdate(palettes[idx], body);
+    if (applyError) return res.status(400).json({ success: false, error: applyError });
+
+    pushPaletteHistory(palettes[idx]);
+    writePalettes(palettes);
+    res.json({ success: true, data: palettes[idx] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `POST /api/palettes/:id/restore/:version` — rollback to a specific
+ * history version. The named version's `name` + `colors` become the
+ * new top-level values; a NEW history entry is appended (version =
+ * `current + 1`) so the rollback is itself a recorded edit. Original
+ * versions are preserved in history.
+ */
+app.post('/api/palettes/:id/restore/:version', (req, res) => {
+  try {
+    const version = parseInt(req.params.version, 10);
+    if (!Number.isInteger(version) || version < 1) {
+      return res.status(400).json({ success: false, error: `version must be a positive integer (got ${JSON.stringify(req.params.version)})` });
+    }
+    const palettes = readPalettes();
+    const idx = palettes.findIndex((p) => p.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ success: false, error: `Palette "${req.params.id}" not found.` });
+
+    if (!Array.isArray(palettes[idx].history)) palettes[idx].history = [];
+    const target = palettes[idx].history.find((h) => h && h.version === version);
+    if (!target) {
+      return res.status(400).json({ success: false, error: `version ${version} not found in history (has ${palettes[idx].history.length} version${palettes[idx].history.length === 1 ? '' : 's'})` });
+    }
+
+    palettes[idx].name = target.name;
+    palettes[idx].colors = (target.colors || []).map((c) => ({ hex: c.hex, name: c.name }));
+    pushPaletteHistory(palettes[idx]);
     writePalettes(palettes);
     res.json({ success: true, data: palettes[idx] });
   } catch (error) {
@@ -4013,6 +4351,13 @@ module.exports = {
   validatePalette,
   validatePaletteName,
   validatePaletteColors,
+  validatePaletteColorsFlexible,
+  validatePaletteEdit,
+  applyPaletteUpdate,
+  parseColorInput,
+  snapshotPalette,
+  pushPaletteHistory,
+  MAX_PALETTE_HISTORY,
   applyPaletteToAnalysis,
   readStage2Overrides,
   writeStage2Overrides,

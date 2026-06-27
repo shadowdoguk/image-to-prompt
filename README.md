@@ -324,18 +324,22 @@ calls for this preset fall back to `preset.stage2_system_prompt`.
 
 ## Saved Palette API
 
-Saved palettes are reusable color sets extracted from a previous run. Each
-palette persists at `data/palettes.json` with its `name`, `colors`, source
-`run_id`, source `preset_id`, and `created_at` timestamp. Pick one in the
-Step 1 picker to override the auto-analyzed `colors` field on the next
-`/api/analyze` call (ADR 0006).
+Saved palettes are reusable color sets extracted from a previous run or
+authored from scratch. Each palette persists at `data/palettes.json` with
+its `name`, `colors`, source `run_id` (or `null` for custom palettes),
+source `preset_id`, `created_at` / `updated_at` timestamps, and a full
+version `history` array. Pick one in the Step 1 picker to override the
+auto-analyzed `colors` field on the next `/api/analyze` call (ADR 0006).
+Edit, custom-create, and version history are covered by ADR 0013.
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/palettes` | List all saved palettes |
-| `GET` | `/api/palettes/:id` | Get a single palette |
+| `GET` | `/api/palettes/:id` | Get a single palette (with history) |
 | `POST` | `/api/palettes` | Save a new palette from a finished run |
-| `PUT` | `/api/palettes/:id` | Rename an existing palette (body: `{ name }`) |
+| `POST` | `/api/palettes/custom` | Create a brand-new palette from scratch (no source run required) |
+| `PUT` | `/api/palettes/:id` | Partial edit — body: `{ name?, colors? }` |
+| `POST` | `/api/palettes/:id/restore/:version` | Roll back to a specific history version |
 | `DELETE` | `/api/palettes/:id` | Hard-delete a palette |
 
 ### `POST /api/analyze` with a palette override
@@ -367,15 +371,73 @@ applied.
 }
 ```
 
+### `POST /api/palettes/custom` body shape
+
+```json
+{
+  "name": "Brand book Q3",
+  "colors": [
+    { "hex": "#0f172a", "name": "ink" },
+    { "hex": "#f59e0b", "name": "amber" }
+  ],
+  "source_preset_id": "preset_photorealistic"
+}
+```
+
+`source_preset_id` is optional. `source_run_id` is omitted entirely and
+stored as `null`. Same name + colors validation as `POST /api/palettes`.
+
+### `PUT /api/palettes/:id` body shape
+
+```json
+{
+  "name": "Sunset ochres v2",
+  "colors": [
+    { "hex": "#d97706", "name": "burnt orange" },
+    { "hex": "#7c2d12", "name": "deep brown" },
+    { "hex": "#f59e0b", "name": "amber highlight" }
+  ]
+}
+```
+
+Both fields are optional; at least one is required. `name`-only PUT
+preserves the original rename-only behavior. Each successful edit appends
+a new history entry — the rollback path has something to restore to.
+
 Validation:
 - `name`: non-empty string, 60 characters or fewer, **case-insensitively
-  unique** among existing palettes.
-- `colors`: array of 1–50 entries. Each entry: `{ hex: /^#[0-9a-f]{6}$/i,
-  name: string }`.
+  unique** among existing palettes (excluding the palette being edited).
+- `colors`: array of 1–50 entries. Each entry accepts hex (`#d97706`,
+  `d97706`, `#FFF`), `rgb(r, g, b)`, or `hsl(h, s%, l%)` in the `hex`
+  field — anything that doesn't parse is rejected with a clear error.
+  `rgba(...)` / `hsla(...)` are not supported in v1. The stored format
+  is always lowercase 6-digit hex (`#rrggbb`).
 - `source_run_id`: matches `/^run_[0-9a-f]{16}$/` (the `run_id` returned
   by the analyze call that produced this palette).
 - `source_preset_id`: starts with `preset_` (existence is not enforced —
   presets can be deleted independently).
+
+### Version history
+
+Every write that produces a new user-visible state — initial POST,
+`POST /api/palettes/custom`, partial PUT, and restore — appends a new
+entry to the palette's `history` array capturing the post-write state.
+The top-level `name` / `colors` are always the latest. Restoring a
+prior version makes that version's values the new top-level state and
+records a fresh history entry — nothing is ever deleted from history,
+so the entire edit trail is preserved. `updated_at` is bumped on every
+write.
+
+### Editing in the UI
+
+The palette manager modal gains an **Edit** button per row and a
+**New palette** button in the footer. The edit modal exposes a name
+field, a live preview row of swatches, an in-line color editor (each
+chip has a color picker + name input + remove), an add-color form that
+accepts any of the three color formats, and a version history list with
+one-click **Restore** per prior version. Edits are committed via
+`PUT /api/palettes/:id`; new palettes are committed via
+`POST /api/palettes/custom`.
 
 ## Saved Directive API
 

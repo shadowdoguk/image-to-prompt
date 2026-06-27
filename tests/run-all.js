@@ -404,7 +404,7 @@ const validPaletteBody = (overrides = {}) => ({
   ...overrides
 });
 
-test('All five palette routes are registered (ADR 0006)', () => {
+test('All seven palette routes are registered (ADR 0006 + ADR 0013)', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   const re = /app\.(get|post|put|delete)\(['"](\/api\/[^'"]+)['"]/g;
   const endpoints = [];
@@ -414,7 +414,9 @@ test('All five palette routes are registered (ADR 0006)', () => {
     'get /api/palettes',
     'post /api/palettes',
     'put /api/palettes/:id',
-    'delete /api/palettes/:id'
+    'delete /api/palettes/:id',
+    'post /api/palettes/custom',
+    'post /api/palettes/:id/restore/:version'
   ];
   for (const r of required) {
     assertTrue(endpoints.includes(r), `${r} must be registered; found: ${endpoints.join(', ')}`);
@@ -751,6 +753,513 @@ test('HTTP integration: POST /api/analyze with valid paletteId reaches the LLM c
   }
 });
 
+// ─── ADR 0013 — palette editing + custom-create + version tracking ──
+
+test('ADR 0013: parseColorInput accepts hex / rgb / hsl with permissive whitespace + case', () => {
+  const { parseColorInput } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // 6-digit hex
+  assertEqual(parseColorInput('#d97706').hex, '#d97706', '#d97706 → #d97706');
+  assertEqual(parseColorInput('d97706').hex, '#d97706', 'no-# → prefixed');
+  assertEqual(parseColorInput('#D97706').hex, '#d97706', 'uppercase normalized');
+  assertEqual(parseColorInput(' D97706 ').hex, '#d97706', 'whitespace trimmed');
+
+  // 3-digit hex
+  assertEqual(parseColorInput('#f0a').hex, '#ff00aa', '#f0a → #ff00aa');
+  assertEqual(parseColorInput('abc').hex, '#aabbcc', '3-digit unprefixed');
+
+  // rgb()
+  assertEqual(parseColorInput('rgb(245,158,11)').hex, '#f59e0b', 'rgb → hex');
+  assertEqual(parseColorInput('RGB( 245 , 158 , 11 )').hex, '#f59e0b', 'rgb case + whitespace');
+  assertEqual(parseColorInput('rgb(0,0,0)').hex, '#000000', 'rgb black');
+  assertEqual(parseColorInput('rgb(255,255,255)').hex, '#ffffff', 'rgb white');
+
+  // hsl()
+  const hslRes = parseColorInput('hsl(36, 91%, 56%)');
+  assertTrue(/^#[0-9a-f]{6}$/.test(hslRes.hex), `hsl returns 7-char hex (got ${JSON.stringify(hslRes)})`);
+  // hsl(36, 91%, 56%) mathematically = RGB(245, 163, 41) = #f5a329.
+  // (Note: this is a less-saturated amber than the rgb(245,158,11) =
+  // #f59e0b above — the hue/sat/light triple yields a slightly lighter
+  // and redder orange.)
+  assertEqual(hslRes.hex, '#f5a329', 'hsl(36,91%,56%) → #f5a329');
+  assertEqual(parseColorInput('hsl(0, 0%, 0%)').hex, '#000000', 'hsl black');
+  assertEqual(parseColorInput('hsl(0, 0%, 100%)').hex, '#ffffff', 'hsl white');
+});
+
+test('ADR 0013: parseColorInput rejects rgba / hsla / out-of-range / garbage', () => {
+  const { parseColorInput } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const rejectCases = [
+    'rgba(245,158,11,0.5)',
+    'hsla(36,91%,56%,1)',
+    'rgb(256,0,0)',
+    'rgb(-1,0,0)',
+    'hsl(361,50%,50%)',
+    'hsl(36,101%,50%)',
+    'hsl(36,50%,101%)',
+    'rgb(1,2)',
+    'hsl(red,50%,50%)',
+    'transparent',
+    'not-a-color',
+    '',
+    '   ',
+    null,
+    undefined,
+    42,
+    { hex: '#fff' }
+  ];
+  for (const c of rejectCases) {
+    const r = parseColorInput(c);
+    assertTrue(r && typeof r.error === 'string', `expected error for ${JSON.stringify(c)}, got ${JSON.stringify(r)}`);
+  }
+});
+
+test('ADR 0013: parseColorInput always returns lowercase 7-char hex on success', () => {
+  const { parseColorInput } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const inputs = ['#ABCDEF', 'abcdef', '#AbCdEf', 'rgb(171, 205, 239)', 'hsl(210, 68%, 80%)'];
+  for (const i of inputs) {
+    const r = parseColorInput(i);
+    assertTrue(/^#[0-9a-f]{6}$/.test(r.hex), `expected 7-char lowercase hex for ${JSON.stringify(i)} (got ${JSON.stringify(r)})`);
+  }
+});
+
+test('ADR 0013: validatePaletteColorsFlexible accepts hex / rgb / hsl and returns normalized array', () => {
+  const { validatePaletteColorsFlexible } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const r1 = validatePaletteColorsFlexible([
+    { hex: '#d97706', name: 'orange' },
+    { hex: 'rgb(245,158,11)', name: 'amber' },
+    { hex: 'hsl(36,91%,56%)', name: 'ochre' }
+  ]);
+  assertEqual(r1.error, null, 'mixed formats accepted');
+  assertEqual(r1.colors.length, 3, 'three entries');
+  assertEqual(r1.colors[0].hex, '#d97706', 'first hex unchanged');
+  assertEqual(r1.colors[1].hex, '#f59e0b', 'rgb normalized to hex');
+  assertEqual(r1.colors[2].hex, '#f5a329', 'hsl normalized to hex');
+
+  // Reject empty / over-limit / bad entries
+  assertTrue(validatePaletteColorsFlexible([]).error, 'empty rejected');
+  assertTrue(validatePaletteColorsFlexible('not-array').error, 'non-array rejected');
+  assertTrue(validatePaletteColorsFlexible([{ hex: 'garbage', name: 'x' }]).error, 'garbage hex rejected');
+  assertTrue(validatePaletteColorsFlexible([{ hex: '#fff', name: 42 }]).error, 'non-string name rejected');
+  const tooMany = new Array(51).fill({ hex: '#fff', name: 'x' });
+  assertTrue(validatePaletteColorsFlexible(tooMany).error, 'over MAX_PALETTE_COLORS rejected');
+});
+
+test('ADR 0013: validatePaletteEdit rejects empty body; accepts name-only / colors-only / both', () => {
+  const { validatePaletteEdit } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(validatePaletteEdit(null) !== null, 'null rejected');
+  assertTrue(validatePaletteEdit({}) !== null, 'empty body rejected');
+  assertTrue(validatePaletteEdit([]) !== null, 'array body rejected');
+  assertTrue(validatePaletteEdit('hi') !== null, 'string body rejected');
+
+  assertEqual(validatePaletteEdit({ name: 'New name' }, { existingNames: new Set() }), null, 'name-only OK');
+  assertEqual(
+    validatePaletteEdit({ colors: [{ hex: '#fff', name: 'x' }] }, { existingNames: new Set() }),
+    null,
+    'colors-only OK'
+  );
+  assertEqual(
+    validatePaletteEdit({ name: 'New', colors: [{ hex: '#fff', name: 'x' }] }, { existingNames: new Set() }),
+    null,
+    'both OK'
+  );
+});
+
+test('ADR 0013: validatePaletteEdit enforces name uniqueness via existingNames minus excludeId', () => {
+  const { validatePaletteEdit } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const existing = new Set(['sunset ochres']);
+  assertTrue(
+    validatePaletteEdit({ name: 'Sunset Ochres' }, { existingNames: existing }) !== null,
+    'duplicate (case-insensitive) rejected'
+  );
+  // Caller pre-filters the existingNames set (mirrors the route's
+  // behavior — it filters by id before passing to the validator). With
+  // the palette being edited already excluded from the set, the SAME
+  // name is allowed (rename-to-self).
+  assertEqual(
+    validatePaletteEdit({ name: 'Sunset ochres' }, { existingNames: new Set() }),
+    null,
+    'rename-to-self (caller-filtered existingNames) allowed'
+  );
+  assertTrue(
+    validatePaletteEdit({ name: '' }, { existingNames: new Set() }) !== null,
+    'empty name rejected'
+  );
+  assertTrue(
+    validatePaletteEdit({ name: 'a'.repeat(61) }, { existingNames: new Set() }) !== null,
+    'oversized name rejected'
+  );
+});
+
+test('ADR 0013: validatePaletteEdit rejects colors with empty array or invalid color string', () => {
+  const { validatePaletteEdit } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(
+    validatePaletteEdit({ colors: [] }, { existingNames: new Set() }) !== null,
+    'empty colors rejected'
+  );
+  assertTrue(
+    validatePaletteEdit({ colors: 'not-array' }, { existingNames: new Set() }) !== null,
+    'non-array colors rejected'
+  );
+  assertTrue(
+    validatePaletteEdit({ colors: [{ hex: 'not-hex', name: 'x' }] }, { existingNames: new Set() }) !== null,
+    'invalid hex rejected'
+  );
+  assertTrue(
+    validatePaletteEdit({ colors: [{ hex: 'rgb(999,0,0)', name: 'x' }] }, { existingNames: new Set() }) !== null,
+    'rgb out-of-range rejected'
+  );
+  assertTrue(
+    validatePaletteEdit({ colors: [{ hex: 'rgba(1,2,3,0.5)', name: 'x' }] }, { existingNames: new Set() }) !== null,
+    'rgba rejected (alpha not supported)'
+  );
+});
+
+test('ADR 0013: applyPaletteUpdate mutates palette in place + is defensive', () => {
+  const { applyPaletteUpdate } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const p = {
+    name: 'old',
+    colors: [{ hex: '#111111', name: 'dark' }],
+    history: [{ version: 1, name: 'old', colors: [{ hex: '#111111', name: 'dark' }], saved_at: 'x' }]
+  };
+  const err = applyPaletteUpdate(p, { name: '  new name  ' });
+  assertEqual(err, null, 'no error on valid update');
+  assertEqual(p.name, 'new name', 'name trimmed');
+
+  applyPaletteUpdate(p, { colors: [{ hex: '#abcdef', name: 'cyan' }, { hex: 'rgb(0,0,0)', name: 'black' }] });
+  assertEqual(p.colors.length, 2, 'colors replaced');
+  assertEqual(p.colors[0].hex, '#abcdef', 'hex passed through');
+  assertEqual(p.colors[1].hex, '#000000', 'rgb normalized to hex');
+
+  const badErr = applyPaletteUpdate(p, { colors: [{ hex: 'garbage', name: 'x' }] });
+  assertTrue(badErr !== null, 'invalid color rejected');
+});
+
+test('ADR 0013: pushPaletteHistory appends with incremented version + bumps updated_at', () => {
+  const { pushPaletteHistory, snapshotPalette } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const p = {
+    name: 'test',
+    colors: [{ hex: '#fff', name: 'white' }],
+    history: []
+  };
+  pushPaletteHistory(p);
+  assertEqual(p.history.length, 1, 'v1 appended');
+  assertEqual(p.history[0].version, 1, 'v1 number');
+  assertEqual(p.history[0].name, 'test', 'v1 captures name');
+  assertTrue(typeof p.updated_at === 'string', 'updated_at set');
+
+  p.name = 'renamed';
+  p.colors.push({ hex: '#000', name: 'black' });
+  pushPaletteHistory(p);
+  assertEqual(p.history.length, 2, 'v2 appended');
+  assertEqual(p.history[1].version, 2, 'v2 number');
+  assertEqual(p.history[1].name, 'renamed', 'v2 captures new name');
+  assertEqual(p.history[1].colors.length, 2, 'v2 captures new colors');
+
+  // snapshotPalette is deterministic-ish — only `saved_at` is non-deterministic,
+  // so check the captured state shape rather than exact time.
+  const snap = snapshotPalette({ history: [], name: 'x', colors: [{ hex: '#fff', name: 'w' }] });
+  assertEqual(snap.version, 1, 'snapshot version = history.length + 1');
+  assertEqual(snap.name, 'x', 'snapshot captures name');
+  assertEqual(snap.colors[0].hex, '#fff', 'snapshot captures colors');
+  assertTrue(typeof snap.saved_at === 'string', 'snapshot has saved_at');
+});
+
+// ─── HTTP integration tests for ADR 0013 ─────────────────────────────
+
+test('HTTP integration (ADR 0013): POST /api/palettes includes history[0] and updated_at', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    assertEqual(r.status, 201, 'POST → 201');
+    assertEqual(r.body.data.history.length, 1, 'history v1 appended');
+    assertEqual(r.body.data.history[0].version, 1, 'history v1 number');
+    assertEqual(r.body.data.history[0].name, r.body.data.name, 'history captures name');
+    assertEqual(typeof r.body.data.updated_at, 'string', 'updated_at set');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): PUT name-only appends history (v2) and updates top-level name', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const id = create.body.data.id;
+
+    const rename = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Sunset palette v2' })
+    });
+    assertEqual(rename.status, 200, 'PUT name-only → 200');
+    assertEqual(rename.body.data.name, 'Sunset palette v2', 'name updated');
+    assertEqual(rename.body.data.history.length, 2, 'history grew by one');
+    assertEqual(rename.body.data.history[1].version, 2, 'v2 number');
+    assertEqual(rename.body.data.history[1].name, 'Sunset palette v2', 'v2 captures new name');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): PUT colors-only replaces colors and appends history', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const id = create.body.data.id;
+
+    const recolor = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ colors: [{ hex: '#abcdef', name: 'cyan' }, { hex: '#fedcba', name: 'sand' }] })
+    });
+    assertEqual(recolor.status, 200, 'PUT colors-only → 200');
+    assertEqual(recolor.body.data.colors.length, 2, 'colors replaced (was 2)');
+    assertEqual(recolor.body.data.colors[0].hex, '#abcdef', 'new first color');
+    assertEqual(recolor.body.data.history.length, 2, 'history v2 appended');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): PUT accepts rgb() and hsl() and stores as hex', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const id = create.body.data.id;
+
+    const fromRgb = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ colors: [{ hex: 'rgb(245,158,11)', name: 'amber' }] })
+    });
+    assertEqual(fromRgb.status, 200, 'rgb() → 200');
+    assertEqual(fromRgb.body.data.colors[0].hex, '#f59e0b', 'rgb normalized to hex');
+
+    const fromHsl = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ colors: [{ hex: 'hsl(36, 91%, 56%)', name: 'amber2' }] })
+    });
+    assertEqual(fromHsl.status, 200, 'hsl() → 200');
+    assertEqual(fromHsl.body.data.colors[0].hex, '#f5a329', 'hsl normalized to hex');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): PUT with empty body / empty colors / bad color → 400', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const id = create.body.data.id;
+
+    const empty = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    assertEqual(empty.status, 400, 'empty body → 400');
+
+    const emptyColors = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ colors: [] })
+    });
+    assertEqual(emptyColors.status, 400, 'empty colors → 400');
+
+    const badHex = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ colors: [{ hex: 'not-hex', name: 'x' }] })
+    });
+    assertEqual(badHex.status, 400, 'bad hex → 400');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): POST /api/palettes/custom creates a palette with no source_run_id', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/palettes/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Brand book Q3',
+        colors: [{ hex: '#0f172a', name: 'ink' }, { hex: 'rgb(245,158,11)', name: 'amber' }]
+      })
+    });
+    assertEqual(r.status, 201, 'POST custom → 201');
+    assertEqual(r.body.data.source_run_id, null, 'source_run_id is null');
+    assertEqual(r.body.data.colors[0].hex, '#0f172a', 'hex passed through');
+    assertEqual(r.body.data.colors[1].hex, '#f59e0b', 'rgb normalized');
+    assertEqual(r.body.data.history.length, 1, 'history v1');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): POST /api/palettes/custom rejects duplicates, empty colors, bad colors', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const first = await fetchJson(`${srv.base}/api/palettes/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Brand Q3', colors: [{ hex: '#0f172a', name: 'ink' }] })
+    });
+    assertEqual(first.status, 201, 'first → 201');
+
+    const dup = await fetchJson(`${srv.base}/api/palettes/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'BRAND Q3', colors: [{ hex: '#000', name: 'x' }] })
+    });
+    assertEqual(dup.status, 400, 'duplicate name (case-insensitive) → 400');
+
+    const empty = await fetchJson(`${srv.base}/api/palettes/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'New', colors: [] })
+    });
+    assertEqual(empty.status, 400, 'empty colors → 400');
+
+    const bad = await fetchJson(`${srv.base}/api/palettes/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'New2', colors: [{ hex: 'not-hex', name: 'x' }] })
+    });
+    assertEqual(bad.status, 400, 'bad color → 400');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): POST /:id/restore/:version rolls back to a prior version + records new history', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    // Create with a single color.
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody({ name: 'Test', colors: [{ hex: '#111111', name: 'a' }] }))
+    });
+    const id = create.body.data.id;
+
+    // Edit colors → history should be v2.
+    const edit = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ colors: [{ hex: '#abcdef', name: 'b' }, { hex: '#fedcba', name: 'c' }] })
+    });
+    assertEqual(edit.body.data.history.length, 2, 'history v2 after edit');
+
+    // Restore to v1 — top-level returns to v1's state, history becomes v3.
+    const restore = await fetchJson(`${srv.base}/api/palettes/${id}/restore/1`, {
+      method: 'POST'
+    });
+    assertEqual(restore.status, 200, 'restore → 200');
+    assertEqual(restore.body.data.colors.length, 1, 'colors rolled back to v1 length');
+    assertEqual(restore.body.data.colors[0].hex, '#111111', 'colors rolled back to v1 hex');
+    assertEqual(restore.body.data.history.length, 3, 'history v3 appended (rollback recorded)');
+    assertEqual(restore.body.data.history[2].version, 3, 'newest is v3');
+    assertEqual(restore.body.data.history[2].colors[0].hex, '#111111', 'v3 captures the rolled-back state');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): POST /:id/restore/:version rejects bad version numbers', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const id = create.body.data.id;
+
+    const badNumber = await fetchJson(`${srv.base}/api/palettes/${id}/restore/abc`, { method: 'POST' });
+    assertEqual(badNumber.status, 400, 'non-numeric → 400');
+
+    const missing = await fetchJson(`${srv.base}/api/palettes/${id}/restore/999`, { method: 'POST' });
+    assertEqual(missing.status, 400, 'missing version → 400');
+
+    const noPalette = await fetchJson(`${srv.base}/api/palettes/palette_doesnotexist0000/restore/1`, { method: 'POST' });
+    assertEqual(noPalette.status, 404, 'missing palette → 404');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('HTTP integration (ADR 0013): DELETE /api/palettes/:id still works (regression)', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const id = create.body.data.id;
+    const del = await fetchJson(`${srv.base}/api/palettes/${id}`, { method: 'DELETE' });
+    assertEqual(del.status, 200, 'DELETE → 200');
+    const get = await fetchJson(`${srv.base}/api/palettes/${id}`);
+    assertEqual(get.status, 404, 'GET after DELETE → 404');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
 // ─── Frontend / HTML assertions (ADR 0006) ──────────────────────────
 
 test('Frontend HTML: Step 1 palette picker + color-section Save/Apply/Manage + two new modals exist with a11y attrs (ADR 0006)', () => {
@@ -799,6 +1308,15 @@ test('Frontend HTML: Step 1 palette picker + color-section Save/Apply/Manage + t
   assertTrue(/aria-label="Search saved palettes by name"/.test(html), 'search input must have aria-label');
   assertTrue(/<fieldset/.test(html), 'sort controls must be in a fieldset');
   assertTrue(/<legend/.test(html), 'fieldset must have a legend');
+
+  // ADR 0013 — edit modal
+  assertTrue(/id="edit-palette-modal"/.test(html), 'edit palette modal missing');
+  assertTrue(/role="dialog"/.test(html), 'edit modal must have role="dialog"');
+  assertTrue(/aria-labelledby="edit-palette-modal-title"/.test(html), 'edit modal must reference its title');
+  assertTrue(/id="edit-palette-name-input"/.test(html), 'edit name input missing');
+  assertTrue(/id="edit-palette-colors-list"/.test(html), 'edit colors list missing');
+  assertTrue(/id="palette-history-list"/.test(html), 'palette history list missing');
+  assertTrue(/id="palette-manager-new-btn"/.test(html), 'New palette button missing');
 });
 
 test('Frontend CSS: manager + picker + color-section action styles defined (ADR 0006)', () => {
