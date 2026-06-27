@@ -2425,12 +2425,43 @@ const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
   }
 };
 
-const callMiniMaxStage2 = async (analysis, directives, stage2SystemPrompt) => {
+/**
+ * Pure helper: assemble the user-message envelope sent to the Stage 2
+ * LLM. Extracted from callMiniMaxStage2 so the ADR 0014 budget-block
+ * inclusion logic is unit-testable without spinning up the server or
+ * mocking the MiniMax HTTP call.
+ *
+ * Shape: `{ analysis, directives, color_budget? }`. `color_budget` is
+ * included ONLY when a weighted palette is supplied — see
+ * `isPaletteUnweighted` for the "pure legacy" opt-out.
+ *
+ * @param {object} analysis - the Stage 1 analysis (palette colors live in analysis.colors)
+ * @param {string} directives - free-form user directives (Stage 2 input)
+ * @param {object|null} palette - applied palette (ADR 0014)
+ * @returns {object} the envelope object (callMiniMaxStage2 JSON-stringifies it)
+ */
+const buildStage2Envelope = (analysis, directives, palette = null) => {
+  const envelope = { analysis, directives: directives || '' };
+  // ADR 0014 — when a weighted palette is in play, append a
+  // deterministic color-budget block so the LLM has explicit per-color
+  // fractions + an accent cap to follow. The block lives inside the
+  // envelope JSON so it's part of the structured user message and
+  // travels through chat-refinement / re-runs unchanged.
+  if (palette && !isPaletteUnweighted(palette)) {
+    const block = buildColorBudgetBlock(palette);
+    if (block) {
+      envelope.color_budget = block;
+    }
+  }
+  return envelope;
+};
+
+const callMiniMaxStage2 = async (analysis, directives, stage2SystemPrompt, palette = null) => {
   if (!minimaxConfigured) {
     throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
   }
 
-  const envelope = { analysis, directives: directives || '' };
+  const envelope = buildStage2Envelope(analysis, directives, palette);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
@@ -3093,6 +3124,28 @@ app.post('/api/generate-prompt', async (req, res) => {
       });
     }
 
+    // ADR 0014 — optional paletteId in the request body. When provided,
+    // the server looks up the palette (404 if missing) and passes it
+    // into callMiniMaxStage2 so a deterministic color-budget block can
+    // be appended to the LLM user message. After Stage 2 returns, the
+    // server measures the LLM output against the palette and surfaces
+    // `distribution_metrics` in the response envelope so the Phase 4
+    // dashboard can render observed vs target bars. Backwards
+    // compatible: a missing paletteId leaves both the budget block and
+    // the metrics field absent (existing callers see no change).
+    let appliedPalette = null;
+    if (body.paletteId !== undefined && body.paletteId !== null && body.paletteId !== '') {
+      if (typeof body.paletteId !== 'string' || !body.paletteId.startsWith('palette_')) {
+        return res.status(400).json({ success: false, error: 'paletteId must be a string starting with "palette_".' });
+      }
+      const palettes = readPalettes();
+      const palette = palettes.find((p) => p.id === body.paletteId);
+      if (!palette) {
+        return res.status(404).json({ success: false, error: `Palette "${body.paletteId}" not found.` });
+      }
+      appliedPalette = palette;
+    }
+
     const presets = readPresets();
     const preset = presets.find((p) => p.id === presetId);
     if (!preset) return res.status(404).json({ success: false, error: `Preset "${presetId}" not found.` });
@@ -3101,17 +3154,29 @@ app.post('/api/generate-prompt', async (req, res) => {
       return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
     }
 
-    const finalPrompt = await callMiniMaxStage2(analysis, directives || '', getEffectiveStage2Prompt(preset));
+    const finalPrompt = await callMiniMaxStage2(analysis, directives || '', getEffectiveStage2Prompt(preset), appliedPalette);
 
-    res.json({
-      success: true,
-      data: {
-        preset_id: preset.id,
-        preset_name: preset.name,
-        prompt: finalPrompt,
-        model: MINIMAX_MODEL
-      }
-    });
+    // ADR 0014 — compute distribution metrics against the applied
+    // palette. Pure function, fast (single pass over the prompt), and
+    // safe to run on every successful run. When no palette is applied,
+    // we omit the field entirely so existing consumers see no change.
+    const distribution_metrics = appliedPalette
+      ? measureColorDistribution(finalPrompt, appliedPalette)
+      : null;
+
+    const responseData = {
+      preset_id: preset.id,
+      preset_name: preset.name,
+      prompt: finalPrompt,
+      model: MINIMAX_MODEL
+    };
+    if (appliedPalette) {
+      responseData.palette_id = appliedPalette.id;
+      responseData.palette_name = appliedPalette.name;
+      responseData.distribution_metrics = distribution_metrics;
+    }
+
+    res.json({ success: true, data: responseData });
   } catch (error) {
     res.status(500).json({ success: false, error: sanitizeError(error.message) });
   }
@@ -4733,6 +4798,7 @@ module.exports = {
   isPaletteUnweighted,
   normalizeColorWeights,
   buildColorBudgetBlock,
+  buildStage2Envelope,
   measureColorDistribution,
   readStage2Overrides,
   writeStage2Overrides,

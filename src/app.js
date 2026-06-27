@@ -1188,10 +1188,23 @@
         body: JSON.stringify({
           presetId: state.selectedPresetId,
           analysis,
-          directives
+          directives,
+          // ADR 0014 — when a palette is selected, send its id so the
+          // server can append the deterministic color-budget block to
+          // the Stage 2 user message and surface distribution_metrics
+          // in the response envelope. When no palette is selected,
+          // omit the field (server treats missing as "no weighting").
+          paletteId: state.selectedPaletteId || undefined
         })
       });
       state.finalPrompt = data.prompt;
+      // ADR 0014 — keep the most recent distribution metrics on state
+      // so the Phase 4 dashboard panel can read them without an extra
+      // fetch. The palette_id is the lookup key; null clears the
+      // previous measurement (e.g. when the user runs without a
+      // palette after a weighted run).
+      state.lastDistributionMetrics = data.distribution_metrics || null;
+      state.lastPaletteId = data.palette_id || null;
       displayResult(data);
       hideError();
     } catch (e) {

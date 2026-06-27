@@ -1260,7 +1260,265 @@ test('HTTP integration (ADR 0013): DELETE /api/palettes/:id still works (regress
   }
 });
 
-// ─── Frontend / HTML assertions (ADR 0006) ──────────────────────────
+// ─── ADR 0014 — Phase 2: Stage 2 injection + telemetry ───────────────
+//
+// Phase 2 wires the budget block into the Stage 2 user-message
+// envelope and surfaces `distribution_metrics` in the /api/generate-prompt
+// response. Tests cover:
+//   - The pure `buildStage2Envelope` helper (budget block inclusion /
+//     exclusion per ADR 0014 §4 "pure legacy" opt-out).
+//   - HTTP integration for the parts of /api/generate-prompt that
+//     don't require a live MiniMax call (paletteId validation +
+//     lookup, 404 on missing palette). The actual LLM call is not
+//     mocked in this test suite; full end-to-end coverage is the
+//     Phase 5 UAT checklist (ADR 0014 §Verification).
+
+test('ADR 0014: buildStage2Envelope includes color_budget when a weighted palette is supplied', () => {
+  const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // Weights 8 and 5 → 8/13 ≈ 62% and 5/13 ≈ 38% (rounded).
+  const envelope = buildStage2Envelope(
+    { subject: 'x', colors: [{ hex: '#d97706', name: 'burnt orange' }] },
+    'make it dramatic',
+    {
+      colors: [
+        { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
+        { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+      ],
+      accent_max_mentions: 2
+    }
+  );
+  assertTrue(typeof envelope.color_budget === 'string', 'color_budget string present');
+  assertTrue(envelope.color_budget.startsWith('Color usage budget'), 'block starts with header');
+  assertTrue(envelope.color_budget.includes('burnt orange #d97706: 62%'), 'first color 62% (8/13 rounded)');
+  assertTrue(envelope.color_budget.includes('signal red #dc2626: 38% (ACCENT — mention at most 2 times'),
+              'accent tag + cap');
+  assertEqual(envelope.analysis.subject, 'x', 'analysis preserved');
+  assertEqual(envelope.directives, 'make it dramatic', 'directives preserved');
+});
+
+test('ADR 0014: buildStage2Envelope omits color_budget when no palette is supplied', () => {
+  const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const envelope = buildStage2Envelope(
+    { subject: 'x', colors: [] },
+    '',
+    null
+  );
+  assertEqual(envelope.color_budget, undefined, 'no color_budget key');
+  assertEqual(envelope.analysis.subject, 'x', 'analysis preserved');
+  assertEqual(envelope.directives, '', 'empty directives preserved');
+});
+
+test('ADR 0014: buildStage2Envelope omits color_budget for a "pure legacy" palette (no customization)', () => {
+  const { buildStage2Envelope, DEFAULT_COLOR_WEIGHT, DEFAULT_ACCENT_MAX_MENTIONS } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // Palette with all defaults → isPaletteUnweighted → no block.
+  // This is the backwards-compat guarantee: existing palettes behave
+  // exactly as they did before ADR 0014.
+  const envelope = buildStage2Envelope(
+    { subject: 'x', colors: [{ hex: '#a', name: 'a' }, { hex: '#b', name: 'b' }] },
+    '',
+    {
+      colors: [
+        { hex: '#a', name: 'a', weight: DEFAULT_COLOR_WEIGHT, accent: false },
+        { hex: '#b', name: 'b', weight: DEFAULT_COLOR_WEIGHT, accent: false }
+      ],
+      accent_max_mentions: DEFAULT_ACCENT_MAX_MENTIONS
+    }
+  );
+  assertEqual(envelope.color_budget, undefined, 'pure legacy → no budget block');
+});
+
+test('ADR 0014: buildStage2Envelope handles directives as non-string defensively', () => {
+  const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // The route coerces directives to string before calling; this test
+  // documents that the helper itself defaults to '' for non-strings.
+  const envelope = buildStage2Envelope({ subject: 'x' }, null, null);
+  assertEqual(envelope.directives, '', 'null directives → empty string');
+  const envelope2 = buildStage2Envelope({ subject: 'x' }, undefined, null);
+  assertEqual(envelope2.directives, '', 'undefined directives → empty string');
+});
+
+// HTTP integration — paletteId validation + lookup on /api/generate-prompt.
+// These tests stop before the MiniMax call (validation/lookup runs first)
+// so they work without a live LLM API key.
+
+test('ADR 0014: POST /api/generate-prompt rejects malformed paletteId with 400', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/generate-prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        presetId: 'preset_alla_prima_oil',
+        analysis: { subject: 'x', colors: [] },
+        directives: '',
+        paletteId: 'not-a-palette-id'
+      })
+    });
+    assertEqual(r.status, 400, 'malformed paletteId → 400');
+    assertTrue(r.body.error.includes('paletteId'), 'error mentions paletteId');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('ADR 0014: POST /api/generate-prompt returns 404 when paletteId refers to a missing palette', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/generate-prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        presetId: 'preset_alla_prima_oil',
+        analysis: { subject: 'x', colors: [] },
+        directives: '',
+        paletteId: 'palette_does_not_exist'
+      })
+    });
+    assertEqual(r.status, 404, 'missing palette → 404');
+    assertTrue(r.body.error.includes('palette_does_not_exist'), 'error names the missing id');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('ADR 0014: POST /api/generate-prompt with a weighted palette includes palette fields + distribution_metrics in the response envelope', async () => {
+  // With a real MiniMax API key in the test environment, this test
+  // validates the success path: palette lookup succeeds, the budget
+  // block is appended to the Stage 2 envelope, and the response
+  // envelope carries palette_id, palette_name, and distribution_metrics
+  // with the right shape. This is the live end-to-end Phase 2
+  // contract — Phase 5 UAT validates the LLM's behavioural obedience.
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    // Seed a weighted palette on disk
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...validPaletteBody(),
+        colors: [
+          { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
+          { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+        ],
+        accent_max_mentions: 2
+      })
+    });
+    const paletteId = create.body.data.id;
+    const r = await fetchJson(`${srv.base}/api/generate-prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        presetId: 'preset_alla_prima_oil',
+        analysis: { subject: 'a quiet still life', colors: [{ hex: '#d97706', name: 'burnt orange' }] },
+        directives: '',
+        paletteId
+      })
+    });
+    assertEqual(r.status, 200, 'weighted palette + real LLM → 200');
+    assertEqual(r.body.data.palette_id, paletteId, 'response carries palette_id');
+    assertEqual(r.body.data.palette_name, 'Sunset ochres', 'response carries palette_name');
+    assertTrue(typeof r.body.data.prompt === 'string' && r.body.data.prompt.length > 0,
+               'prompt returned');
+    // distribution_metrics shape (ADR 0014 §5)
+    const m = r.body.data.distribution_metrics;
+    assertTrue(m && typeof m === 'object', 'distribution_metrics present');
+    assertTrue(Array.isArray(m.counts), 'counts is an array');
+    assertEqual(m.counts.length, 2, 'one count entry per palette color');
+    assertEqual(m.counts[0].hex, '#d97706', 'first count hex');
+    assertEqual(m.counts[0].name, 'burnt orange', 'first count name');
+    assertEqual(typeof m.counts[0].nameCount, 'number', 'first nameCount is a number');
+    assertEqual(typeof m.counts[0].hexCount, 'number', 'first hexCount is a number');
+    assertEqual(typeof m.counts[0].totalCount, 'number', 'first totalCount is a number');
+    assertEqual(typeof m.totalMentions, 'number', 'totalMentions is a number');
+    assertTrue(typeof m.totalWords === 'number' && m.totalWords > 0, 'totalWords > 0');
+    assertTrue(typeof m.measuredAt === 'string', 'measuredAt is an ISO timestamp');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('ADR 0014: POST /api/generate-prompt without paletteId omits palette fields (backwards compat)', async () => {
+  // No paletteId → response envelope is the pre-ADR 0014 shape:
+  // no palette_id, no palette_name, no distribution_metrics. Validates
+  // that existing callers (no palette selection) see no change.
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/generate-prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        presetId: 'preset_alla_prima_oil',
+        analysis: { subject: 'x', colors: [] },
+        directives: ''
+      })
+    });
+    assertEqual(r.status, 200, 'no paletteId + real LLM → 200');
+    assertEqual(r.body.data.palette_id, undefined, 'palette_id absent');
+    assertEqual(r.body.data.palette_name, undefined, 'palette_name absent');
+    assertEqual(r.body.data.distribution_metrics, undefined, 'distribution_metrics absent');
+    assertTrue(typeof r.body.data.prompt === 'string' && r.body.data.prompt.length > 0,
+               'prompt returned (backwards compat)');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('ADR 0014: POST /api/generate-prompt with a pure-legacy palette still returns palette_id + distribution_metrics (opt-out is request-side only)', async () => {
+  // A pure-legacy palette (all default weights) opts out of the budget
+  // block in the request envelope (covered by the buildStage2Envelope
+  // unit test above), but the response envelope still includes
+  // palette_id, palette_name, and distribution_metrics. The metrics
+  // are observational — they're useful regardless of weighting intent
+  // (the dashboard can show "the LLM didn't mention burnt orange
+  // even once" which is actionable info). This test documents the
+  // split: opt-out is on the REQUEST side, metrics are always on the
+  // RESPONSE side.
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    // Seed a palette WITHOUT any weight/accent (will be synthesized to
+    // defaults by readPalettes — pure legacy from isPaletteUnweighted's
+    // perspective).
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const paletteId = create.body.data.id;
+    const r = await fetchJson(`${srv.base}/api/generate-prompt`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        presetId: 'preset_alla_prima_oil',
+        analysis: { subject: 'a quiet still life', colors: [{ hex: '#d97706', name: 'burnt orange' }] },
+        directives: '',
+        paletteId
+      })
+    });
+    assertEqual(r.status, 200, 'pure-legacy palette + real LLM → 200');
+    assertEqual(r.body.data.palette_id, paletteId, 'palette_id present (resolver ran)');
+    assertTrue(r.body.data.distribution_metrics, 'distribution_metrics present (observational)');
+    assertEqual(r.body.data.distribution_metrics.counts.length, 2, 'one count per palette color');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+
 //
 // Phase 1 covers the pure data layer: range validators, the
 // `normalizeColorWeights` arithmetic (the algorithm that handles the
