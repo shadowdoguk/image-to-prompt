@@ -281,27 +281,43 @@ when supplied.
 - ADR 0006, 0013 — palette CRUD + editing.
 - ADR 0014 — weighted distribution + telemetry + dashboard.
 - ADR 0015 — canonical Z-Image Stage 2 prompt with two sections.
+- ADR 0016 — palette strength + accent placement + `strict_pass`
+  validation. The canonical Stage 2 prompt now interprets
+  `palette.strength` (subtle / moderate / strong / strict) and
+  `color.placement` (per-accent region binding). `buildColorBudgetBlock`
+  emits a strength preamble + per-line `[STRENGTH: <level>]` tag and a
+  `placement: <region>` tag on accents. `measureColorDistribution`
+  appends `strict_pass` + `strict_violations` to the response envelope
+  when the palette is `strict`. The result panel surfaces a non-
+  blocking warning chip on `strict_pass === false`.
 
 ### 5.2 To add (this work)
 
+*Resolved.* All ten items below were implemented in commit
+`f2c76d2` (ADR 0016). For the design rationale see
+`docs/adr/0016-zimage-strength-and-placement.md`; for the contract see
+§3.2–§3.4 above; for tests see `tests/run-all.js` lines ~5698–6140
+(ADR 0016 block).
+
 1. `palette.strength` field with four-level enum (default
-   `moderate`). Validation + legacy synthesis.
-2. `color.placement` field (optional, ≤60 chars). Validation.
+   `moderate`). Validation + legacy synthesis. ✅
+2. `color.placement` field (optional, ≤60 chars). Validation. ✅
 3. `buildColorBudgetBlock` extended to emit strength language and
-   placement tags.
+   placement tags. ✅
 4. `measureColorDistribution` extended with `strict_pass` flag when
-   `strength === "strict"`.
+   `strength === "strict"`. ✅
 5. `DEFAULT_ZIMAGE_STAGE2_PROMPT` updated with two new rules:
    - Strength modifier interpretation (subtle / moderate / strong /
-     strict).
-   - Accent placement region interpretation.
-6. Frontend: palette edit modal adds strength `<select>` (4 options).
+     strict). ✅
+   - Accent placement region interpretation. ✅
+6. Frontend: palette edit modal adds strength `<select>` (4 options). ✅
 7. Frontend: palette edit modal adds per-color `placement` text
-   input (visible only when `accent === true`).
-8. Frontend: result panel surfaces `strict_pass` warning.
-9. New tests in `tests/run-all.js` covering each change.
+   input (visible only when `accent === true`). ✅
+8. Frontend: result panel surfaces `strict_pass` warning. ✅
+9. New tests in `tests/run-all.js` covering each change. ✅
+   (`260 passed, 0 failed` as of the ADR 0016 commit.)
 10. New ADR `0016-zimage-strength-and-placement.md` capturing the
-    decision rationale and consequences.
+    decision rationale and consequences. ✅
 
 ### 5.3 Out of scope (locked for follow-on)
 

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Implementation pending in this session.
+Accepted. Implemented 2026-06-28 (commit `f2c76d2`).
 
 ## Type
 
