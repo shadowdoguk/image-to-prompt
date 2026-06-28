@@ -2376,11 +2376,14 @@ test('setStage2Override / getStage2Override / removeStage2Override round-trip (A
 });
 
 test('getEffectiveStage2Prompt returns override when set, preset default otherwise (ADR 0007)', () => {
-  const { setStage2Override, getEffectiveStage2Prompt, removeStage2Override } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const { setStage2Override, getEffectiveStage2Prompt, removeStage2Override, ZIMAGE_STAGE2_SENTINEL, DEFAULT_ZIMAGE_STAGE2_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
   const presets = readJSON(path.join(PROJECT_ROOT, 'data', 'presets.json'));
-  const preset = presets[0];
+  // ADR 0015 — pick a non-sentinel preset so the equality assertion holds
+  // verbatim. Oil-painting presets use the canonical Z-Image Turbo prompt
+  // constant via sentinel substitution (covered by the dedicated test below).
+  const preset = presets.find((p) => p.stage2_system_prompt !== ZIMAGE_STAGE2_SENTINEL) || presets[0];
   assertTrue(preset && typeof preset.stage2_system_prompt === 'string',
-    'test fixture requires at least one preset with stage2_system_prompt');
+    'test fixture requires at least one non-sentinel preset with stage2_system_prompt');
 
   const snapshot = snapshotStage2OverridesFile();
   try {
@@ -2397,6 +2400,65 @@ test('getEffectiveStage2Prompt returns override when set, preset default otherwi
   }
 });
 
+// ADR 0015 — sentinel substitution in getEffectiveStage2Prompt.
+// The two oil-painting presets reference the canonical Z-Image Turbo
+// final-prompt contract via the literal sentinel string
+// 'DEFAULT_ZIMAGE_STAGE2_PROMPT'. getEffectiveStage2Prompt must
+// substitute the full constant after override resolution.
+test('ADR 0015: getEffectiveStage2Prompt substitutes ZIMAGE_STAGE2_SENTINEL with DEFAULT_ZIMAGE_STAGE2_PROMPT', () => {
+  const { setStage2Override, removeStage2Override, getEffectiveStage2Prompt, ZIMAGE_STAGE2_SENTINEL, DEFAULT_ZIMAGE_STAGE2_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const presets = readJSON(path.join(PROJECT_ROOT, 'data', 'presets.json'));
+  const sentinelPreset = presets.find((p) => p.stage2_system_prompt === ZIMAGE_STAGE2_SENTINEL);
+  assertTrue(sentinelPreset,
+    'test fixture requires at least one preset whose stage2_system_prompt is the Z-Image sentinel');
+
+  const snapshot = snapshotStage2OverridesFile();
+  try {
+    removeStage2Override(sentinelPreset.id);
+
+    // 1. No override, sentinel built-in → resolves to canonical constant
+    assertEqual(getEffectiveStage2Prompt(sentinelPreset), DEFAULT_ZIMAGE_STAGE2_PROMPT,
+      'sentinel built-in resolves to DEFAULT_ZIMAGE_STAGE2_PROMPT');
+
+    // 2. User-entered override (anything other than the literal sentinel)
+    //    → returns the override verbatim
+    const custom = 'CUSTOM OVERRIDE ' + 'x'.repeat(40);
+    setStage2Override(sentinelPreset.id, custom);
+    assertEqual(getEffectiveStage2Prompt(sentinelPreset), custom,
+      'user override wins over the sentinel substitution');
+
+    // 3. User pastes the literal sentinel as their override → gets the
+    //    sentinel string back, NOT the substituted constant (explicit opt-out)
+    setStage2Override(sentinelPreset.id, ZIMAGE_STAGE2_SENTINEL);
+    assertEqual(getEffectiveStage2Prompt(sentinelPreset), ZIMAGE_STAGE2_SENTINEL,
+      'literal sentinel override returns the sentinel verbatim (no double-substitution)');
+  } finally {
+    restoreStage2OverridesFile(snapshot);
+  }
+});
+
+test('ADR 0015: DEFAULT_ZIMAGE_STAGE2_PROMPT mentions style anchor and two-section output', () => {
+  const { DEFAULT_ZIMAGE_STAGE2_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // Style anchor (verbatim quote must appear in the prompt)
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('Heavy impasto with vigorous scraped, dragged, and smeared paint'),
+    'prompt must include the verbatim style anchor opening');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('gestural streaks of energy radiate outward from the figure'),
+    'prompt must include gestural streaks phrasing');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('alla prima freshness throughout'),
+    'prompt must include alla prima freshness phrasing');
+  // Two-section output contract
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('SECTION A'),
+    'prompt must reference Section A');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('SECTION B'),
+    'prompt must reference Section B');
+  // Accent override semantics
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('REPLACE'),
+    'prompt must make accent replacement explicit');
+  // Hard size — must fit within MAX_STAGE2_PROMPT_LENGTH when sent as override
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.length <= 10000,
+    `DEFAULT_ZIMAGE_STAGE2_PROMPT is ${DEFAULT_ZIMAGE_STAGE2_PROMPT.length} chars, must be ≤ 10000`);
+});
+
 test('validateStage2Prompt rejects empty / oversized / non-string (ADR 0007)', () => {
   const { validateStage2Prompt } = require(path.join(PROJECT_ROOT, 'server.js'));
   assertTrue(validateStage2Prompt(null) !== null, 'null body must be rejected');
@@ -2410,9 +2472,12 @@ test('validateStage2Prompt rejects empty / oversized / non-string (ADR 0007)', (
 });
 
 test('HTTP integration: GET /api/stage2-prompt returns default envelope, PUT writes override, GET reflects it, DELETE clears (ADR 0007)', async () => {
-  const { setStage2Override, removeStage2Override } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const { setStage2Override, removeStage2Override, DEFAULT_ZIMAGE_STAGE2_PROMPT, ZIMAGE_STAGE2_SENTINEL } = require(path.join(PROJECT_ROOT, 'server.js'));
   const presets = readJSON(path.join(PROJECT_ROOT, 'data', 'presets.json'));
-  const preset = presets[0];
+  // ADR 0015 — pick a non-sentinel preset so the literal-equality assertions
+  // hold. The sentinel substitution is exercised separately in the unit
+  // test 'getEffectiveStage2Prompt substitutes ZIMAGE_STAGE2_SENTINEL...'
+  const preset = presets.find((p) => p.stage2_system_prompt !== ZIMAGE_STAGE2_SENTINEL) || presets[0];
 
   const snapshot = snapshotStage2OverridesFile();
   removeStage2Override(preset.id);

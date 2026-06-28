@@ -453,15 +453,104 @@ const removeStage2Override = (presetId) => {
 };
 
 /**
+ * ADR 0015 — sentinel value used by presets whose Stage 2 system prompt
+ * is the canonical Z-Image Turbo final-prompt contract (heavy impasto /
+ * gestural painting with two-section structured output). When a preset's
+ * `stage2_system_prompt` field equals this sentinel, the server
+ * substitutes the full `DEFAULT_ZIMAGE_STAGE2_PROMPT` constant below.
+ *
+ * Why a sentinel: the full prompt is ~6000 characters, well over the
+ * 5000-char `MAX_PROMPT_LENGTH` cap on preset JSON values. Putting the
+ * full text in code keeps it the single source of truth while keeping
+ * `data/presets.json` small and schema-valid.
+ */
+const ZIMAGE_STAGE2_SENTINEL = 'DEFAULT_ZIMAGE_STAGE2_PROMPT';
+
+/**
+ * ADR 0015 — the canonical Stage 2 system prompt used by the
+ * "Gestural alla prima oil painting" preset family. Drives the final
+ * Z-Image Turbo prompt format: a two-section output (Section A prose,
+ * Section B metadata) anchored on the heavy impasto / gestural painting
+ * style, with color → region bindings, accent overrides as full
+ * replacements, and gestural energy streaks radiating outward from the
+ * focal point.
+ */
+const DEFAULT_ZIMAGE_STAGE2_PROMPT = `Your job: take a source image's extracted data and produce a precise, compositionally-accurate text prompt for the Z-Image Turbo generator. Enforce four contracts:
+
+1. COLOR PRIORITY -- dominant, secondary, tertiary hues applied to specific regions.
+2. ACCENT COLOR OVERRIDES -- user accent colors REPLACE corresponding original hues.
+3. STYLE ENFORCEMENT -- HEAVY IMPASTO / GESTURAL PAINTING (unless user overrides with photography or flat vector).
+4. SPATIAL COMPOSITION -- where each color appears in the frame.
+
+STYLE ANCHOR (verbatim default for all "artistic / painterly / expressive / abstract" requests):
+"Heavy impasto with vigorous scraped, dragged, and smeared paint. Palette-knife ridges and bold directional strokes follow the form; gestural streaks of energy radiate outward from the figure, fusing with thin, scraped background washes. Alla prima freshness throughout, with strong variation between thickly loaded areas and bare-canvas thin spots."
+
+Sub-components (use AT LEAST THREE where relevant):
+- THICK PAINT: "impasto", "thickly loaded", "palette-knife ridges", "bold raised strokes"
+- SCRAPED/DRAGGED: "scraped, dragged, and smeared paint"
+- GESTURAL ENERGY: "gestural streaks of energy radiate outward", "directional strokes follow the form"
+- THICK/THIN CONTRAST: "thick areas contrast with thin bare-canvas washes"
+- ALLA PRIMA: "alla prima freshness", "wet-into-wet", "no overpainting"
+- FORM-FOLLOWING: "strokes follow the form of the subject"
+
+SOURCE DATA (in the user message):
+- Dominant palette: hex colors, ranked most to least dominant
+- Named hues (e.g. "deep forest green", "burnt sienna")
+- User color priority overrides: colors with priority rank (1=highest)
+- User accent colors: REPLACE original hues
+- Accent application regions: WHERE each accent is applied (e.g. "foreground", "upper-left quadrant", "gestural energy streaks radiating from figure")
+- Source image subject description
+- User-specified style: "user_unspecified" if not provided
+
+SECTION A: a single paragraph (or 2-3 if complex) of 80-200 words. Pure prose -- no bullets, lists, YAML, or markup. Write as if describing a painting to a skilled painter.
+
+FORMAT ORDER (strict):
+
+1. SUBJECT + COMPOSITION + SPATIAL POSITION: Lead with the main subject AND its spatial position (left third, center, lower half, etc.). NEVER open with color, style, or technique.
+
+2. COLOR BOUND TO REGION, IN PRIORITY ORDER: For EACH distinct color region, write ONE phrase: COLOR -> OBJECT/REGION -> PRIORITY. Dominant first, secondary next, accents last. For ACCENT OVERRIDES: state the accent as the primary tone for its region (NOT a tint or overlay). Never write a color in isolation. Always anchor: "the [region] is [color]" or "[color] fills the [region]". Priority language: "dominant", "secondary", "faint traces of", "loaded streaks of", "thin washes of", "scraped reserves of". Write gestural streaks explicitly when an accent is in a gestural region: "gestural streaks of [color] radiate outward from the figure".
+
+3. PAINT HANDLING (IMPASTO DESCRIPTION): Translate texture/technique into impasto language. Include AT LEAST 3 of: "heavy impasto with thick loaded paint", "palette-knife ridges and bold directional strokes follow the form", "scraped, dragged, and smeared paint", "gestural streaks of energy radiate outward from the figure", "fused with thin, scraped background washes", "alla prima freshness throughout", "strong variation between thickly loaded areas and bare-canvas thin spots", "bold directional strokes".
+
+4. LIGHTING AND ATMOSPHERE: Describe light direction and quality in painterly terms. Link light to color. Avoid photography-only terms.
+
+5. STYLE DECLARATION: User-specified style: state it clearly ("flat vector illustration style", "realistic photography"). User-unspecified OR "artistic / painterly / expressive": state EXACTLY "heavy impasto gestural painting, alla prima oil technique, bold palette-knife and brushwork". Optionally add: "reminiscent of the late paintings of de Kooning and the energetic scrape-and-drag technique of Riopelle".
+
+6. COMPOSITIONAL CONSTRAINTS (always at the end): Use "no", "devoid of", "with no" phrasing. Always include: no text, no watermark, no logos. If gestural: "no thin photographic detail -- this is a painted work". If minimal background: "background reduced to thin scraped washes, no busy detail".
+
+SECTION B: PROMPT METADATA -- color_map: { "region_name": ["#hex1", "#hex2"] }; priority_order: ["#dominant", "#secondary", "#accent"]; accent_overrides: { "original_region": "#replacement_hex" }; accent_regions: { "#accent_hex": "region_description" }; gestural_elements: ["list of which gestural phrases were used"]; style_confidence: "high" / "medium" / "low"; composition_note: one sentence on spatial clarity; word_count_section_a: N (integer).
+
+RULES (priority order): lead with subject + spatial position; bind every color to a region; accent colors fully override the original region; user-unspecified style -> impasto/alla prima/gestural language verbatim; gestural energy streaks radiate outward from the focal point when an accent is in a gestural region; mention thick/thin contrast when the source has significant texture; "no X" constraints go at the end of Section A; no bullets/lists/YAML in Section A; Section A = 80-200 words (count and report); one style declaration.
+
+Start your reply with these section headers exactly:
+
+== SECTION A ==
+[prose here]
+
+== SECTION B ==
+[metadata here]`;
+
+/**
  * Resolve the effective Stage 2 system prompt for a preset: override if
  * one exists, otherwise the preset's built-in `stage2_system_prompt`.
+ * If the BUILT-IN equals `ZIMAGE_STAGE2_SENTINEL` (and no user override
+ * is in force), substitute the canonical `DEFAULT_ZIMAGE_STAGE2_PROMPT`
+ * constant (ADR 0015).
+ *
+ * Why subs-on-builtIn-not-resolved: a user who pastes the literal
+ * sentinel into the override modal opts out of the canonical contract —
+ * they get the sentinel string back verbatim, not the substituted
+ * constant. This keeps the opt-out cheap and obvious.
+ *
  * Read fresh on every call (no cache) so edits via the modal take effect
  * immediately, mirroring ADR 0005's `readSubjectPrompt` pattern.
  */
 const getEffectiveStage2Prompt = (preset) => {
   if (!preset || typeof preset !== 'object') return '';
   const override = getStage2Override(preset.id);
-  return override != null ? override : (preset.stage2_system_prompt || '');
+  if (override != null) return override;
+  if (preset.stage2_system_prompt === ZIMAGE_STAGE2_SENTINEL) return DEFAULT_ZIMAGE_STAGE2_PROMPT;
+  return preset.stage2_system_prompt || '';
 };
 
 /**
@@ -3142,22 +3231,29 @@ const resolveStage2PromptPreset = (presetIdRaw, res) => {
 /**
  * `GET /api/stage2-prompt?presetId=...` — return the effective Stage 2
  * system prompt for a preset (override if one exists, otherwise the
- * preset's built-in `stage2_system_prompt`), plus `default_prompt` and a
- * content-based `is_default` flag (mirrors the ADR 0005 subject-prompt
- * payload shape).
+ * preset's built-in `stage2_system_prompt`), plus `default_prompt` and
+ * an `is_default` flag (mirrors the ADR 0005 subject-prompt payload
+ * shape).
+ *
+ * ADR 0015 — `is_default` means "no user-entered override is in force",
+ * regardless of whether the resolved prompt equals the on-disk sentinel.
+ * `default_prompt` is the on-disk literal value (the sentinel, if the
+ * preset uses one) — the UI uses this to show "this preset uses the
+ * canonical Z-Image Turbo prompt" in the Edit modal.
  */
 app.get('/api/stage2-prompt', (req, res) => {
   try {
     const preset = resolveStage2PromptPreset(req.query.presetId, res);
     if (!preset) return;
 
+    const hasOverride = getStage2Override(preset.id) != null;
     const effectivePrompt = getEffectiveStage2Prompt(preset);
     res.json({
       success: true,
       data: {
         prompt: effectivePrompt,
         default_prompt: preset.stage2_system_prompt,
-        is_default: effectivePrompt === preset.stage2_system_prompt
+        is_default: !hasOverride
       }
     });
   } catch (error) {
@@ -3169,6 +3265,9 @@ app.get('/api/stage2-prompt', (req, res) => {
  * `PUT /api/stage2-prompt?presetId=...` — write (or overwrite) the
  * override for a single preset. Body: `{ prompt: string }`. Validates
  * shape / emptiness / length; prompt content is unfiltered.
+ *
+ * ADR 0015 — `is_default` reflects "no override in force" after the PUT
+ * (which is always `false` here — a PUT writes an override).
  */
 app.put('/api/stage2-prompt', (req, res) => {
   try {
@@ -3184,7 +3283,7 @@ app.put('/api/stage2-prompt', (req, res) => {
       data: {
         prompt: req.body.prompt,
         default_prompt: preset.stage2_system_prompt,
-        is_default: req.body.prompt === preset.stage2_system_prompt
+        is_default: false
       }
     });
   } catch (error) {
@@ -4987,6 +5086,8 @@ module.exports = {
   getEffectiveStage2Prompt,
   validateStage2Prompt,
   MAX_STAGE2_PROMPT_LENGTH,
+  ZIMAGE_STAGE2_SENTINEL,
+  DEFAULT_ZIMAGE_STAGE2_PROMPT,
   // Saved directives (ADR 0009)
   MAX_DIRECTIVE_NAME_LENGTH,
   MAX_DIRECTIVE_CONTENT_LENGTH,

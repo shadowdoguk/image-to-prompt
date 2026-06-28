@@ -95,7 +95,23 @@ The product has two top-level surfaces:
   accents; the response envelope gains a `palette_id`, `palette_name`, and
   `distribution_metrics` field from `measureColorDistribution`. The block is
   omitted for "pure legacy" palettes (no user-customized weighting) so
-  existing palettes behave unchanged.
+  existing palettes behave unchanged. **ADR 0015 (implemented):** the
+  "Gestural alla prima oil painting" preset family (`preset_alla_prima_oil`,
+  `preset_968c0ccdf6fc6151`) uses the canonical Z-Image Turbo final-prompt
+  contract, defined as the code constant `DEFAULT_ZIMAGE_STAGE2_PROMPT` in
+  `server.js`. The preset's on-disk `stage2_system_prompt` is the 28-char
+  sentinel string `DEFAULT_ZIMAGE_STAGE2_PROMPT`; `getEffectiveStage2Prompt`
+  substitutes the canonical constant after override resolution. The contract
+  drives a two-section output: **Section A** is a 80–200-word prose
+  description (subject + spatial position, color → region binding in priority
+  order, impasto paint-handling language, lighting, style declaration,
+  compositional constraints); **Section B** is structured metadata
+  (`color_map`, `priority_order`, `accent_overrides`, `accent_regions`,
+  `gestural_elements`, `style_confidence`, `composition_note`,
+  `word_count_section_a`). The style anchor for "user_unspecified" / "artistic
+  / painterly / expressive / abstract" requests is the verbatim heavy impasto /
+  gestural alla prima description (palette-knife ridges, scraped dragged
+  smeared paint, gestural streaks radiating outward, alla prima freshness).
 - **Stage 2.5 (Post-generation chat, ADR 0011)** activates the moment
   Stage 2 returns successfully. The frontend posts the new prompt +
   analysis snapshot to `/api/chat/sessions`; the server mints a fresh
@@ -205,7 +221,7 @@ resolved. Tracked here so the audit trail is clear:
    `https://github.com/shadowdoguk/image-to-prompt.git`, 11 commits
    as of 2026-06-27. GitHub Issues available via `gh`.
 2. **`CONTEXT.md` exists** ✅ — created per `docs/agents/domain.md`.
-3. **`tests/` directory exists** ✅ — `tests/run-all.js` covers 227
+3. **`tests/` directory exists** ✅ — `tests/run-all.js` covers 227+
    tests across all ADRs (Phase 1–4 included); session-init reports
    10/10. Run via `node tests/run-all.js`.
 4. **README drift fixed** ✅ — `POST /api/analyze` + `POST /api/generate-prompt`
