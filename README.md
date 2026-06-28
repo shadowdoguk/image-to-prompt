@@ -59,6 +59,36 @@ An AI-powered web application that transforms uploaded images into refined, deta
 npm run dev
 ```
 
+### Deployment (desktop launcher)
+
+The production deploy model is a local desktop launcher, not a
+container or cloud target. The repo ships a single detached-start
+script that handles the lifecycle (kill stale, start `npm start`
+in the background, poll readiness, open the browser):
+
+```bash
+bash scripts/start-detached.sh
+```
+
+That script is the `Exec=` target of the XDG desktop launcher at
+`~/.local/share/applications/image-to-prompt.desktop`. To install
+the desktop icon, generate it once with:
+
+```bash
+python3 scripts/make-icon.py
+```
+
+After that, double-clicking the **Image-to-Prompt** icon in the
+application launcher opens the app — the script reuses the running
+server if one is already up, or starts a fresh one otherwise. Logs
+go to `.data/start.log` (tail with `tail -f .data/start.log`). Stop
+the server with `pkill -f "node server.js"` from the repo root.
+
+There is no Dockerfile, no CI/CD, and no cloud deploy target. The
+single-user desktop pattern is the deployment — see
+[`CONTEXT.md` → Deployment](../../CONTEXT.md#deployment) for the
+rationale.
+
 ## Configuration
 
 All configuration is via environment variables (see `.env.example`):

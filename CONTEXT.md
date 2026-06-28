@@ -167,25 +167,50 @@ benchmark dataset and CI validation harness in ADR-0001).
 ## Conventions
 
 - One issue per concern. Apply a triage label on creation if state is known.
-- Reference issues in commits as `#N` (once git is initialized — see Known gaps).
+- Reference issues in commits as `#N` (git is initialised; see Resolved gaps).
 - ADRs use the `docs/adr/NNNN-kebab-title.md` filename pattern, increment NNNN.
 - Preset IDs are `preset_<16 hex chars>`; never reuse.
 - Uploaded files MUST be deleted from `uploads/` after processing (success or error).
 - API key MUST stay server-side; never sent to the client; never logged.
 
-## Known gaps (must be fixed to fully eliminate drift)
+## Deployment
 
-1. **No git repository.** `AGENTS.md` references GitHub Issues via `gh`, but
-   the project has no `.git/` and no remote. Version control + issue linkage
-   is currently impossible.
-2. **`CONTEXT.md` missing prior to this commit.** This file is now being created
-   per the contract in `docs/agents/domain.md`.
-3. **`tests/` directory missing** despite `package.json` referencing
-   `node tests/run-all.js`. No regression harness exists.
-4. **README drift:** README documents `POST /api/generate`; actual code uses
-   `POST /api/analyze` (Stage 1) and `POST /api/generate-prompt` (Stage 2).
-   Fix in README to match implementation.
-5. **`uploads/` contains a leftover 1×1 PNG** from earlier testing. Safe to delete.
+This is a Node.js + Express app with a vanilla HTML/CSS/JS frontend
+(no build step). The deploy mechanism is local-desktop, not
+container/cloud:
 
-These are tracked as `Known gaps` rather than issues because there is no issue
-tracker to track them in yet (gap #1).
+- `scripts/start-detached.sh` — kills any stale `node server.js`,
+  starts `npm start` detached (logs to `.data/start.log`), polls
+  `GET /api/health` for readiness, opens the browser at
+  `http://localhost:${PORT}` (default 3100). Idempotent: if the
+  server is already running, it just re-opens the browser.
+- `scripts/make-icon.py` — generates `~/.local/share/icons/image-to-prompt.png`
+  (the app icon for the desktop launcher).
+- `~/.local/share/applications/image-to-prompt.desktop` —
+  XDG desktop launcher pointing at `scripts/start-detached.sh`.
+  Install path is per-user; the desktop file itself lives outside
+  the repo (it's the user's launcher, not the project's).
+
+The deploy flow is "click the desktop icon". For headless starts
+(no GUI), run `bash scripts/start-detached.sh` directly and tail
+`.data/start.log`. There is no Dockerfile, no CI/CD, no cloud
+target — the single-user desktop pattern is the deployment.
+
+## Resolved gaps (formerly "Known gaps")
+
+The original CONTEXT.md listed five known gaps; all five are now
+resolved. Tracked here so the audit trail is clear:
+
+1. **Git repository** ✅ — `.git/` initialised, remote at
+   `https://github.com/shadowdoguk/image-to-prompt.git`, 11 commits
+   as of 2026-06-27. GitHub Issues available via `gh`.
+2. **`CONTEXT.md` exists** ✅ — created per `docs/agents/domain.md`.
+3. **`tests/` directory exists** ✅ — `tests/run-all.js` covers 227
+   tests across all ADRs (Phase 1–4 included); session-init reports
+   10/10. Run via `node tests/run-all.js`.
+4. **README drift fixed** ✅ — `POST /api/analyze` + `POST /api/generate-prompt`
+   are the documented endpoints; ADR 0014 Phase 4 endpoint
+   (`GET /api/palettes/:id/distribution`) is also documented.
+5. **`uploads/` is empty** ✅ — multer cleans up after each analyze.
+   The `node tests/run-all.js` final-invariant test
+   (`No stale upload files in uploads/`) guards against regressions.
