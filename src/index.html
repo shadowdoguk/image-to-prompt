@@ -139,6 +139,7 @@
           <p id="result-prompt" class="result-prompt"></p>
           <div class="result-meta">
             <span id="result-meta-info" class="result-meta-info"></span>
+            <span id="result-strict-warn" class="result-strict-warn" role="status" aria-live="polite" hidden></span>
           </div>
           <div class="result-actions">
             <button type="button" id="copy-btn" class="btn-copy">Copy to clipboard</button>
@@ -459,6 +460,21 @@
                 aria-describedby="edit-palette-accent-max-hint"
               >
               <span id="edit-palette-accent-max-hint" class="field-action-hint">Max total mentions across all accent colors (1–5). Lower = sparser accents.</span>
+            </div>
+
+            <div class="edit-palette-strength-row">
+              <label for="edit-palette-strength" class="label-hint">Strength</label>
+              <select
+                id="edit-palette-strength"
+                class="text-input edit-palette-strength-input"
+                aria-describedby="edit-palette-strength-hint"
+              >
+                <option value="subtle">Subtle — gentle reference colors</option>
+                <option value="moderate" selected>Moderate — honor the palette closely</option>
+                <option value="strong">Strong — every named color appears at least once</option>
+                <option value="strict">Strict — per-color count is locked (validated post-hoc)</option>
+              </select>
+              <span id="edit-palette-strength-hint" class="field-action-hint">How aggressively the generated prompt should honor this palette. Subtle allows complementary tones; strict requires exact mention counts and is validated.</span>
             </div>
 
             <ul id="edit-palette-colors-list" class="edit-palette-colors-list"></ul>

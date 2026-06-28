@@ -487,11 +487,11 @@ STYLE ANCHOR (verbatim default for all "artistic / painterly / expressive / abst
 
 Sub-components (use AT LEAST THREE where relevant):
 - THICK PAINT: "impasto", "thickly loaded", "palette-knife ridges", "bold raised strokes"
-- SCRAPED/DRAGGED: "scraped, dragged, and smeared paint"
-- GESTURAL ENERGY: "gestural streaks of energy radiate outward", "directional strokes follow the form"
-- THICK/THIN CONTRAST: "thick areas contrast with thin bare-canvas washes"
-- ALLA PRIMA: "alla prima freshness", "wet-into-wet", "no overpainting"
-- FORM-FOLLOWING: "strokes follow the form of the subject"
+- SCRAPED / DRAGGED: "scraped, dragged, and smeared paint", "drag marks visible in the medium"
+- GESTURAL ENERGY: "gestural strokes radiate outward", "directional strokes follow the form"
+- THICK / THIN CONTRAST: "thick areas contrast with thin bare-canvas washes", "loaded strokes over thin washes"
+- ALLA PRIMA: "alla prima freshness", "wet-in-wet", "no overpainting", "direct brushwork"
+- FORM-FOLLOWING: "strokes follow the form of the subject", "paint application describes the underlying shape"
 
 SOURCE DATA (in the user message):
 - Dominant palette: hex colors, ranked most to least dominant
@@ -520,7 +520,7 @@ FORMAT ORDER (strict):
 
 SECTION B: PROMPT METADATA -- color_map: { "region_name": ["#hex1", "#hex2"] }; priority_order: ["#dominant", "#secondary", "#accent"]; accent_overrides: { "original_region": "#replacement_hex" }; accent_regions: { "#accent_hex": "region_description" }; gestural_elements: ["list of which gestural phrases were used"]; style_confidence: "high" / "medium" / "low"; composition_note: one sentence on spatial clarity; word_count_section_a: N (integer).
 
-RULES (priority order): lead with subject + spatial position; bind every color to a region; accent colors fully override the original region; user-unspecified style -> impasto/alla prima/gestural language verbatim; gestural energy streaks radiate outward from the focal point when an accent is in a gestural region; mention thick/thin contrast when the source has significant texture; "no X" constraints go at the end of Section A; no bullets/lists/YAML in Section A; Section A = 80-200 words (count and report); one style declaration.
+RULES (priority order): lead with subject + spatial position; bind every color to a region; accent colors fully override the original region; user-unspecified style -> impasto/alla prima/gestural language verbatim; gestural energy streaks radiate outward from the focal point when an accent is in a gestural region; mention thick/thin contrast when the source has significant texture; "no X" constraints go at the end of Section A; no bullets/lists/YAML in Section A; Section A = 80-200 words (count and report); one style declaration; (ADR 0016) STRENGTH MODIFIER (when palette supplied): interpret palette.strength per the four-level contract — subtle (gentle reference, complementary tones allowed), moderate (close adherence, natural-shadow deviations only), strong (every named color appears at least once, no off-palette introductions), strict (per-color mention count is locked, validated post-hoc); (ADR 0016) ACCENT PLACEMENT (when an accent has a placement): accent overrides fully replace the original region's color AND must appear within the documented placement region. If the source image's accent region contradicts the user-supplied placement, user placement wins.
 
 Start your reply with these section headers exactly:
 
@@ -648,6 +648,19 @@ const readPalettes = () => {
         p.accent_max_mentions > MAX_ACCENT_MAX_MENTIONS) {
       p.accent_max_mentions = DEFAULT_ACCENT_MAX_MENTIONS;
     }
+    // ADR 0016 — synthesize `strength` for palettes missing the field.
+    // Mirrors the read-side courtesy used for weight/accent above.
+    if (typeof p.strength !== 'string' ||
+        !PALETTE_STRENGTH_LEVELS.includes(p.strength)) {
+      p.strength = DEFAULT_PALETTE_STRENGTH;
+    }
+    // ADR 0016 — synthesize + clamp per-color `placement` (≤60 chars).
+    for (const c of p.colors) {
+      if (typeof c.placement !== 'string') c.placement = '';
+      if (c.placement.length > MAX_COLOR_PLACEMENT_LENGTH) {
+        c.placement = c.placement.slice(0, MAX_COLOR_PLACEMENT_LENGTH);
+      }
+    }
     return true;
   });
 };
@@ -749,6 +762,13 @@ const validatePalette = (body, { existingNames, excludeId } = {}) => {
     if (amErr) return `accent_max_mentions: ${amErr}`;
   }
 
+  // ADR 0016 — optional palette-level `strength`. Same partial-body
+  // pattern as accent_max_mentions: validated only when present.
+  if (body.strength !== undefined) {
+    const sErr = validatePaletteStrength(body.strength);
+    if (sErr) return `strength: ${sErr}`;
+  }
+
   return null;
 };
 
@@ -823,6 +843,11 @@ const DEFAULT_COLOR_WEIGHT = 5;
 const MIN_ACCENT_MAX_MENTIONS = 1;
 const MAX_ACCENT_MAX_MENTIONS = 5;
 const DEFAULT_ACCENT_MAX_MENTIONS = 2;
+
+// ADR 0016 — palette strength (qualitative) + per-accent placement region.
+const PALETTE_STRENGTH_LEVELS = ['subtle', 'moderate', 'strong', 'strict'];
+const DEFAULT_PALETTE_STRENGTH = 'moderate';
+const MAX_COLOR_PLACEMENT_LENGTH = 60;
 
 /**
  * Parse a single user-entered color string into canonical hex form.
@@ -960,6 +985,17 @@ const validatePaletteColorsFlexible = (colors) => {
       }
       entry.accent = c.accent;
     }
+    // ADR 0016 — optional per-color `placement`. Only honored when the
+    // caller supplies it; empty/missing → no placement directive.
+    if (c.placement !== undefined) {
+      if (typeof c.placement !== 'string') {
+        return { colors: null, error: `colors[${i}].placement must be a string (got ${typeof c.placement})` };
+      }
+      if (c.placement.length > MAX_COLOR_PLACEMENT_LENGTH) {
+        return { colors: null, error: `colors[${i}].placement must be ${MAX_COLOR_PLACEMENT_LENGTH} characters or fewer (got ${c.placement.length})` };
+      }
+      entry.placement = c.placement;
+    }
     out.push(entry);
   }
   return { colors: out, error: null };
@@ -990,8 +1026,12 @@ const validatePaletteEdit = (body, { existingNames, excludeId } = {}) => {
   // A user with a palette that only needs the cap adjusted shouldn't
   // be forced to resend name+colors.
   const hasAccentMax = body.accent_max_mentions !== undefined;
-  if (!hasName && !hasColors && !hasAccentMax) {
-    return 'At least one of "name", "colors", or "accent_max_mentions" must be provided.';
+  // ADR 0016 — palette-level `strength` is also a valid partial-body
+  // field (the user may want to flip from moderate → strict without
+  // touching anything else).
+  const hasStrength = body.strength !== undefined;
+  if (!hasName && !hasColors && !hasAccentMax && !hasStrength) {
+    return 'At least one of "name", "colors", "accent_max_mentions", or "strength" must be provided.';
   }
   if (hasName) {
     const nameError = validatePaletteName({ name: body.name }, { existingNames, excludeId });
@@ -1006,6 +1046,11 @@ const validatePaletteEdit = (body, { existingNames, excludeId } = {}) => {
   if (body.accent_max_mentions !== undefined) {
     const amErr = validatePaletteAccentMaxMentions(body.accent_max_mentions);
     if (amErr) return `accent_max_mentions: ${amErr}`;
+  }
+  // ADR 0016 — palette-level `strength`. Only validated when present.
+  if (body.strength !== undefined) {
+    const sErr = validatePaletteStrength(body.strength);
+    if (sErr) return `strength: ${sErr}`;
   }
   return null;
 };
@@ -1045,6 +1090,13 @@ const applyPaletteUpdate = (palette, body) => {
     if (amErr) return `accent_max_mentions: ${amErr}`;
     palette.accent_max_mentions = body.accent_max_mentions;
   }
+  // ADR 0016 — palette-level `strength`. Only applied when explicitly
+  // provided; absent means leave the synthesized default in place.
+  if (body.strength !== undefined) {
+    const sErr = validatePaletteStrength(body.strength);
+    if (sErr) return `strength: ${sErr}`;
+    palette.strength = body.strength;
+  }
   return null;
 };
 
@@ -1066,11 +1118,20 @@ const snapshotPalette = (palette) => ({
     const snap = { hex: c.hex, name: c.name };
     if (typeof c.weight === 'number') snap.weight = c.weight;
     if (typeof c.accent === 'boolean') snap.accent = c.accent;
+    // ADR 0016 — also preserve per-color placement so a restore rolls
+    // back accent placement regions too. Empty string is the "no
+    // placement" sentinel; we copy it as-is.
+    if (typeof c.placement === 'string') snap.placement = c.placement;
     return snap;
   }),
   accent_max_mentions: typeof palette.accent_max_mentions === 'number'
     ? palette.accent_max_mentions
     : DEFAULT_ACCENT_MAX_MENTIONS,
+  // ADR 0016 — palette-level strength rolls back too.
+  strength: typeof palette.strength === 'string' &&
+    PALETTE_STRENGTH_LEVELS.includes(palette.strength)
+    ? palette.strength
+    : DEFAULT_PALETTE_STRENGTH,
   saved_at: new Date().toISOString()
 });
 
@@ -1246,6 +1307,20 @@ const validatePaletteAccentMaxMentions = (n) => {
 };
 
 /**
+ * Validate a palette-level `strength` value (ADR 0016). Returns an
+ * error string or null. The four valid levels are listed in
+ * PALETTE_STRENGTH_LEVELS; any other value (including non-strings,
+ * null, undefined) is rejected with a 400.
+ */
+const validatePaletteStrength = (value) => {
+  if (typeof value !== 'string') return `must be a string (got ${typeof value})`;
+  if (!PALETTE_STRENGTH_LEVELS.includes(value)) {
+    return `must be one of: ${PALETTE_STRENGTH_LEVELS.join(', ')} (got ${JSON.stringify(value)})`;
+  }
+  return null;
+};
+
+/**
  * Check whether the palette has any user-customized weighting — used
  * to decide whether `buildColorBudgetBlock` should emit anything. A
  * palette is "untouched" when every weight is the default AND no color
@@ -1294,7 +1369,10 @@ const normalizeColorWeights = (colors) => {
     weight: (c && typeof c.weight === 'number' && Number.isInteger(c.weight) &&
               c.weight >= MIN_COLOR_WEIGHT && c.weight <= MAX_COLOR_WEIGHT)
               ? c.weight : DEFAULT_COLOR_WEIGHT,
-    accent: !!(c && c.accent === true)
+    accent: !!(c && c.accent === true),
+    // ADR 0016 — preserve per-color placement through normalization so
+    // buildColorBudgetBlock can render it. Empty/missing becomes ''.
+    placement: (c && typeof c.placement === 'string') ? c.placement : ''
   }));
   const totalWeight = safeColors.reduce((s, c) => s + c.weight, 0);
   if (totalWeight <= 0) {
@@ -1336,8 +1414,16 @@ const buildColorBudgetBlock = (palette) => {
     ? palette.accent_max_mentions
     : DEFAULT_ACCENT_MAX_MENTIONS;
   const accentCount = palette.colors.filter((c) => c.accent === true).length;
+  // ADR 0016 — strength preamble + per-line tag. Strength defaults to
+  // 'moderate' (mirrors the synthesis path in readPalettes).
+  const strength = (typeof palette.strength === 'string' &&
+    PALETTE_STRENGTH_LEVELS.includes(palette.strength))
+    ? palette.strength
+    : DEFAULT_PALETTE_STRENGTH;
+  const strengthPreamble = STRENGTH_PREAMBLES[strength];
 
   const lines = [];
+  if (strengthPreamble) lines.push(strengthPreamble);
   lines.push('Color usage budget (use these fractions as a guide; do not invent colors not on this list):');
   for (let i = 0; i < norm.colors.length; i++) {
     const c = norm.colors[i];
@@ -1345,13 +1431,30 @@ const buildColorBudgetBlock = (palette) => {
     const accentTag = c.accent
       ? ` (ACCENT — mention at most ${accentMax} time${accentMax === 1 ? '' : 's'} total; place where it adds focus)`
       : '';
-    lines.push(`  - ${c.name} ${c.hex}: ${pct}%${accentTag}`);
+    // ADR 0016 — accent placement region binding. Emitted only when the
+    // color is an accent AND has a non-empty placement string. Keeps
+    // the budget block terse for palettes that don't use placement.
+    const placementTag = (c.accent && typeof c.placement === 'string' && c.placement.trim().length > 0)
+      ? `, placement: ${c.placement.trim()}`
+      : '';
+    lines.push(`  - ${c.name} ${c.hex}: ${pct}%${accentTag}${placementTag} [STRENGTH: ${strength}]`);
   }
   const sum = norm.displayPct.reduce((s, p) => s + p, 0);
   const sumNote = sum === 100 ? 'Sum: 100%' : `Sum: ${sum}% (rounded)`;
   const capNote = accentCount > 0 ? ` (accent cap: ${accentMax} mention${accentMax === 1 ? '' : 's'})` : '';
   lines.push(`${sumNote}${capNote}`);
   return lines.join('\n');
+};
+
+// ADR 0016 — strength preamble lines for `buildColorBudgetBlock`. The
+// opening one-liner primes the LLM with the qualitative contract before
+// the per-color lines arrive. Subtle → moderate → strong → strict in
+// order of increasing enforcement.
+const STRENGTH_PREAMBLES = {
+  subtle: 'STRENGTH: subtle — use these as gentle reference colors; feel free to introduce complementary tones that fit the subject.',
+  moderate: 'STRENGTH: moderate — honor the palette closely; deviations allowed only for natural shadows and skin tones.',
+  strong: 'STRENGTH: strong — every named color must appear at least once in the prompt; no off-palette introductions.',
+  strict: 'STRENGTH: strict — every named color must appear the documented number of times (±0); no substitutions. The output will be validated post-hoc.'
 };
 
 /**
@@ -1388,14 +1491,10 @@ const measureColorDistribution = (prompt, palette) => {
     // Return one zero-count entry per palette color so the dashboard
     // can iterate over palette.colors and always find a matching
     // measurement, regardless of whether the prompt was non-empty.
-    return {
-      counts: palette.colors.map((c) => ({
-        hex: c.hex, name: c.name, nameCount: 0, hexCount: 0, totalCount: 0
-      })),
-      totalMentions: 0,
-      totalWords,
-      measuredAt
-    };
+    const emptyCounts = palette.colors.map((c) => ({
+      hex: c.hex, name: c.name, nameCount: 0, hexCount: 0, totalCount: 0
+    }));
+    return computeStrictPass(emptyCounts, palette, { counts: emptyCounts, totalMentions: 0, totalWords, measuredAt });
   }
   const lower = prompt.toLowerCase();
 
@@ -1438,7 +1537,49 @@ const measureColorDistribution = (prompt, palette) => {
   });
 
   const totalMentions = counts.reduce((s, c) => s + c.totalCount, 0);
-  return { counts, totalMentions, totalWords, measuredAt };
+  return computeStrictPass(counts, palette, { counts, totalMentions, totalWords, measuredAt });
+};
+
+/**
+ * ADR 0016 — append `strict_pass` + `strict_violations` to a
+ * distribution result when the palette's strength is "strict". For
+ * any other strength (or absent), returns the result unchanged. Per-
+ * color expectation:
+ *   - accent colors: must appear at least 1 time AND not more than
+ *     `palette.accent_max_mentions`.
+ *   - non-accent colors: must appear at least
+ *     `max(1, round(weight / 2))` times (the "documented count" the
+ *     user agrees to when they pick strict).
+ * The first 10 violations are reported; `strict_pass` is the boolean
+ * sum.
+ */
+const computeStrictPass = (counts, palette, result) => {
+  const strength = (palette && typeof palette.strength === 'string' &&
+    PALETTE_STRENGTH_LEVELS.includes(palette.strength))
+    ? palette.strength
+    : DEFAULT_PALETTE_STRENGTH;
+  if (strength !== 'strict') return result;
+  if (!Array.isArray(palette.colors)) return result;
+
+  const accentMax = typeof palette.accent_max_mentions === 'number'
+    ? palette.accent_max_mentions
+    : DEFAULT_ACCENT_MAX_MENTIONS;
+  const violations = [];
+  for (let i = 0; i < counts.length; i++) {
+    const c = palette.colors[i];
+    const m = counts[i];
+    if (!c || !m) continue;
+    const expected_min = c.accent ? 1 : Math.max(1, Math.round((typeof c.weight === 'number' ? c.weight : DEFAULT_COLOR_WEIGHT) / 2));
+    const expected_max = c.accent ? accentMax : Infinity;
+    if (m.totalCount < expected_min) {
+      violations.push({ name: c.name, hex: c.hex, expected_min, expected_max, measured: m.totalCount, reason: 'under_min' });
+    } else if (m.totalCount > expected_max) {
+      violations.push({ name: c.name, hex: c.hex, expected_min, expected_max, measured: m.totalCount, reason: 'over_max' });
+    }
+  }
+  result.strict_pass = violations.length === 0;
+  result.strict_violations = violations.slice(0, 10);
+  return result;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3518,6 +3659,12 @@ app.post('/api/palettes', (req, res) => {
       accent_max_mentions: typeof body.accent_max_mentions === 'number'
         ? body.accent_max_mentions
         : DEFAULT_ACCENT_MAX_MENTIONS,
+      // ADR 0016 — palette-level strength. Same default behaviour as
+      // accent_max_mentions (fall back to 'moderate' when absent).
+      strength: (typeof body.strength === 'string' &&
+        PALETTE_STRENGTH_LEVELS.includes(body.strength))
+        ? body.strength
+        : DEFAULT_PALETTE_STRENGTH,
       created_at: now,
       updated_at: now,
       history: []
@@ -3565,6 +3712,12 @@ app.post('/api/palettes/custom', (req, res) => {
         return res.status(400).json({ success: false, error: `source_preset_id must be a string starting with "${PRESET_ID_PREFIX}" (got ${JSON.stringify(body.source_preset_id)})` });
       }
     }
+    // ADR 0016 — palette-level strength. Validate when present so a
+    // bad value gets a 400 instead of being silently defaulted.
+    if (body.strength !== undefined) {
+      const sErr = validatePaletteStrength(body.strength);
+      if (sErr) return res.status(400).json({ success: false, error: `strength: ${sErr}` });
+    }
 
     const now = new Date().toISOString();
     const newPalette = {
@@ -3578,6 +3731,12 @@ app.post('/api/palettes/custom', (req, res) => {
       accent_max_mentions: typeof body.accent_max_mentions === 'number'
         ? body.accent_max_mentions
         : DEFAULT_ACCENT_MAX_MENTIONS,
+      // ADR 0016 — palette-level strength (same default behaviour as
+      // accent_max_mentions: fall back to 'moderate' when absent).
+      strength: (typeof body.strength === 'string' &&
+        PALETTE_STRENGTH_LEVELS.includes(body.strength))
+        ? body.strength
+        : DEFAULT_PALETTE_STRENGTH,
       created_at: now,
       updated_at: now,
       history: []
@@ -5072,6 +5231,13 @@ module.exports = {
   buildColorBudgetBlock,
   buildStage2Envelope,
   measureColorDistribution,
+  // ADR 0016 — palette strength + accent placement
+  PALETTE_STRENGTH_LEVELS,
+  DEFAULT_PALETTE_STRENGTH,
+  MAX_COLOR_PLACEMENT_LENGTH,
+  validatePaletteStrength,
+  STRENGTH_PREAMBLES,
+  computeStrictPass,
   // ADR 0014 Phase 4 — palette run telemetry
   MAX_PALETTE_RUNS_PER_PALETTE,
   readPaletteRuns,

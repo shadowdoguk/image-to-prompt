@@ -75,6 +75,7 @@
     resultSection: $('step-result'),
     resultPrompt: $('result-prompt'),
     resultMetaInfo: $('result-meta-info'),
+    resultStrictWarn: $('result-strict-warn'),
     copyBtn: $('copy-btn'),
     regenerateBtn: $('regenerate-btn'),
 
@@ -157,6 +158,7 @@
     editPaletteDistribution: $('edit-palette-distribution'),
     editPaletteDistributionSum: $('edit-palette-distribution-sum'),
     editPaletteAccentMax: $('edit-palette-accent-max'),
+    editPaletteStrength: $('edit-palette-strength'),
     editPaletteColorsList: $('edit-palette-colors-list'),
     editPaletteAddPicker: $('edit-palette-add-picker'),
     editPaletteAddHex: $('edit-palette-add-hex'),
@@ -1231,6 +1233,25 @@
     const preset = state.presets.find((p) => p.id === data.preset_id);
     const meta = [`Preset: ${data.preset_name || preset?.name || data.preset_id}`, `Model: ${data.model}`];
     dom.resultMetaInfo.textContent = meta.join(' • ');
+    // ADR 0016 — surface strict-palette validation result. When a
+    // strict palette was used and the validation failed, show a
+    // non-blocking warning chip; on success, hide any previous warning.
+    if (dom.resultStrictWarn) {
+      const dm = data.distribution_metrics;
+      if (dm && dm.strict_pass === false) {
+        const violations = Array.isArray(dm.strict_violations) ? dm.strict_violations.length : 0;
+        dom.resultStrictWarn.textContent = `Strict palette — ${violations} color(s) outside documented counts. Regenerate or copy and edit manually.`;
+        dom.resultStrictWarn.dataset.tone = 'warn';
+        dom.resultStrictWarn.hidden = false;
+      } else if (dm && dm.strict_pass === true) {
+        dom.resultStrictWarn.textContent = 'Strict palette — all colors match documented counts.';
+        dom.resultStrictWarn.dataset.tone = 'ok';
+        dom.resultStrictWarn.hidden = false;
+      } else {
+        dom.resultStrictWarn.hidden = true;
+        dom.resultStrictWarn.removeAttribute('data-tone');
+      }
+    }
     dom.resultSection.hidden = false;
     dom.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
@@ -1901,6 +1922,10 @@
       const currentWeight = (Number.isInteger(c.weight) && c.weight >= 1 && c.weight <= 10)
         ? c.weight : 5;
       const currentAccent = c.accent === true;
+      // ADR 0016 — per-color accent placement region. Only meaningful
+      // when the color is an accent; hidden via inline display when
+      // accent is off.
+      const currentPlacement = (typeof c.placement === 'string') ? c.placement : '';
       if (currentAccent) row.dataset.accent = 'true';
 
       const picker = document.createElement('input');
@@ -1911,7 +1936,8 @@
       picker.addEventListener('input', () => {
         buf.colors[i] = {
           hex: picker.value, name: c.name || '',
-          weight: currentWeight, accent: currentAccent
+          weight: currentWeight, accent: currentAccent,
+          placement: currentPlacement
         };
         hex.value = picker.value;
         name.value = c.name || '';
@@ -1946,7 +1972,8 @@
         hexError.hidden = true;
         buf.colors[i] = {
           hex: parsed.hex, name: c.name || '',
-          weight: currentWeight, accent: currentAccent
+          weight: currentWeight, accent: currentAccent,
+          placement: currentPlacement
         };
         picker.value = parsed.hex;
         renderEditPalettePreview();
@@ -1964,7 +1991,8 @@
       name.addEventListener('input', () => {
         buf.colors[i] = {
           hex: c.hex, name: name.value,
-          weight: currentWeight, accent: currentAccent
+          weight: currentWeight, accent: currentAccent,
+          placement: currentPlacement
         };
       });
       row.appendChild(name);
@@ -1997,7 +2025,8 @@
         weight.setAttribute('aria-valuetext', `${v} out of 10`);
         buf.colors[i] = {
           hex: c.hex, name: c.name || '',
-          weight: v, accent: currentAccent
+          weight: v, accent: currentAccent,
+          placement: currentPlacement
         };
         renderEditPalettePreview();
       });
@@ -2021,9 +2050,18 @@
         const v = accent.checked === true;
         if (v) row.dataset.accent = 'true';
         else row.removeAttribute('data-accent');
+        // ADR 0016 — toggle placement input visibility with accent.
+        // Placement is only meaningful for accent colors; non-accent
+        // rows hide the input and clear the value to keep the buffer
+        // honest (the field is preserved on accent rows as-is).
+        if (placementWrap) {
+          if (v) placementWrap.style.display = '';
+          else { placementWrap.style.display = 'none'; placementInput.value = ''; }
+        }
         buf.colors[i] = {
           hex: c.hex, name: c.name || '',
-          weight: currentWeight, accent: v
+          weight: currentWeight, accent: v,
+          placement: v ? currentPlacement : ''
         };
         renderEditPalettePreview();
       });
@@ -2033,6 +2071,37 @@
       accentLabel.appendChild(accentText);
       accentLabel.setAttribute('for', accent.id);
       row.appendChild(accentLabel);
+
+      // ADR 0016 — per-color placement region input. Rendered for every
+      // row but visually hidden when accent is off (handled by inline
+      // display + accent change handler). Buffer updates flow through
+      // the dedicated handler so other edits don't clobber placement.
+      const placementWrap = document.createElement('div');
+      placementWrap.className = 'edit-palette-color-row__placement-wrap';
+      placementWrap.style.display = currentAccent ? '' : 'none';
+      const placementLabel = document.createElement('label');
+      placementLabel.className = 'edit-palette-color-row__placement-label';
+      placementLabel.textContent = 'Placement';
+      placementLabel.setAttribute('for', `edit-palette-color-placement-${i}`);
+      const placementInput = document.createElement('input');
+      placementInput.type = 'text';
+      placementInput.value = currentPlacement;
+      placementInput.placeholder = 'e.g. upper-left quadrant';
+      placementInput.maxLength = 60;
+      placementInput.className = 'text-input edit-palette-color-row__placement';
+      placementInput.id = `edit-palette-color-placement-${i}`;
+      placementInput.setAttribute('aria-label', `Placement region for ${c.name || `color ${i + 1}`}`);
+      placementInput.addEventListener('input', () => {
+        const v = placementInput.value;
+        buf.colors[i] = {
+          hex: c.hex, name: c.name || '',
+          weight: currentWeight, accent: currentAccent,
+          placement: v
+        };
+      });
+      placementWrap.appendChild(placementLabel);
+      placementWrap.appendChild(placementInput);
+      row.appendChild(placementWrap);
 
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -2238,7 +2307,7 @@
   const openNewPaletteModal = () => {
     state.editingPaletteId = null;
     state.editingPaletteIsNew = true;
-    state.editingPaletteBuffer = { name: '', colors: [], accent_max_mentions: 2 };
+    state.editingPaletteBuffer = { name: '', colors: [], accent_max_mentions: 2, strength: 'moderate' };
     paintEditPaletteModal();
     dom.editPaletteModal.hidden = false;
     dom.editPaletteNameInput.focus();
@@ -2253,8 +2322,8 @@
 
   /**
    * Copy a palette's current state into the edit buffer. We deep-copy
-   * the colors (including ADR 0014 weight + accent) so user edits
-   * don't mutate the cached palette until Save commits.
+   * the colors (including ADR 0014 weight + accent + ADR 0016 placement)
+   * so user edits don't mutate the cached palette until Save commits.
    */
   const populateEditPaletteBuffer = (palette) => {
     state.editingPaletteBuffer = {
@@ -2264,12 +2333,15 @@
         name: c.name || '',
         weight: (Number.isInteger(c.weight) && c.weight >= 1 && c.weight <= 10)
           ? c.weight : 5,
-        accent: c.accent === true
+        accent: c.accent === true,
+        placement: (typeof c.placement === 'string') ? c.placement : ''
       })),
       accent_max_mentions: (Number.isInteger(palette.accent_max_mentions)
                               && palette.accent_max_mentions >= 1
                               && palette.accent_max_mentions <= 5)
-        ? palette.accent_max_mentions : 2
+        ? palette.accent_max_mentions : 2,
+      strength: ['subtle', 'moderate', 'strong', 'strict'].includes(palette.strength)
+        ? palette.strength : 'moderate'
     };
   };
 
@@ -2312,6 +2384,13 @@
                     && buf.accent_max_mentions <= 5)
         ? buf.accent_max_mentions : 2;
       dom.editPaletteAccentMax.value = String(cap);
+    }
+    // ADR 0016 — strength dropdown. Defaults to 'moderate' when the
+    // buffer is missing/invalid (mirrors the readPalettes synthesis).
+    if (dom.editPaletteStrength) {
+      const allowed = ['subtle', 'moderate', 'strong', 'strict'];
+      const s = (buf && allowed.includes(buf.strength)) ? buf.strength : 'moderate';
+      dom.editPaletteStrength.value = s;
     }
     renderEditPaletteColors();
     renderEditPalettePreview();
@@ -2417,10 +2496,20 @@
       }
       return;
     }
+    // ADR 0016 — palette-level strength (defaults to 'moderate' so the
+    // server receives a defined value).
+    const allowedStrengths = ['subtle', 'moderate', 'strong', 'strict'];
+    const strength = (buf && allowedStrengths.includes(buf.strength))
+      ? buf.strength : 'moderate';
 
     try {
       let saved;
-      const body = { name, colors: buf.colors, accent_max_mentions: accentMaxMentions };
+      const body = {
+        name,
+        colors: buf.colors,
+        accent_max_mentions: accentMaxMentions,
+        strength
+      };
       if (state.editingPaletteIsNew) {
         saved = await apiCall('/api/palettes/custom', {
           method: 'POST',
@@ -2576,6 +2665,17 @@
       if (dom.editPaletteAccentMax.value !== String(clamped)) {
         dom.editPaletteAccentMax.value = String(clamped);
       }
+    });
+  }
+  // ADR 0016 — palette strength dropdown. Server validates membership
+  // in ['subtle','moderate','strong','strict']; we filter invalid
+  // values back to the default to keep the buffer clean.
+  if (dom.editPaletteStrength) {
+    dom.editPaletteStrength.addEventListener('change', () => {
+      if (!state.editingPaletteBuffer) return;
+      const v = dom.editPaletteStrength.value;
+      const allowed = ['subtle', 'moderate', 'strong', 'strict'];
+      state.editingPaletteBuffer.strength = allowed.includes(v) ? v : 'moderate';
     });
   }
   wireAddColorRow();

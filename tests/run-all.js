@@ -1288,7 +1288,10 @@ test('ADR 0014: buildStage2Envelope includes color_budget when a weighted palett
     }
   );
   assertTrue(typeof envelope.color_budget === 'string', 'color_budget string present');
-  assertTrue(envelope.color_budget.startsWith('Color usage budget'), 'block starts with header');
+  // ADR 0016 — block now opens with a STRENGTH preamble line, then
+  // the "Color usage budget" header. Both must be present.
+  assertTrue(envelope.color_budget.startsWith('STRENGTH:'), 'block opens with STRENGTH preamble (ADR 0016)');
+  assertTrue(envelope.color_budget.includes('Color usage budget'), 'block contains the budget header');
   assertTrue(envelope.color_budget.includes('burnt orange #d97706: 62%'), 'first color 62% (8/13 rounded)');
   assertTrue(envelope.color_budget.includes('signal red #dc2626: 38% (ACCENT — mention at most 2 times'),
               'accent tag + cap');
@@ -1739,7 +1742,8 @@ test('ADR 0014: buildColorBudgetBlock — uneven weights produce the documented 
     ],
     accent_max_mentions: 2
   });
-  assertTrue(block.startsWith('Color usage budget'), 'starts with budget header');
+  assertTrue(block.startsWith('STRENGTH:'), 'opens with STRENGTH preamble (ADR 0016)');
+  assertTrue(block.includes('Color usage budget'), 'contains budget header');
   assertTrue(block.includes('burnt orange #d97706: 80%'), 'first color 80%');
   assertTrue(block.includes('deep brown #7c2d12: 20%'), 'second color 20%');
   assertTrue(block.includes('Sum: 100%'), 'sum line present');
@@ -5689,6 +5693,479 @@ test('ADR 0012: PRESERVATION_FAILED_REPLY_NOTE is friendlier than the raw error'
   // Must NOT contain any technical jargon the user won't understand.
   assertTrue(!/validator|threshold|nonTargetedRatio/.test(PRESERVATION_FAILED_REPLY_NOTE),
     'note uses plain English, no implementation details');
+});
+
+// ─── ADR 0016 — Z-Image Turbo palette strength + accent placement ─────
+
+test('ADR 0016: server exports strength constants + validator + preambles + computeStrictPass', () => {
+  const s = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(Array.isArray(s.PALETTE_STRENGTH_LEVELS), 'PALETTE_STRENGTH_LEVELS is an array');
+  assertEqual(s.PALETTE_STRENGTH_LEVELS.join(','), 'subtle,moderate,strong,strict', 'four valid levels in fixed order');
+  assertEqual(s.DEFAULT_PALETTE_STRENGTH, 'moderate', 'default is moderate');
+  assertEqual(s.MAX_COLOR_PLACEMENT_LENGTH, 60, 'placement cap is 60 chars');
+  assertTrue(typeof s.validatePaletteStrength === 'function', 'validatePaletteStrength is exported');
+  assertTrue(typeof s.STRENGTH_PREAMBLES === 'object' && s.STRENGTH_PREAMBLES !== null, 'STRENGTH_PREAMBLES exported');
+  for (const lvl of s.PALETTE_STRENGTH_LEVELS) {
+    assertTrue(typeof s.STRENGTH_PREAMBLES[lvl] === 'string' && s.STRENGTH_PREAMBLES[lvl].length > 0,
+      `preamble for ${lvl} is a non-empty string`);
+  }
+  assertTrue(typeof s.computeStrictPass === 'function', 'computeStrictPass exported');
+});
+
+test('ADR 0016: validatePaletteStrength accepts the four valid levels', () => {
+  const { validatePaletteStrength } = require(path.join(PROJECT_ROOT, 'server.js'));
+  for (const v of ['subtle', 'moderate', 'strong', 'strict']) {
+    assertEqual(validatePaletteStrength(v), null, `accepts ${v}`);
+  }
+});
+
+test('ADR 0016: validatePaletteStrength rejects invalid values', () => {
+  const { validatePaletteStrength } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(validatePaletteStrength('extreme') !== null, 'rejects unknown string');
+  assertTrue(validatePaletteStrength('') !== null, 'rejects empty string');
+  assertTrue(validatePaletteStrength(5) !== null, 'rejects number');
+  assertTrue(validatePaletteStrength(null) !== null, 'rejects null');
+  assertTrue(validatePaletteStrength(undefined) !== null, 'rejects undefined');
+  assertTrue(validatePaletteStrength({}) !== null, 'rejects object');
+  assertTrue(validatePaletteStrength([]) !== null, 'rejects array');
+});
+
+test('ADR 0016: buildColorBudgetBlock emits the right STRENGTH preamble for each level', () => {
+  const { buildColorBudgetBlock, STRENGTH_PREAMBLES } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const basePalette = {
+    colors: [
+      { hex: '#d97706', name: 'burnt orange', weight: 8, accent: true, placement: 'upper-left' }
+    ],
+    accent_max_mentions: 2
+  };
+  for (const lvl of ['subtle', 'moderate', 'strong', 'strict']) {
+    const block = buildColorBudgetBlock({ ...basePalette, strength: lvl });
+    assertTrue(block.startsWith(STRENGTH_PREAMBLES[lvl]), `${lvl} block opens with correct preamble`);
+    assertTrue(block.includes(`[STRENGTH: ${lvl}]`), `${lvl} block tags each color line`);
+  }
+});
+
+test('ADR 0016: buildColorBudgetBlock emits placement tag for accents only', () => {
+  const { buildColorBudgetBlock } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    strength: 'strict',
+    accent_max_mentions: 2,
+    colors: [
+      { hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: 'upper-left quadrant' },
+      { hex: '#f4e9d8', name: 'Bone white', weight: 5, accent: false, placement: 'should-not-appear' }
+    ]
+  };
+  const block = buildColorBudgetBlock(palette);
+  assertTrue(block.includes('placement: upper-left quadrant'), 'accent placement emitted');
+  assertTrue(!block.includes('should-not-appear'), 'non-accent placement suppressed');
+});
+
+test('ADR 0016: buildColorBudgetBlock omits placement tag when accent placement is empty', () => {
+  const { buildColorBudgetBlock } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const block = buildColorBudgetBlock({
+    strength: 'strict',
+    accent_max_mentions: 2,
+    colors: [{ hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: '' }]
+  });
+  assertTrue(!block.includes('placement:'), 'empty placement → no tag');
+  assertTrue(block.includes('Crimson #cc3344'), 'accent line still present');
+});
+
+test('ADR 0016: measureColorDistribution returns strict_pass=true when counts match', () => {
+  const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // Weight 8 → expected_min = round(8/2) = 4 for non-accent; accent weight 8 +
+  // accent_max_mentions=3 → min 1, max 3. Mention Crimson 2 times (under cap of 3)
+  // and Bone white 4 times (clears expected_min).
+  const palette = {
+    strength: 'strict',
+    accent_max_mentions: 3,
+    colors: [
+      { hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: '' },
+      { hex: '#f4e9d8', name: 'Bone white', weight: 8, accent: false, placement: '' }
+    ]
+  };
+  const prompt = 'Crimson #cc3344 radiates outward. Crimson again. Bone white #f4e9d8 is everywhere. Bone white. Bone white. Bone white.';
+  const result = measureColorDistribution(prompt, palette);
+  assertEqual(result.strict_pass, true, `strict_pass true (violations: ${JSON.stringify(result.strict_violations)})`);
+  assertEqual(result.strict_violations.length, 0, 'no violations');
+});
+
+test('ADR 0016: measureColorDistribution returns strict_pass=false when a color is missing', () => {
+  const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    strength: 'strict',
+    accent_max_mentions: 2,
+    colors: [
+      { hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: '' }
+    ]
+  };
+  // Crimson mentioned once — accent expects at least 1 AND not more than 2. So this passes.
+  // Let's test the under-min case for a non-accent.
+  const palette2 = {
+    strength: 'strict',
+    accent_max_mentions: 2,
+    colors: [
+      { hex: '#f4e9d8', name: 'Bone white', weight: 8, accent: false, placement: '' }
+    ]
+  };
+  const result = measureColorDistribution('A landscape painting with no color names mentioned at all.', palette2);
+  assertEqual(result.strict_pass, false, 'non-accent with zero mentions → strict_pass false');
+  assertEqual(result.strict_violations.length, 1, 'one violation');
+  assertEqual(result.strict_violations[0].name, 'Bone white', 'violation names Bone white');
+  assertEqual(result.strict_violations[0].reason, 'under_min', 'reason is under_min');
+});
+
+test('ADR 0016: measureColorDistribution returns strict_pass=false on accent over_max', () => {
+  const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    strength: 'strict',
+    accent_max_mentions: 1,
+    colors: [
+      { hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: '' }
+    ]
+  };
+  // Three mentions, accent cap 1 → over_max violation.
+  const result = measureColorDistribution('Crimson #cc3344 here. Crimson there. Crimson everywhere.', palette);
+  assertEqual(result.strict_pass, false, 'over_max → strict_pass false');
+  assertEqual(result.strict_violations[0].reason, 'over_max', 'reason is over_max');
+});
+
+test('ADR 0016: measureColorDistribution does NOT add strict_pass for non-strict palettes', () => {
+  const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    strength: 'moderate',
+    accent_max_mentions: 2,
+    colors: [{ hex: '#f4e9d8', name: 'Bone white', weight: 8, accent: false, placement: '' }]
+  };
+  const result = measureColorDistribution('A landscape.', palette);
+  assertEqual(result.strict_pass, undefined, 'moderate → no strict_pass');
+  assertEqual(result.strict_violations, undefined, 'moderate → no strict_violations');
+});
+
+test('ADR 0016: measureColorDistribution caps strict_violations at 10 entries', () => {
+  const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // 15 colors → all should fail strict.
+  const palette = {
+    strength: 'strict',
+    accent_max_mentions: 2,
+    colors: Array.from({ length: 15 }, (_, i) => ({
+      hex: `#${(i + 10).toString(16).padStart(2, '0')}3344`,
+      name: `Color ${i}`,
+      weight: 5,
+      accent: false,
+      placement: ''
+    }))
+  };
+  const result = measureColorDistribution('A landscape with no color names.', palette);
+  assertTrue(Array.isArray(result.strict_violations), 'strict_violations array');
+  assertTrue(result.strict_violations.length <= 10, `capped at 10 (got ${result.strict_violations.length})`);
+});
+
+test('ADR 0016: validatePaletteColorsFlexible accepts optional placement', () => {
+  const { validatePaletteColorsFlexible } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = validatePaletteColorsFlexible([
+    { hex: '#cc3344', name: 'Crimson', placement: 'upper-left quadrant' }
+  ]);
+  assertEqual(r.error, null, 'valid placement accepted');
+  assertEqual(r.colors[0].placement, 'upper-left quadrant', 'placement round-trips');
+});
+
+test('ADR 0016: validatePaletteColorsFlexible rejects oversized placement', () => {
+  const { validatePaletteColorsFlexible } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const tooLong = 'x'.repeat(61);
+  const r = validatePaletteColorsFlexible([
+    { hex: '#cc3344', name: 'Crimson', placement: tooLong }
+  ]);
+  assertTrue(r.error !== null && r.error.includes('placement must be 60 characters or fewer'),
+    `rejects >60 chars (got: ${r.error})`);
+});
+
+test('ADR 0016: validatePaletteColorsFlexible rejects non-string placement', () => {
+  const { validatePaletteColorsFlexible } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = validatePaletteColorsFlexible([
+    { hex: '#cc3344', name: 'Crimson', placement: 12345 }
+  ]);
+  assertTrue(r.error !== null && r.error.includes('placement must be a string'), 'rejects non-string');
+});
+
+test('ADR 0016: validatePaletteEdit accepts partial body with strength', () => {
+  const { validatePaletteEdit } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const e = validatePaletteEdit({ strength: 'strict' });
+  assertEqual(e, null, 'valid strength-only edit accepted');
+});
+
+test('ADR 0016: validatePaletteEdit rejects invalid strength', () => {
+  const { validatePaletteEdit } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const e = validatePaletteEdit({ strength: 'extreme' });
+  assertTrue(e !== null && e.includes('strength'), 'invalid strength rejected with strength-prefixed message');
+});
+
+test('ADR 0016: validatePalette (POST path) accepts strength', () => {
+  const { validatePalette } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const body = {
+    name: 'Test',
+    colors: [{ hex: '#cc3344', name: 'Crimson' }],
+    source_run_id: 'run_' + 'a'.repeat(16),
+    source_preset_id: 'preset_test',
+    strength: 'strong'
+  };
+  const e = validatePalette(body, { existingNames: new Set() });
+  assertEqual(e, null, 'POST with strength accepted');
+});
+
+test('ADR 0016: validatePalette (POST path) rejects invalid strength', () => {
+  const { validatePalette } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const body = {
+    name: 'Test',
+    colors: [{ hex: '#cc3344', name: 'Crimson' }],
+    source_run_id: 'run_' + 'a'.repeat(16),
+    source_preset_id: 'preset_test',
+    strength: 'ludicrous'
+  };
+  const e = validatePalette(body, { existingNames: new Set() });
+  assertTrue(e !== null && e.includes('strength'), 'invalid strength rejected');
+});
+
+test('ADR 0016: readPalettes synthesizes strength + placement for legacy palettes', () => {
+  // The on-disk palettes.json may already have strength synthesized (post-test
+  // state). Write a legacy palette without these fields, re-read, and confirm.
+  const PALETTES_FILE = path.join(PROJECT_ROOT, 'data', 'palettes.json');
+  let backup = null;
+  if (fs.existsSync(PALETTES_FILE)) backup = fs.readFileSync(PALETTES_FILE, 'utf8');
+  const legacyPalette = {
+    id: 'palette_legacytest0001',
+    name: 'Legacy test palette',
+    colors: [{ hex: '#cc3344', name: 'Crimson', weight: 8, accent: true }],
+    accent_max_mentions: 2,
+    history: []
+  };
+  fs.writeFileSync(PALETTES_FILE, JSON.stringify([legacyPalette], null, 2), 'utf8');
+
+  // Force re-require so the cached server.js module sees fresh state.
+  delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+  const { readPalettes } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palettes = readPalettes();
+  const found = palettes.find((p) => p.id === 'palette_legacytest0001');
+  assertTrue(found !== undefined, 'legacy palette survives the read filter');
+  assertEqual(found.strength, 'moderate', 'synthesized strength is moderate');
+  assertEqual(found.colors[0].placement, '', 'synthesized placement is empty string');
+
+  // Restore the disk.
+  if (backup != null) fs.writeFileSync(PALETTES_FILE, backup, 'utf8');
+  else fs.unlinkSync(PALETTES_FILE);
+  delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+});
+
+test('ADR 0016: readPalettes clamps oversized placement on legacy entries', () => {
+  const PALETTES_FILE = path.join(PROJECT_ROOT, 'data', 'palettes.json');
+  let backup = null;
+  if (fs.existsSync(PALETTES_FILE)) backup = fs.readFileSync(PALETTES_FILE, 'utf8');
+  const legacy = {
+    id: 'palette_legacytest0002',
+    name: 'Legacy placement clamp',
+    colors: [{ hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: 'x'.repeat(80) }],
+    accent_max_mentions: 2,
+    history: []
+  };
+  fs.writeFileSync(PALETTES_FILE, JSON.stringify([legacy], null, 2), 'utf8');
+
+  delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+  const { readPalettes } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palettes = readPalettes();
+  const found = palettes.find((p) => p.id === 'palette_legacytest0002');
+  assertTrue(found !== undefined, 'legacy palette present');
+  assertEqual(found.colors[0].placement.length, 60, 'oversized placement clamped to 60 chars');
+
+  if (backup != null) fs.writeFileSync(PALETTES_FILE, backup, 'utf8');
+  else fs.unlinkSync(PALETTES_FILE);
+  delete require.cache[require.resolve(path.join(PROJECT_ROOT, 'server.js'))];
+});
+
+test('ADR 0016: snapshotPalette captures strength + per-color placement', () => {
+  const { snapshotPalette, PALETTE_STRENGTH_LEVELS } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    name: 'Snap test',
+    strength: 'strict',
+    accent_max_mentions: 3,
+    colors: [
+      { hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: 'upper-left quadrant' },
+      { hex: '#f4e9d8', name: 'Bone white', weight: 5, accent: false, placement: '' }
+    ],
+    history: []
+  };
+  const snap = snapshotPalette(palette);
+  assertEqual(snap.strength, 'strict', 'snapshot captures strength');
+  assertEqual(snap.colors[0].placement, 'upper-left quadrant', 'snapshot captures accent placement');
+  assertEqual(snap.colors[1].placement, '', 'snapshot captures empty placement');
+});
+
+test('ADR 0016: snapshotPalette falls back to moderate when strength is invalid', () => {
+  const { snapshotPalette } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    name: 'Bad strength',
+    strength: 'gibberish',
+    accent_max_mentions: 2,
+    colors: [{ hex: '#cc3344', name: 'Crimson', weight: 5, accent: false }],
+    history: []
+  };
+  const snap = snapshotPalette(palette);
+  assertEqual(snap.strength, 'moderate', 'invalid strength → moderate');
+});
+
+test('ADR 0016: DEFAULT_ZIMAGE_STAGE2_PROMPT includes rules 11 + 12 (strength + placement)', () => {
+  const { DEFAULT_ZIMAGE_STAGE2_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(/STRENGTH MODIFIER/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'canonical prompt mentions STRENGTH MODIFIER');
+  assertTrue(/ACCENT PLACEMENT/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'canonical prompt mentions ACCENT PLACEMENT');
+  assertTrue(/subtle/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'canonical prompt names the subtle level');
+  assertTrue(/strict/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'canonical prompt names the strict level');
+  assertTrue(/placement region/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT) ||
+              /placement:/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'canonical prompt discusses placement regions');
+});
+
+test('ADR 0016: HTTP integration — POST /api/palettes accepts strength + placement', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/palettes/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'i16 palette ' + Date.now(),
+        colors: [
+          { hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: 'upper-left quadrant' },
+          { hex: '#f4e9d8', name: 'Bone white', weight: 5, accent: false }
+        ],
+        accent_max_mentions: 2,
+        strength: 'strict'
+      })
+    });
+    assertEqual(r.status, 201, `POST status 201 (got ${r.status})`);
+    assertEqual(r.body.data.strength, 'strict', 'strength round-trips through POST');
+    assertEqual(r.body.data.colors[0].placement, 'upper-left quadrant', 'placement round-trips through POST');
+    // Cleanup the palette we just created.
+    await fetch(`${srv.base}/api/palettes/${encodeURIComponent(r.body.data.id)}`, { method: 'DELETE' });
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('ADR 0016: HTTP integration — POST /api/palettes rejects invalid strength with 400', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/palettes/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'i16 bad strength ' + Date.now(),
+        colors: [{ hex: '#cc3344', name: 'Crimson' }],
+        accent_max_mentions: 2,
+        strength: 'ludicrous'
+      })
+    });
+    assertEqual(r.status, 400, `bad strength → 400 (got ${r.status})`);
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('ADR 0016: HTTP integration — PUT /api/palettes/:id with strength-only body', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    // Create first
+    const created = await fetchJson(`${srv.base}/api/palettes/custom`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'i16 put ' + Date.now(),
+        colors: [{ hex: '#cc3344', name: 'Crimson' }],
+        accent_max_mentions: 2,
+        strength: 'moderate'
+      })
+    });
+    assertEqual(created.status, 201, 'create succeeds');
+    const id = created.body.data.id;
+    // Now patch just strength.
+    const put = await fetchJson(`${srv.base}/api/palettes/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ strength: 'strict' })
+    });
+    assertEqual(put.status, 200, `PUT status 200 (got ${put.status})`);
+    assertEqual(put.body.data.strength, 'strict', 'strength updated via PUT');
+
+    // Cleanup
+    await fetch(`${srv.base}/api/palettes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('ADR 0016: Frontend HTML — strength select + result-strict-warn + placement input markup', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  assertTrue(/id="edit-palette-strength"/.test(html), 'edit-palette-strength select present');
+  assertTrue(/value="subtle"/.test(html), 'subtle option present');
+  assertTrue(/value="moderate"/.test(html), 'moderate option present');
+  assertTrue(/value="strong"/.test(html), 'strong option present');
+  assertTrue(/value="strict"/.test(html), 'strict option present');
+  assertTrue(/id="result-strict-warn"/.test(html), 'result-strict-warn element present');
+  assertTrue(/aria-live="polite"/.test(html) && /role="status"/.test(html),
+    'result-strict-warn is a polite live region');
+});
+
+test('ADR 0016: Frontend CSS — strength row + placement input + strict-warn chip styles', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'styles.css'), 'utf8');
+  assertTrue(/\.edit-palette-strength-row/.test(css), 'strength-row rule defined');
+  assertTrue(/\.edit-palette-strength-input/.test(css), 'strength-input rule defined');
+  assertTrue(/\.edit-palette-color-row__placement-wrap/.test(css), 'placement-wrap rule defined');
+  assertTrue(/\.result-strict-warn/.test(css), 'strict-warn rule defined');
+  assertTrue(/\.result-strict-warn\[data-tone="warn"\]/.test(css), 'warn tone rule defined');
+  assertTrue(/\.result-strict-warn\[data-tone="ok"\]/.test(css), 'ok tone rule defined');
+});
+
+test('ADR 0016: Frontend JS — strength select wired + result-strict-warn + placement preserved', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/editPaletteStrength:\s*\$/.test(js), 'editPaletteStrength dom ref present');
+  assertTrue(/resultStrictWarn:\s*\$/.test(js), 'resultStrictWarn dom ref present');
+  assertTrue(/editPaletteStrength\.addEventListener/.test(js), 'strength change listener wired');
+  assertTrue(/strict_pass === false/.test(js) || /strict_pass === true/.test(js),
+    'displayResult gates strict_pass handling');
+  assertTrue(/edit-palette-color-row__placement/.test(js), 'placement input class referenced');
+  assertTrue(/placement:\s*v/.test(js) || /placement:\s*currentPlacement/.test(js),
+    'placement preserved in buffer mutations');
+});
+
+test('ADR 0016: zimage-turbo-prompting.md exists with §5.2 (implementation roadmap)', () => {
+  const doc = path.join(PROJECT_ROOT, 'docs', 'zimage-turbo-prompting.md');
+  assertExists(doc);
+  const text = fs.readFileSync(doc, 'utf8');
+  assertTrue(/## Part 5/.test(text), 'document has Part 5');
+  assertTrue(/Implemented today/.test(text) || /To add/.test(text),
+    'document references the implementation roadmap');
+});
+
+test('ADR 0016: ADR file 0016-zimage-strength-and-placement.md exists with required sections', () => {
+  const adr = path.join(PROJECT_ROOT, 'docs', 'adr', '0016-zimage-strength-and-placement.md');
+  assertExists(adr);
+  const text = fs.readFileSync(adr, 'utf8');
+  assertTrue(/## Status/.test(text), 'Status section present');
+  assertTrue(/## Context/.test(text), 'Context section present');
+  assertTrue(/## Decision/.test(text), 'Decision section present');
+  assertTrue(/## Feasibility/.test(text), 'Feasibility section present');
+  assertTrue(/## Design/.test(text), 'Design section present');
+  assertTrue(/## Consequences/.test(text), 'Consequences section present');
 });
 
 // ─── Final invariants — must pass AFTER everything else ran ─────────

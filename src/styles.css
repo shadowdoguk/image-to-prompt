@@ -1173,6 +1173,75 @@ body {
   font-weight: 600;
 }
 
+/* ADR 0016 — palette-level strength dropdown. Same row layout as
+   the accent-cap row so the two controls read as a paired cluster. */
+.edit-palette-strength-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.65rem;
+}
+
+.edit-palette-strength-row .label-hint { margin: 0; }
+
+.edit-palette-strength-input {
+  min-width: 260px;
+  flex: 1 1 260px;
+}
+
+/* ADR 0016 — per-color accent placement input. Hidden when the row's
+   accent checkbox is off (handled by inline display style + accent
+   change handler). Sits below the accent label so the layout reads
+   "accent: [x]  Placement: [_____]". */
+.edit-palette-color-row__placement-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.15rem;
+  min-width: 160px;
+}
+
+.edit-palette-color-row__placement-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.edit-palette-color-row__placement {
+  width: 100%;
+}
+
+/* ADR 0016 — strict-palette validation chip on the result panel.
+   The chip lives in .result-meta next to the preset + model line.
+   `data-tone="warn"` is the failure chip; `data-tone="ok"` is the
+   pass chip. Hidden by default (rendered in the result meta but
+   with the hidden attribute toggled by displayResult). */
+.result-strict-warn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.55rem;
+  margin-left: 0.5rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+.result-strict-warn[data-tone="warn"] {
+  background: rgba(220, 90, 50, 0.12);
+  border-color: rgba(220, 90, 50, 0.55);
+  color: var(--color-accent);
+}
+.result-strict-warn[data-tone="ok"] {
+  background: rgba(60, 170, 90, 0.12);
+  border-color: rgba(60, 170, 90, 0.5);
+  color: var(--color-success, #2c8a4f);
+}
+
 /* ADR 0014 — per-color weight slider + label. Compact horizontal
    layout: live "Weight N" label above the range. */
 .edit-palette-color-row__weight-wrap {
