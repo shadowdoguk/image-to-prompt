@@ -182,7 +182,7 @@ complement (not replace) the AI re-analysis: chips give an instant
 zero-credit manual override, the AI button gives a custom
 image-derived description.
 
-#### 4a. Mood presets (28 chips, 5 categories)
+#### 4a. Mood presets (41 chips, 5 categories)
 
 Categories group chips visually with a small label prefix:
 
@@ -207,7 +207,7 @@ Click handler:
   the user can chain chips (each replaces the field value) or layer chips
   in their own words after.
 
-#### 4b. Lighting presets (28 chips, 5 categories)
+#### 4b. Lighting presets (35 chips, 5 categories)
 
 | Category | Chips |
 |---|---|
@@ -226,10 +226,10 @@ A dropdown (`<select>`) shows one value at a time and forces two clicks
 (open + select). A modal is heavy — the user opens a list, picks, closes.
 A chip row lets the user see the full taxonomy at a glance and click any
 option in one motion. Mood and lighting taxonomies are short enough
-(28 each) that a single wrap-flow row of chips fits within the existing
-field-row layout. The taxonomy is intentionally short — these are
-starting points, not an exhaustive list of every valid mood / lighting
-descriptor.
+(41 mood, 35 lighting) that a single wrap-flow row of chips fits within
+the existing field-row layout. The taxonomy is intentionally short —
+these are starting points, not an exhaustive list of every valid mood
+or lighting descriptor.
 
 #### 4d. Why code-defined, not persisted (unlike ADR 0009)
 

@@ -580,11 +580,14 @@
   const renderPresetChips = (fieldName, taxonomy) => {
     const wrap = document.createElement('div');
     wrap.className = 'preset-chips';
+    wrap.setAttribute('role', 'group');
     wrap.setAttribute('aria-label', `${fieldName} preset chips`);
 
     taxonomy.forEach((group) => {
       const groupEl = document.createElement('div');
       groupEl.className = 'preset-chip-group';
+      groupEl.setAttribute('role', 'group');
+      groupEl.setAttribute('aria-label', `${group.category} ${fieldName} presets`);
 
       const label = document.createElement('span');
       label.className = 'preset-chip-label';
@@ -674,9 +677,22 @@
       row.appendChild(labelRow);
 
       let input;
+      // Bug fix: respect the FIELD_PALETTE `input` type so text fields render
+      // as <input type="text"> and textarea fields render as <textarea>. The
+      // previous code branched on `typeof analysisValue === 'string'`, which
+      // caused every string-valued field (including `lighting`, `style`,
+      // `camera_angle`, etc.) to render as a <textarea> regardless of palette
+      // — that silently broke the AI Populate-with-AI buttons for those
+      // fields, which queried `input[data-field="<field>"]` and found
+      // nothing. The Populate-with-AI handlers and chip click handler now
+      // both use tag-qualified selectors (input[data-field=…] OR
+      // textarea[data-field=…]) so the dispatch is robust; the render fix
+      // here restores the correct visual presentation (1-line input vs
+      // multi-line textarea) per FIELD_PALETTE.
+      const paletteInputType = def?.input;
       if (fieldName === 'colors' && Array.isArray(analysisValue)) {
         row.appendChild(renderColorsInput(analysisValue));
-      } else if (typeof analysisValue === 'string') {
+      } else if (paletteInputType === 'textarea') {
         input = document.createElement('textarea');
         input.className = 'textarea';
         const rowsByField = {
@@ -688,10 +704,12 @@
           texture: 2
         };
         input.rows = rowsByField[fieldName] ?? 1;
-        input.value = analysisValue;
+        input.value = typeof analysisValue === 'string' ? analysisValue : '';
         input.dataset.field = fieldName;
         row.appendChild(input);
       } else {
+        // text-typed fields (lighting, style, camera_angle, etc.) and any
+        // field where the palette is silent on the input type.
         input = document.createElement('input');
         input.type = 'text';
         input.className = 'field-input';
@@ -1114,7 +1132,10 @@
     try {
       const data = await apiCall('/api/subject', { method: 'POST', body: fd });
       const subjectTextarea = dom.analysisFields.querySelector('textarea[data-field="subject"]');
-      if (subjectTextarea) subjectTextarea.value = data.subject;
+      if (subjectTextarea) {
+        subjectTextarea.value = data.subject;
+        subjectTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       if (state.currentAnalysis) state.currentAnalysis.subject = data.subject;
       hideError();
     } catch (e) {
@@ -1156,7 +1177,10 @@
     try {
       const data = await apiCall('/api/camera-angle', { method: 'POST', body: fd });
       const cameraAngleInput = dom.analysisFields.querySelector('input[data-field="camera_angle"]');
-      if (cameraAngleInput) cameraAngleInput.value = data.camera_angle;
+      if (cameraAngleInput) {
+        cameraAngleInput.value = data.camera_angle;
+        cameraAngleInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       if (state.currentAnalysis) state.currentAnalysis.camera_angle = data.camera_angle;
       hideError();
     } catch (e) {
@@ -1196,7 +1220,10 @@
     try {
       const data = await apiCall('/api/actions', { method: 'POST', body: fd });
       const actionsTextarea = dom.analysisFields.querySelector('textarea[data-field="actions"]');
-      if (actionsTextarea) actionsTextarea.value = data.actions;
+      if (actionsTextarea) {
+        actionsTextarea.value = data.actions;
+        actionsTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       if (state.currentAnalysis) state.currentAnalysis.actions = data.actions;
       hideError();
     } catch (e) {
@@ -1231,7 +1258,10 @@
     try {
       const data = await apiCall('/api/mood', { method: 'POST', body: fd });
       const moodTextarea = dom.analysisFields.querySelector('textarea[data-field="mood"]');
-      if (moodTextarea) moodTextarea.value = data.mood;
+      if (moodTextarea) {
+        moodTextarea.value = data.mood;
+        moodTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       if (state.currentAnalysis) state.currentAnalysis.mood = data.mood;
       hideError();
     } catch (e) {
@@ -1265,7 +1295,10 @@
     try {
       const data = await apiCall('/api/lighting', { method: 'POST', body: fd });
       const lightingInput = dom.analysisFields.querySelector('input[data-field="lighting"]');
-      if (lightingInput) lightingInput.value = data.lighting;
+      if (lightingInput) {
+        lightingInput.value = data.lighting;
+        lightingInput.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       if (state.currentAnalysis) state.currentAnalysis.lighting = data.lighting;
       hideError();
     } catch (e) {
@@ -1286,16 +1319,27 @@
    * not a lock. Each click is independent (chips do not "stick" as
    * selected); the user can chain chips or layer in their own words.
    *
-   * The DOM lookup mirrors the populate handlers' pattern: query the
-   * rendered analysis editor by data-field attribute so the handler
-   * works regardless of whether the field was rendered as <textarea>
-   * (textarea fields like `mood`) or <input type="text"> (text fields
-   * like `lighting`).
+   * The DOM lookup MUST use a tag-qualified selector. The row container
+   * `<div class="field-row" data-field="...">` is appended before the
+   * actual `<input>` / `<textarea>` in `renderAnalysisEditor`, so an
+   * unqualified `[data-field="${fieldName}"]` selector matches the row
+   * first and silently assigns `.value` to a `<div>` (which has no
+   * native `.value` semantics). That broke the curated chip workflow
+   * entirely — state was updated but the visible input never changed.
+   * The selector below matches the same input/textarea that the
+   * Populate-with-AI handlers use, keeping DOM updates consistent.
+   *
+   * After assigning, dispatch an `input` event so any future
+   * downstream listener (form validation, dirty-tracking, autosave)
+   * sees the change as if the user had typed the value themselves.
    */
   const applyPresetToField = (fieldName, value) => {
-    const el = dom.analysisFields.querySelector(`[data-field="${fieldName}"]`);
+    const el = dom.analysisFields.querySelector(
+      `input[data-field="${fieldName}"], textarea[data-field="${fieldName}"]`
+    );
     if (!el) return;
     el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
     if (state.currentAnalysis) state.currentAnalysis[fieldName] = value;
   };
 
@@ -4442,6 +4486,34 @@
     updateDirectivesActions();
     updateChatInputCount();
     updateButtons();
+
+    // Test hook — exposed ONLY when ?test-hook=1 is in the URL so the
+    // production app surface stays untouched. Used by the cross-browser
+    // Playwright suite (tests/lighting-chips-cross-browser.js) to drive
+    // the analysis editor without paying for a full LLM Stage 1 round.
+    // The hook surface is intentionally narrow: state, renderAnalysisEditor,
+    // applyPresetToField, and populateLightingWithAI (and the parallel mood
+    // handlers). Nothing else leaks.
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('test-hook') === '1') {
+        window.__i2pTest = {
+          state,
+          dom,
+          renderAnalysisEditor,
+          applyPresetToField,
+          populateLightingWithAI,
+          populateMoodWithAI,
+          populateActionsWithAI,
+          populateCameraAngleWithAI,
+          populateSubjectWithAI,
+          MOOD_PRESETS,
+          LIGHTING_PRESETS
+        };
+      }
+    } catch (_) {
+      // Test hook is best-effort; if URL parsing fails we silently skip.
+    }
   };
 
   init();

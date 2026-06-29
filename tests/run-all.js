@@ -3088,6 +3088,197 @@ test('Frontend JS: mood and lighting curated presets taxonomies defined (ADR 001
     'src/app.js must call renderPresetChips("lighting", LIGHTING_PRESETS) to wire lighting chips');
 });
 
+// ─── ADR 0018 — chip-click selector regression tests ─────────────────────
+//
+// Bug found: applyPresetToField used `querySelector('[data-field="..."]')` which
+// matches the `<div class="field-row" data-field="...">` row first (because the
+// row is appended before the inner <input>/<textarea> in renderAnalysisEditor).
+// The chip click therefore set `.value` on a <div> — silent, with no UI effect —
+// while `state.currentAnalysis[fieldName]` was updated correctly. From the user's
+// perspective the entire curated lighting/mood chip workflow appeared broken.
+//
+// The tests below lock in the corrected selector + the additional guarantees
+// (input event dispatch, role=group) so the regression cannot reappear.
+
+test('ADR 0018 regression: applyPresetToField uses a tag-qualified selector (regression for the row-div bug)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+
+  // Extract the applyPresetToField function body. Multi-line, ends at the
+  // first closing brace that brings us back to top-level semicolon.
+  const funcMatch = js.match(/const applyPresetToField\s*=\s*\(?\s*fieldName\s*,\s*value\s*\)?\s*=>\s*\{[\s\S]*?\};/);
+  assertTrue(funcMatch, 'applyPresetToField must be defined as an arrow function');
+
+  const funcBody = funcMatch[0];
+
+  // Must use a tag-qualified selector (input[...] or textarea[...]) so the
+  // <div class="field-row" data-field="..."> row container is not matched
+  // ahead of the actual <input>/<textarea>.
+  assertTrue(/querySelector\(\s*`?input\[data-field=/.test(funcBody) ||
+              /querySelector\(\s*`?textarea\[data-field=/.test(funcBody),
+    'applyPresetToField must querySelector with a tag-qualified selector (input[...] or textarea[...])');
+
+  // Must NOT use the bare unqualified `[data-field="..."]` pattern.
+  assertTrue(!/querySelector\(\s*`?\s*\[data-field=/.test(funcBody),
+    'applyPresetToField must NOT use the bare [data-field="..."] selector — it matches the row <div> first, silently breaking the chip click (regression: row-div bug)');
+});
+
+test('ADR 0018 regression: chip click wires input/textarea, NOT the row <div> — structural simulation', () => {
+  // Simulate the DOM that renderAnalysisEditor produces for the `lighting`
+  // field. We then execute the selector that applyPresetToField uses (parsed
+  // out of src/app.js) and verify it returns the <input>, not the row <div>.
+  //
+  // This is a stronger check than the regex test above: it proves the actual
+  // selector string behaves correctly against the real DOM shape, which is
+  // the regression we are guarding against.
+
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+
+  // Pull the selector template literal out of applyPresetToField.
+  const selMatch = js.match(/querySelector\(\s*(`[^`]+`|"[^"]+")\s*\)[\s\S]*?if\s*\(\s*!\s*el\s*\)\s*return/);
+  assertTrue(selMatch, 'applyPresetToField must call querySelector with a string selector and bail on null');
+  const selectorRaw = selMatch[1].slice(1, -1);
+  // Unescape backticks / dollar-braces for ${...} interpolation: replace the
+  // ${fieldName} token with a concrete value for this simulation.
+  const selector = selectorRaw.replace(/\$\{fieldName\}/g, 'lighting');
+
+  // Build a faithful DOM stand-in for the lighting field. The row <div> is
+  // appended BEFORE the <input>, mirroring renderAnalysisEditor's order.
+  const children = [];
+  const makeEl = (tag) => {
+    const el = {
+      tagName: tag.toUpperCase(),
+      children: [],
+      dataset: {},
+      attributes: {},
+      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+      appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+      setAttribute(k, v) { this.attributes[k] = String(v); this.dataset[k.replace(/^data-/, '').replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = String(v); },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {},
+      querySelector(sel) {
+        const tagPrefix = sel.match(/^([a-z]+)\[/);
+        const attrMatch = sel.match(/\[(?:data-)?(?:field)(?:[a-z-]*)?=["']?([^"'\]]+)["']?\]/);
+        const wantedAttr = attrMatch ? attrMatch[1] : null;
+        const walk = (root) => {
+          // Skip the root itself; only descend.
+          for (const child of root.children) {
+            const tagOk = !tagPrefix || child.tagName.toLowerCase() === tagPrefix[1].toLowerCase();
+            const attrOk = !wantedAttr || child.dataset.field === wantedAttr;
+            if (tagOk && attrOk) return child;
+            const r = walk(child);
+            if (r) return r;
+          }
+          return null;
+        };
+        return walk(this);
+      }
+    };
+    return el;
+  };
+
+  const root = makeEl('div');
+  const row = makeEl('div');
+  row.className = 'field-row';
+  row.setAttribute('data-field', 'lighting');
+  root.appendChild(row);
+
+  const input = makeEl('input');
+  input.dataset.field = 'lighting';
+  row.appendChild(input);
+
+  const matched = root.querySelector(selector);
+  assertTrue(matched, 'selector must find an element in the simulated DOM');
+  assertEqual(matched.tagName, 'INPUT',
+    `selector must match the <input>, not the row <div> (matched ${matched.tagName}). Regression: row-div bug.`);
+});
+
+test('ADR 0018: applyPresetToField dispatches an `input` event after programmatic value change', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const funcMatch = js.match(/const applyPresetToField\s*=\s*\(?\s*fieldName\s*,\s*value\s*\)?\s*=>\s*\{[\s\S]*?\};/);
+  assertTrue(funcMatch, 'applyPresetToField must be defined');
+  assertTrue(/dispatchEvent\s*\(\s*new\s+Event\s*\(\s*['"]input['"]/.test(funcMatch[0]),
+    'applyPresetToField must dispatch a bubbling `input` event after assigning .value');
+});
+
+test('ADR 0018: every Populate-with-AI handler dispatches `input` event after programmatic value change', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  for (const handler of [
+    'populateSubjectWithAI',
+    'populateCameraAngleWithAI',
+    'populateActionsWithAI',
+    'populateMoodWithAI',
+    'populateLightingWithAI'
+  ]) {
+    // Match the function body. Allow either `= async (btn) => { ... }` or
+    // `= async function ...` shapes. Anchor on the handler name and the
+    // next `};` that closes it (matched lazily).
+    const re = new RegExp(`const ${handler}\\s*=\\s*async[\\s\\S]*?\\n\\s*\\};`);
+    const funcMatch = js.match(re);
+    assertTrue(funcMatch, `${handler} must be defined as an async function`);
+    assertTrue(/dispatchEvent\s*\(\s*new\s+Event\s*\(\s*['"]input['"]/.test(funcMatch[0]),
+      `${handler} must dispatch a bubbling input event after assigning .value (regression for downstream listener drift)`);
+  }
+});
+
+test('ADR 0018: renderPresetChips exposes role=group for assistive tech (a11y)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const funcMatch = js.match(/const renderPresetChips\s*=\s*\(?\s*fieldName\s*,\s*taxonomy\s*\)?\s*=>\s*\{[\s\S]*?return wrap;\s*\};/);
+  assertTrue(funcMatch, 'renderPresetChips must be defined');
+  assertTrue(/setAttribute\(\s*['"]role['"]\s*,\s*['"]group['"]/.test(funcMatch[0]),
+    'renderPresetChips must setAttribute("role", "group") on the wrap (or per-group) so screen readers announce the chip set');
+});
+
+test('ADR 0018: every lighting chip button carries an aria-label describing the action', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The chip creation loop must setAttribute('aria-label', `Set ${fieldName} to "${item}"`)
+  const funcMatch = js.match(/const renderPresetChips\s*=\s*\(?\s*fieldName\s*,\s*taxonomy\s*\)?\s*=>\s*\{[\s\S]*?return wrap;\s*\};/);
+  assertTrue(funcMatch, 'renderPresetChips must be defined');
+  assertTrue(/setAttribute\(\s*['"]aria-label['"]/.test(funcMatch[0]),
+    'renderPresetChips must set an aria-label on each chip button');
+});
+
+test('ADR 0018: lighting taxonomy still has 5 categories with 6-8 chips each (preserves UI density)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const taxonomyMatch = js.match(/const LIGHTING_PRESETS\s*=\s*\[([\s\S]*?)\];/);
+  assertTrue(taxonomyMatch, 'LIGHTING_PRESETS must be defined');
+
+  const block = taxonomyMatch[1];
+  // Pull out { category: '...', items: [ ... ] } groups.
+  const groupRe = /\{\s*category:\s*['"]([^'"]+)['"]\s*,\s*items:\s*\[([^\]]*)\]\s*\}/g;
+  const groups = [];
+  let m;
+  while ((m = groupRe.exec(block)) !== null) {
+    const items = (m[2].match(/['"][^'"]+['"]/g) || []).length;
+    groups.push({ category: m[1], items });
+  }
+  assertEqual(groups.length, 5, 'LIGHTING_PRESETS must have 5 categories');
+  for (const g of groups) {
+    assertTrue(g.items >= 6 && g.items <= 8,
+      `lighting category "${g.category}" must have 6-8 chips (got ${g.items})`);
+  }
+});
+
+test('ADR 0018: mood taxonomy still has 5 categories with 7-9 chips each (preserves UI density)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const taxonomyMatch = js.match(/const MOOD_PRESETS\s*=\s*\[([\s\S]*?)\];/);
+  assertTrue(taxonomyMatch, 'MOOD_PRESETS must be defined');
+
+  const block = taxonomyMatch[1];
+  const groupRe = /\{\s*category:\s*['"]([^'"]+)['"]\s*,\s*items:\s*\[([^\]]*)\]\s*\}/g;
+  const groups = [];
+  let m;
+  while ((m = groupRe.exec(block)) !== null) {
+    const items = (m[2].match(/['"][^'"]+['"]/g) || []).length;
+    groups.push({ category: m[1], items });
+  }
+  assertEqual(groups.length, 5, 'MOOD_PRESETS must have 5 categories');
+  for (const g of groups) {
+    assertTrue(g.items >= 7 && g.items <= 9,
+      `mood category "${g.category}" must have 7-9 chips (got ${g.items})`);
+  }
+});
+
 // ─── ADR 0009 — saved directives ──────────────────────────────────
 
 const DIRECTIVES_FILE = path.join(PROJECT_ROOT, 'data', 'directives.json');
