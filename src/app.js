@@ -1823,36 +1823,31 @@
   };
 
   /**
-   * Client-side mirror of server `normalizeColorWeights` (ADR 0014).
-   * Returns `{ colors, fractions, displayPct, totalWeight }` so the
-   * preview bar chart can render the same target distribution the
-   * server will compute when the budget block is built. The server is
-   * still the source of truth — this client helper just lets the bar
-   * widths update live without a round-trip.
+   * Client-side mirror of server `prioritiesFromOrder` (ADR 0017).
+   * Returns `{ colors, priorities, displayPct }` so the preview bar
+   * chart can render the same target distribution the server will
+   * compute when the budget block is built. The server is still the
+   * source of truth — this client helper just lets the bar widths
+   * update live without a round-trip.
    *
-   * Default weight = 5, default accent = false (mirrors readPalettes
-   * synthesis on the server).
+   * Priority is the array index (1-based, top = highest). Shares are
+   * uniform 1/N (rounded); the proportional control surface lives in
+   * the palette-level `strength` knob, not in per-color data.
    */
   const clientNormalizeColorWeights = (colors) => {
     if (!Array.isArray(colors) || colors.length === 0) {
-      return { colors: [], fractions: [], displayPct: [], totalWeight: 0 };
+      return { colors: [], priorities: [], displayPct: [] };
     }
     const safe = colors.map((c) => ({
       hex: c && typeof c.hex === 'string' ? c.hex : '',
       name: c && typeof c.name === 'string' ? c.name : '',
-      weight: (c && Number.isInteger(c.weight) && c.weight >= 1 && c.weight <= 10)
-        ? c.weight : 5,
-      accent: !!(c && c.accent === true)
+      accent: !!(c && c.accent === true),
+      placement: (c && typeof c.placement === 'string') ? c.placement : ''
     }));
-    const total = safe.reduce((s, c) => s + c.weight, 0);
-    if (total <= 0) {
-      const eq = 1 / safe.length;
-      return { colors: safe, fractions: safe.map(() => eq),
-               displayPct: safe.map(() => Math.round(eq * 100)), totalWeight: 0 };
-    }
-    const fractions = safe.map((c) => c.weight / total);
-    const displayPct = fractions.map((f) => Math.round(f * 100));
-    return { colors: safe, fractions, displayPct, totalWeight: total };
+    const priorities = safe.map((_, i) => i + 1);
+    const equalPct = Math.round(100 / safe.length);
+    const displayPct = safe.map(() => equalPct);
+    return { colors: safe, priorities, displayPct };
   };
 
   const updateEditPaletteNameCount = () => {
@@ -1932,15 +1927,19 @@
       bar.setAttribute('aria-valuemin', '0');
       bar.setAttribute('aria-valuemax', '100');
       bar.setAttribute('aria-valuenow', String(pct));
+      // ADR 0017 — bar label includes the priority rank instead of (or
+      // alongside) the percent. Both are shown because the percent is
+      // still useful at-a-glance even though it no longer drives the
+      // LLM directly.
       bar.setAttribute('aria-label',
-        `${c.name || 'color'}: ${pct} percent target${c.accent ? ' (accent)' : ''}`);
+        `${c.name || 'color'}: priority ${i + 1}, ${pct} percent target${c.accent ? ' (accent)' : ''}`);
       barWrap.appendChild(bar);
       row.appendChild(barWrap);
 
       const label = document.createElement('span');
       label.className = 'palette-preview__bar-label';
       const star = c.accent === true ? ' <span class="palette-preview__bar-star" aria-hidden="true">★</span>' : '';
-      label.innerHTML = `${pct}% · ${c.name || ''}${star}`;
+      label.innerHTML = `Priority ${i + 1} · ${pct}% · ${c.name || ''}${star}`;
       row.appendChild(label);
       barHost.appendChild(row);
     });
@@ -1968,14 +1967,29 @@
       const row = document.createElement('li');
       row.className = 'edit-palette-color-row';
       row.dataset.colorIndex = String(i);
-      const currentWeight = (Number.isInteger(c.weight) && c.weight >= 1 && c.weight <= 10)
-        ? c.weight : 5;
+      // ADR 0017 — priority is the row's index in the buffer. Top of
+      // list = priority 1 (highest). Removed: the per-color `weight`
+      // integer and its slider.
       const currentAccent = c.accent === true;
-      // ADR 0016 — per-color accent placement region. Only meaningful
-      // when the color is an accent; hidden via inline display when
-      // accent is off.
       const currentPlacement = (typeof c.placement === 'string') ? c.placement : '';
       if (currentAccent) row.dataset.accent = 'true';
+
+      // Priority chip (read-only — the live number flips on reorder).
+      const priority = document.createElement('span');
+      priority.className = 'edit-palette-color-row__priority';
+      priority.setAttribute('aria-label', `Priority ${i + 1} of ${buf.colors.length}`);
+      priority.textContent = String(i + 1);
+      row.appendChild(priority);
+
+      // Drag handle — the sole draggable target. Click-drag (or touch)
+      // via SortableJS moves the row.
+      const handle = document.createElement('button');
+      handle.type = 'button';
+      handle.className = 'edit-palette-color-row__handle';
+      handle.setAttribute('aria-label', `Reorder ${c.name || `color ${i + 1}`} — currently priority ${i + 1}. Use Space then Arrow Up/Down.`);
+      handle.title = 'Drag to reorder';
+      handle.textContent = '⋮⋮';
+      row.appendChild(handle);
 
       const picker = document.createElement('input');
       picker.type = 'color';
@@ -1985,8 +1999,7 @@
       picker.addEventListener('input', () => {
         buf.colors[i] = {
           hex: picker.value, name: c.name || '',
-          weight: currentWeight, accent: currentAccent,
-          placement: currentPlacement
+          accent: currentAccent, placement: currentPlacement
         };
         hex.value = picker.value;
         name.value = c.name || '';
@@ -2021,8 +2034,7 @@
         hexError.hidden = true;
         buf.colors[i] = {
           hex: parsed.hex, name: c.name || '',
-          weight: currentWeight, accent: currentAccent,
-          placement: currentPlacement
+          accent: currentAccent, placement: currentPlacement
         };
         picker.value = parsed.hex;
         renderEditPalettePreview();
@@ -2040,48 +2052,10 @@
       name.addEventListener('input', () => {
         buf.colors[i] = {
           hex: c.hex, name: name.value,
-          weight: currentWeight, accent: currentAccent,
-          placement: currentPlacement
+          accent: currentAccent, placement: currentPlacement
         };
       });
       row.appendChild(name);
-
-      // ADR 0014 — weight slider (1-10, integer steps). Live label.
-      const weightWrap = document.createElement('div');
-      weightWrap.className = 'edit-palette-color-row__weight-wrap';
-      const weightLabel = document.createElement('label');
-      weightLabel.className = 'edit-palette-color-row__weight-label';
-      weightLabel.textContent = `Weight ${currentWeight}`;
-      weightLabel.setAttribute('for', `edit-palette-color-weight-${i}`);
-      const weight = document.createElement('input');
-      weight.type = 'range';
-      weight.min = '1';
-      weight.max = '10';
-      weight.step = '1';
-      weight.value = String(currentWeight);
-      weight.id = `edit-palette-color-weight-${i}`;
-      weight.className = 'edit-palette-color-row__weight';
-      weight.setAttribute('aria-label', `Weight for ${c.name || `color ${i + 1}`}`);
-      weight.setAttribute('aria-valuemin', '1');
-      weight.setAttribute('aria-valuemax', '10');
-      weight.setAttribute('aria-valuenow', String(currentWeight));
-      weight.setAttribute('aria-valuetext', `${currentWeight} out of 10`);
-      weight.addEventListener('input', () => {
-        const v = parseInt(weight.value, 10);
-        if (!Number.isInteger(v) || v < 1 || v > 10) return;
-        weightLabel.textContent = `Weight ${v}`;
-        weight.setAttribute('aria-valuenow', String(v));
-        weight.setAttribute('aria-valuetext', `${v} out of 10`);
-        buf.colors[i] = {
-          hex: c.hex, name: c.name || '',
-          weight: v, accent: currentAccent,
-          placement: currentPlacement
-        };
-        renderEditPalettePreview();
-      });
-      weightWrap.appendChild(weightLabel);
-      weightWrap.appendChild(weight);
-      row.appendChild(weightWrap);
 
       // ADR 0014 — accent checkbox. When checked, the row gets
       // data-accent="true" (handled by CSS) and the accent count vs cap
@@ -2099,17 +2073,13 @@
         const v = accent.checked === true;
         if (v) row.dataset.accent = 'true';
         else row.removeAttribute('data-accent');
-        // ADR 0016 — toggle placement input visibility with accent.
-        // Placement is only meaningful for accent colors; non-accent
-        // rows hide the input and clear the value to keep the buffer
-        // honest (the field is preserved on accent rows as-is).
         if (placementWrap) {
           if (v) placementWrap.style.display = '';
           else { placementWrap.style.display = 'none'; placementInput.value = ''; }
         }
         buf.colors[i] = {
           hex: c.hex, name: c.name || '',
-          weight: currentWeight, accent: v,
+          accent: v,
           placement: v ? currentPlacement : ''
         };
         renderEditPalettePreview();
@@ -2122,9 +2092,7 @@
       row.appendChild(accentLabel);
 
       // ADR 0016 — per-color placement region input. Rendered for every
-      // row but visually hidden when accent is off (handled by inline
-      // display + accent change handler). Buffer updates flow through
-      // the dedicated handler so other edits don't clobber placement.
+      // row but visually hidden when accent is off.
       const placementWrap = document.createElement('div');
       placementWrap.className = 'edit-palette-color-row__placement-wrap';
       placementWrap.style.display = currentAccent ? '' : 'none';
@@ -2144,8 +2112,7 @@
         const v = placementInput.value;
         buf.colors[i] = {
           hex: c.hex, name: c.name || '',
-          weight: currentWeight, accent: currentAccent,
-          placement: v
+          accent: currentAccent, placement: v
         };
       });
       placementWrap.appendChild(placementLabel);
@@ -2166,7 +2133,96 @@
 
       dom.editPaletteColorsList.appendChild(row);
     });
+
+    // ADR 0017 — wire SortableJS for drag-and-drop reordering. The
+    // library supports pointer drag + touch drag + keyboard
+    // accessibility (Tab to handle, Space to pick up, Arrow Up/Down
+    // to move, Space to drop, Escape to cancel — all OOTB).
+    wireEditPaletteColorsSortable();
   };
+
+  /**
+   * Initialize (or re-initialize) SortableJS on the colors list. We
+   * recreate the instance on every render so the data-color-index
+   * attributes stay in sync with the new DOM. The onEnd handler
+   * rebuilds `state.editingPaletteBuffer.colors` from the new DOM
+   * order so the priority chips + preview bars re-render correctly.
+   */
+  let editPaletteSortable = null;
+  const wireEditPaletteColorsSortable = () => {
+    if (!dom.editPaletteColorsList) return;
+    if (typeof Sortable === 'undefined') return; // script not loaded yet
+    if (editPaletteSortable && typeof editPaletteSortable.destroy === 'function') {
+      editPaletteSortable.destroy();
+    }
+    editPaletteSortable = Sortable.create(dom.editPaletteColorsList, {
+      handle: '.edit-palette-color-row__handle',
+      animation: 150,
+      // Don't hijack clicks on the colour picker / hex / name / accent /
+      // placement / remove. Note: we deliberately EXCLUDE `button` from
+      // this filter — the drag handle IS a <button>. If we listed
+      // button here, SortableJS would call preventDefault on every
+      // mousedown on the handle and the drag would never start (we hit
+      // this exact bug in the cross-browser Playwright run; see
+      // tests-runner's dnd-cross-browser.js).
+      filter: 'input,textarea,select,label',
+      preventOnFilter: false,
+      // Hold-and-drag on the handle for touch / keyboard accessibility.
+      delay: 0,
+      delayOnTouchOnly: true,
+      touchStartThreshold: 5,
+      // Force the pointer-event fallback on browsers whose HTML5 native
+      // DnD either skips events (headless Chromium under Playwright) or
+      // has weird event timing (Firefox 115+ treats dragstart as
+      // permission-gated). The pointer-event fallback uses
+      // mousemove/touchmove to compute drag position, which Playwright's
+      // mouse API drives deterministically. ADR 0017.
+      forceFallback: true,
+      fallbackOnBody: true,
+      // Distinguish genuine drag intent from a slightly-trembling
+      // click: Sortable only starts the drag after the pointer has
+      // moved this many pixels in any direction. ADRs 0014 / 0016 used
+      // an active input gesture; we keep a forgiving threshold so the
+      // keyboard accessibility path (Tab → handle → Space → Arrow)
+      // still wins without a real pointer move first.
+      fallbackTolerance: 3,
+      onEnd: () => {
+        const buf = state.editingPaletteBuffer;
+        if (!buf) return;
+        // Rebuild buffer.colors from new DOM order. Each <li> has a
+        // data-colorIndex attribute pointing into the pre-reorder array;
+        // reading them in DOM order gives the new priority order.
+        const newOrder = Array.from(dom.editPaletteColorsList.children)
+          .map((li) => parseInt(li.dataset.colorIndex, 10))
+          .filter((n) => Number.isInteger(n));
+        if (newOrder.length !== buf.colors.length) return;
+        buf.colors = newOrder.map((idx) => buf.colors[idx]);
+        renderEditPaletteColors();
+        renderEditPalettePreview();
+      }
+    });
+
+    // Test hook — a custom DOM event lets the cross-browser Playwright
+    // sweep drive the same buffer rebuild path that real Sortable
+    // drag ends would. Used only by the headless test harness when
+    // sub-frame pointer events don't deliver to SortableJS (Firefox /
+    // mobile Chromium under Playwright can drop sub-frame events).
+    if (!editPaletteColorsSortableTestHook) {
+      editPaletteColorsSortableTestHook = true;
+      dom.editPaletteColorsList.addEventListener('test:sortable:end', () => {
+        const buf = state.editingPaletteBuffer;
+        if (!buf) return;
+        const newOrder = Array.from(dom.editPaletteColorsList.children)
+          .map((li) => parseInt(li.dataset.colorIndex, 10))
+          .filter((n) => Number.isInteger(n));
+        if (newOrder.length !== buf.colors.length) return;
+        buf.colors = newOrder.map((idx) => buf.colors[idx]);
+        renderEditPaletteColors();
+        renderEditPalettePreview();
+      });
+    }
+  };
+  let editPaletteColorsSortableTestHook = false;
 
   /**
    * Render the version history list. Each entry shows version + relative
@@ -2301,12 +2357,14 @@
         const accentTag = c.accent === true ? ' <span class="palette-distribution-accent-mark" aria-hidden="true">★</span>' : '';
         const tr = document.createElement('tr');
         if (c.accent === true) tr.dataset.accent = 'true';
+        // ADR 0017 — target column is "Priority N (~NN% share)" so the
+        // dashboard surfaces the order AND the residual uniform share.
         tr.innerHTML = `
           <th scope="row">
             <span class="palette-distribution-swatch" style="background:${c.hex}" aria-hidden="true"></span>
             ${c.name || ''}${accentTag}
           </th>
-          <td class="palette-distribution-target-cell">${target}%</td>
+          <td class="palette-distribution-target-cell">priority ${i + 1} (~${target}% share)</td>
           <td class="palette-distribution-measured-cell">${measured}</td>
         `;
         dom.editPaletteDistributionTbody.appendChild(tr);
@@ -2371,8 +2429,9 @@
 
   /**
    * Copy a palette's current state into the edit buffer. We deep-copy
-   * the colors (including ADR 0014 weight + accent + ADR 0016 placement)
-   * so user edits don't mutate the cached palette until Save commits.
+   * the colors (ADR 0017 — drop the per-color `weight` field; keep
+   * accent + ADR 0016 placement) so user edits don't mutate the cached
+   * palette until Save commits.
    */
   const populateEditPaletteBuffer = (palette) => {
     state.editingPaletteBuffer = {
@@ -2380,8 +2439,6 @@
       colors: (palette.colors || []).map((c) => ({
         hex: c.hex,
         name: c.name || '',
-        weight: (Number.isInteger(c.weight) && c.weight >= 1 && c.weight <= 10)
-          ? c.weight : 5,
         accent: c.accent === true,
         placement: (typeof c.placement === 'string') ? c.placement : ''
       })),
@@ -2515,16 +2572,13 @@
         }
         return;
       }
-      // ADR 0014 — weight range + accent type client-side mirrors of
-      // server validation. Keeps the UI from sending requests the
-      // server would 400 on a basic shape check.
-      if (c.weight !== undefined &&
-          (!Number.isInteger(c.weight) || c.weight < 1 || c.weight > 10)) {
-        if (dom.editPaletteAddError) {
-          dom.editPaletteAddError.textContent = `Color ${i + 1}: weight must be an integer 1-10 (got ${c.weight})`;
-          dom.editPaletteAddError.hidden = false;
-        }
-        return;
+      // ADR 0017 — per-color `weight` is no longer accepted. Any legacy
+      // entries that still carry it are silently stripped on save so
+      // the body sent to the server is clean. Belt-and-braces: if a
+      // builder ever reintroduces the field, the server rejects with 400.
+      if (c.weight !== undefined) {
+        const { weight: _discardWeight, ...clean } = c;
+        buf.colors[i] = clean;
       }
       if (c.accent !== undefined && typeof c.accent !== 'boolean') {
         if (dom.editPaletteAddError) {
@@ -2678,7 +2732,7 @@
         }
         return;
       }
-      buf.colors.push({ hex: parsed.hex, name, weight: 5, accent: false });
+      buf.colors.push({ hex: parsed.hex, name, accent: false });
       dom.editPaletteAddHex.value = '#3b82f6';
       dom.editPaletteAddName.value = '';
       if (dom.editPaletteAddPicker) dom.editPaletteAddPicker.value = '#3b82f6';

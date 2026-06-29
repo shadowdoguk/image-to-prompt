@@ -420,7 +420,7 @@
         </header>
         <form id="edit-palette-form" class="modal-body" novalidate>
           <p id="edit-palette-modal-hint" class="modal-hint">
-            Change the name, tweak the colors, or add a new color. Hex, rgb(), and hsl() inputs are all accepted. Adjust per-color weight (1–10) and flag any color as a punchy accent to influence distribution in generated prompts.
+            Change the name, tweak the colors, or add a new color. Hex, rgb(), and hsl() inputs are all accepted. Drag rows to set priority (top of the list is highest) and flag any color as a punchy accent to influence distribution in generated prompts.
           </p>
 
           <div class="edit-palette-source-row" id="edit-palette-source-row" hidden>
@@ -448,7 +448,7 @@
 
           <div class="edit-palette-distribution-row">
             <span class="label-hint">Target distribution</span>
-            <div id="edit-palette-distribution" class="palette-preview__bars" aria-live="polite" aria-label="Live target distribution as you adjust weights and accents"></div>
+            <div id="edit-palette-distribution" class="palette-preview__bars" aria-live="polite" aria-label="Live target distribution as you reorder and flag accents"></div>
             <span id="edit-palette-distribution-sum" class="palette-preview__bars-sum" aria-live="polite"></span>
           </div>
 
@@ -721,6 +721,7 @@
   </select>
   <button type="button" id="palette-apply-btn" class="btn-secondary" hidden>Apply</button>
 
+  <script src="/sortable.min.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

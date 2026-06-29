@@ -520,7 +520,7 @@ FORMAT ORDER (strict):
 
 SECTION B: PROMPT METADATA -- color_map: { "region_name": ["#hex1", "#hex2"] }; priority_order: ["#dominant", "#secondary", "#accent"]; accent_overrides: { "original_region": "#replacement_hex" }; accent_regions: { "#accent_hex": "region_description" }; gestural_elements: ["list of which gestural phrases were used"]; style_confidence: "high" / "medium" / "low"; composition_note: one sentence on spatial clarity; word_count_section_a: N (integer).
 
-RULES (priority order): lead with subject + spatial position; bind every color to a region; accent colors fully override the original region; user-unspecified style -> impasto/alla prima/gestural language verbatim; gestural energy streaks radiate outward from the focal point when an accent is in a gestural region; mention thick/thin contrast when the source has significant texture; "no X" constraints go at the end of Section A; no bullets/lists/YAML in Section A; Section A = 80-200 words (count and report); one style declaration; (ADR 0016) STRENGTH MODIFIER (when palette supplied): interpret palette.strength per the four-level contract — subtle (gentle reference, complementary tones allowed), moderate (close adherence, natural-shadow deviations only), strong (every named color appears at least once, no off-palette introductions), strict (per-color mention count is locked, validated post-hoc); (ADR 0016) ACCENT PLACEMENT (when an accent has a placement): accent overrides fully replace the original region's color AND must appear within the documented placement region. If the source image's accent region contradicts the user-supplied placement, user placement wins.
+RULES (priority order): lead with subject + spatial position; bind every color to a region; accent colors fully override the original region; user-unspecified style -> impasto/alla prima/gestural language verbatim; gestural energy streaks radiate outward from the focal point when an accent is in a gestural region; mention thick/thin contrast when the source has significant texture; "no X" constraints go at the end of Section A; no bullets/lists/YAML in Section A; Section A = 80-200 words (count and report); one style declaration; (ADR 0016) STRENGTH MODIFIER (when palette supplied): interpret palette.strength per the four-level contract — subtle (gentle reference, complementary tones allowed), moderate (close adherence, natural-shadow deviations only), strong (every named color appears at least once, no off-palette introductions), strict (per-color mention count is derived from palette order — priority 1 (top of the list) expects ≥2 mentions, all others ≥1 — and is validated post-hoc); (ADR 0016, ADR 0017) ACCENT PLACEMENT (when an accent has a placement): accent overrides fully replace the original region's color AND must appear within the documented placement region. The highest-priority accent (top of the palette list) leads the visual hierarchy; lower-priority accents fill secondary regions. If the source image's accent region contradicts the user-supplied placement, user placement wins.
 
 Start your reply with these section headers exactly:
 
@@ -625,21 +625,23 @@ const readPalettes = () => {
     // the first PUT on such an entry pushes v1 to history. Keeping them
     // visible avoids forcing the user to re-save existing palettes.
     if (!Array.isArray(p.history)) p.history = [];
-    // ADR 0014 — synthesize defaults for the optional weighting fields on
-    // legacy colors. After this point every palette on disk has the full
-    // shape: per-color { hex, name, weight, accent } and palette-level
-    // accent_max_mentions. The first PUT writes them back to disk so the
-    // on-disk shape normalizes over time. The validation layer accepts
-    // input without these fields (they're optional on write too) — this
-    // synthesis is purely a read-side courtesy.
+    // ADR 0017 — per-color `weight` is no longer used. We strip it
+    // silently on read so any pre-ADR-0017 palette on disk
+    // (handcrafted or imported) loads cleanly without the field
+    // echoing back to clients. Priority is the array index; we don't
+    // synthesize anything here — readPalettes is just normalisation.
+    // Per-accent placement (ADR 0016) is preserved + clamped.
     p.colors = p.colors.map((c) => {
       if (!c || typeof c !== 'object') return c;
-      const out = { ...c };
-      if (typeof out.weight !== 'number' || !Number.isInteger(out.weight) ||
-          out.weight < MIN_COLOR_WEIGHT || out.weight > MAX_COLOR_WEIGHT) {
-        out.weight = DEFAULT_COLOR_WEIGHT;
+      const out = { hex: c.hex, name: c.name };
+      if (typeof c.accent === 'boolean') out.accent = c.accent;
+      if (typeof c.placement === 'string') {
+        out.placement = c.placement.length > MAX_COLOR_PLACEMENT_LENGTH
+          ? c.placement.slice(0, MAX_COLOR_PLACEMENT_LENGTH)
+          : c.placement;
+      } else {
+        out.placement = '';
       }
-      if (typeof out.accent !== 'boolean') out.accent = false;
       return out;
     });
     if (typeof p.accent_max_mentions !== 'number' ||
@@ -649,17 +651,9 @@ const readPalettes = () => {
       p.accent_max_mentions = DEFAULT_ACCENT_MAX_MENTIONS;
     }
     // ADR 0016 — synthesize `strength` for palettes missing the field.
-    // Mirrors the read-side courtesy used for weight/accent above.
     if (typeof p.strength !== 'string' ||
         !PALETTE_STRENGTH_LEVELS.includes(p.strength)) {
       p.strength = DEFAULT_PALETTE_STRENGTH;
-    }
-    // ADR 0016 — synthesize + clamp per-color `placement` (≤60 chars).
-    for (const c of p.colors) {
-      if (typeof c.placement !== 'string') c.placement = '';
-      if (c.placement.length > MAX_COLOR_PLACEMENT_LENGTH) {
-        c.placement = c.placement.slice(0, MAX_COLOR_PLACEMENT_LENGTH);
-      }
     }
     return true;
   });
@@ -828,18 +822,15 @@ const applyPaletteToAnalysis = (analysis, palette) => {
 
 const MAX_PALETTE_HISTORY = 200;
 
-// ─── ADR 0014 — weighted color distribution and accent highlighting ────────
+// ─── ADR 0017 — order-based color priority ─────────────────────────────────
 //
-// Each color in a palette carries an optional integer `weight` (1–10,
-// default 5) and an optional boolean `accent` (default false). The
-// palette as a whole carries an optional integer `accent_max_mentions`
-// (1–5, default 2) that caps how often the LLM is told to mention an
-// accent color. The numeric ranges are deliberately tight so the UI
-// can render meaningful sliders and the server can validate cheaply.
+// Priority is derived from each color's index in `palette.colors[]`:
+// index 0 = priority 1 (highest), index N-1 = priority N. There is no
+// per-color `weight` field anymore. Each color still carries an
+// optional boolean `accent` (default false). The palette as a whole
+// carries an optional integer `accent_max_mentions` (1–5, default 2)
+// that caps how often the LLM is told to mention an accent color.
 
-const MIN_COLOR_WEIGHT = 1;
-const MAX_COLOR_WEIGHT = 10;
-const DEFAULT_COLOR_WEIGHT = 5;
 const MIN_ACCENT_MAX_MENTIONS = 1;
 const MAX_ACCENT_MAX_MENTIONS = 5;
 const DEFAULT_ACCENT_MAX_MENTIONS = 2;
@@ -969,16 +960,14 @@ const validatePaletteColorsFlexible = (colors) => {
     if (typeof c.name !== 'string') {
       return { colors: null, error: `colors[${i}].name must be a string` };
     }
-    // ADR 0014 — optional per-color weight/accent. Only validated when
-    // present so callers that don't supply them keep working unchanged.
-    // Invalid values produce a 400 — the user is asking for something
-    // we can't honour, so fail loud at the boundary.
-    const entry = { hex: parsed.hex, name: c.name };
+    // ADR 0017 — per-color `weight` is no longer accepted on the
+    // write path. Priority is derived from array index. Reject loudly
+    // (400) so older clients built against ADR 0014 don't silently
+    // send data the server will ignore.
     if (c.weight !== undefined) {
-      const wErr = validatePaletteColorWeight(c.weight);
-      if (wErr) return { colors: null, error: `colors[${i}].weight: ${wErr}` };
-      entry.weight = c.weight;
+      return { colors: null, error: `colors[${i}].weight: weight is no longer accepted; reorder colors instead to change priority` };
     }
+    const entry = { hex: parsed.hex, name: c.name };
     if (c.accent !== undefined) {
       if (typeof c.accent !== 'boolean') {
         return { colors: null, error: `colors[${i}].accent must be a boolean (got ${typeof c.accent})` };
@@ -1102,25 +1091,23 @@ const applyPaletteUpdate = (palette, body) => {
 
 /**
  * Build a fresh history entry from the current top-level state of a
- * palette. Captures `name`, `colors`, and `accent_max_mentions` (ADR
- * 0014 — the palette-level accent cap), so a rollback via
- * POST /:id/restore/:version faithfully restores the weighting state
+ * palette. Captures `name`, `colors`, `accent_max_mentions`, and
+ * `strength` so a rollback via POST /:id/restore/:version faithfully
+ * restores the priority order, accent states, and accent placement
  * too. Caller has already mutated `palette` to its new state; we
- * capture the snapshot for history.
+ * capture the snapshot for history. The per-color `weight` field
+ * from ADR 0014 is intentionally NOT captured — priority is the
+ * array index.
  */
 const snapshotPalette = (palette) => ({
   version: (Array.isArray(palette.history) ? palette.history.length : 0) + 1,
   name: palette.name,
   colors: palette.colors.map((c) => {
-    // ADR 0014 — preserve weight/accent on the snapshot. readPalettes
-    // has already synthesized defaults, so every color we see here has
-    // at least the defaults; copying the full shape is safe.
     const snap = { hex: c.hex, name: c.name };
-    if (typeof c.weight === 'number') snap.weight = c.weight;
     if (typeof c.accent === 'boolean') snap.accent = c.accent;
-    // ADR 0016 — also preserve per-color placement so a restore rolls
-    // back accent placement regions too. Empty string is the "no
-    // placement" sentinel; we copy it as-is.
+    // ADR 0016 — preserve per-color placement so a restore rolls back
+    // accent placement regions too. Empty string is the "no placement"
+    // sentinel; we copy it as-is.
     if (typeof c.placement === 'string') snap.placement = c.placement;
     return snap;
   }),
@@ -1261,41 +1248,31 @@ const getLatestPaletteRun = (paletteId) => {
   return null;
 };
 
-// ─── ADR 0014 — weighted color distribution and accent highlighting ─────
+// ─── ADR 0017 — order-based color priority (data layer) ────────────────────
 //
-// The helpers below implement the pure data layer for ADR 0014:
-//   - validatePaletteColorWeight / validatePaletteAccentMaxMentions:
-//     boundary checks for the two new integer ranges.
-//   - normalizeColorWeights: single source of truth for distribution
-//     arithmetic. Always returns a valid result, even on garbage input,
-//     so callers can never be surprised by NaN or division by zero.
-//   - buildColorBudgetBlock: deterministic string appended to the
-//     Stage 2 user message in Phase 2.
+// The helpers below implement the pure data layer for ADR 0017:
+//   - validatePaletteAccentMaxMentions: integer range check for the
+//     palette-level accent cap. (The per-color `weight` validator from
+//     ADR 0014 is gone — weight is no longer accepted on the write
+//     path.)
+//   - prioritiesFromOrder: single source of truth for priority
+//     arithmetic. Returns { priorities } where priorities[i] = i + 1;
+//     returns uniform { displayPct } = Math.round(100/N) each for the
+//     preview bar (mirrored in the client by clientPrioritiesFromOrder).
+//   - buildColorBudgetBlock: deterministic string appended to the Stage 2
+//     user message. Each color line carries a "priority N" label and a
+//     uniform 1/N percent share (the proportional control surface lives
+//     in the existing `strength` level).
 //   - measureColorDistribution: tokenizes the LLM output for the
 //     dashboard. Read-only — never mutates the prompt.
+//   - computeStrictPass: priority-derived expected_min (2 for position 0,
+//     1 for positions ≥ 1; accents use the palette-level cap).
 // The pure helpers are all exported so tests/run-all.js can cover the
 // edge-case matrix without spinning up the server.
 
 /**
- * Validate a per-color `weight` value. Returns an error string or null.
- * Accepts: integer in [MIN_COLOR_WEIGHT, MAX_COLOR_WEIGHT]. Rejects:
- * non-numbers, non-integers, NaN/Infinity, out-of-range. The check is
- * deliberately strict so the slider's integer steps always produce
- * valid input on the wire.
- */
-const validatePaletteColorWeight = (weight) => {
-  if (typeof weight !== 'number') return `must be a number (got ${typeof weight})`;
-  if (!Number.isFinite(weight)) return `must be a finite number (got ${weight})`;
-  if (!Number.isInteger(weight)) return `must be an integer (got ${weight})`;
-  if (weight < MIN_COLOR_WEIGHT) return `must be ${MIN_COLOR_WEIGHT} or greater (got ${weight})`;
-  if (weight > MAX_COLOR_WEIGHT) return `must be ${MAX_COLOR_WEIGHT} or less (got ${weight})`;
-  return null;
-};
-
-/**
  * Validate a palette-level `accent_max_mentions` value. Returns an
- * error string or null. Same strictness rules as
- * `validatePaletteColorWeight`.
+ * error string or null. Strict integer range check.
  */
 const validatePaletteAccentMaxMentions = (n) => {
   if (typeof n !== 'number') return `must be a number (got ${typeof n})`;
@@ -1321,75 +1298,42 @@ const validatePaletteStrength = (value) => {
 };
 
 /**
- * Check whether the palette has any user-customized weighting — used
- * to decide whether `buildColorBudgetBlock` should emit anything. A
- * palette is "untouched" when every weight is the default AND no color
- * is an accent AND accent_max_mentions is the default. This is the
- * "pure legacy" case from ADR 0014 §4: the user hasn't expressed a
- * preference, so we leave the LLM to balance the palette as before.
- */
-const isPaletteUnweighted = (palette) => {
-  if (!palette || !Array.isArray(palette.colors) || palette.colors.length === 0) return true;
-  if (typeof palette.accent_max_mentions === 'number' &&
-      palette.accent_max_mentions !== DEFAULT_ACCENT_MAX_MENTIONS) {
-    return false;
-  }
-  for (const c of palette.colors) {
-    if (typeof c.weight === 'number' && c.weight !== DEFAULT_COLOR_WEIGHT) return false;
-    if (c.accent === true) return false;
-  }
-  return true;
-};
-
-/**
- * Single source of truth for distribution arithmetic. Takes an array
- * of palette colors (already through readPalettes synthesis, so every
- * entry has weight/accent defined) and returns:
- *   - colors: same array, untouched (pure)
- *   - fractions[i]: float in [0, 1] summing to 1.0 (within float epsilon)
- *   - displayPct[i]: integer in [0, 100] (rounded); may not sum to 100
- *     due to rounding — UI labels this as "sums to N%" honestly
- *   - totalWeight: integer sum of weights
+ * Single source of truth for priority arithmetic (ADR 0017). Priority
+ * is the array index: index 0 is priority 1 (highest), index N-1 is
+ * priority N. The budget block uses uniform 1/N percent shares — the
+ * proportional control surface lives in the `strength` level, not in
+ * a per-color knob.
+ *
+ * Takes an array of palette colors (already through readPalettes
+ * synthesis) and returns:
+ *   - priorities[i]: 1-based priority (i + 1)
+ *   - displayPct[i]: integer percent share (rounded); may not sum to
+ *     100 due to rounding — UI labels this honestly
+ *   - colors[i]: normalized color object (hex / name / accent /
+ *     placement normalised to safe defaults)
  *
  * Edge cases (all return valid output — never throws):
- *   - Empty array → empty output, totalWeight: 0
- *   - One color with any weight → fraction 1.0, displayPct 100
- *   - All weights at default → equal fractions (1/N each)
- *   - Mixed valid/garbage weights → already handled upstream by the
- *     validators; this helper trusts its input. Defense in depth is
- *     provided by clamping in the (read-side) readPalettes synthesis.
+ *   - Empty array → empty priorities + displayPct
+ *   - Single color → priority 1, displayPct 100
+ *   - Multi color → uniform 1/N shares
+ *
+ * The per-color `weight` field is intentionally NOT consulted — it
+ * is stripped on read (see readPalettes) and forbidden on write
+ * (see validatePaletteColorsFlexible). Any pre-ADR-0017 disk palette
+ * that still carries weight on disk flows through here as if it had
+ * no weight at all.
  */
-const normalizeColorWeights = (colors) => {
+const prioritiesFromOrder = (colors) => {
   if (!Array.isArray(colors) || colors.length === 0) {
-    return { colors: [], fractions: [], displayPct: [], totalWeight: 0 };
+    return { priorities: [], displayPct: [] };
   }
-  const safeColors = colors.map((c) => ({
-    hex: c && typeof c.hex === 'string' ? c.hex : '',
-    name: c && typeof c.name === 'string' ? c.name : '',
-    weight: (c && typeof c.weight === 'number' && Number.isInteger(c.weight) &&
-              c.weight >= MIN_COLOR_WEIGHT && c.weight <= MAX_COLOR_WEIGHT)
-              ? c.weight : DEFAULT_COLOR_WEIGHT,
-    accent: !!(c && c.accent === true),
-    // ADR 0016 — preserve per-color placement through normalization so
-    // buildColorBudgetBlock can render it. Empty/missing becomes ''.
-    placement: (c && typeof c.placement === 'string') ? c.placement : ''
-  }));
-  const totalWeight = safeColors.reduce((s, c) => s + c.weight, 0);
-  if (totalWeight <= 0) {
-    // All-zero or negative weights shouldn't be reachable (validators
-    // reject them) but defense in depth: return equal fractions so the
-    // budget block still renders something sensible.
-    const equal = 1 / safeColors.length;
-    return {
-      colors: safeColors,
-      fractions: safeColors.map(() => equal),
-      displayPct: safeColors.map(() => Math.round(equal * 100)),
-      totalWeight: 0
-    };
-  }
-  const fractions = safeColors.map((c) => c.weight / totalWeight);
-  const displayPct = fractions.map((f) => Math.round(f * 100));
-  return { colors: safeColors, fractions, displayPct, totalWeight };
+  const priorities = colors.map((_, i) => i + 1);
+  // Uniform share: each color gets Math.round(100 / N). When N doesn't
+  // divide 100 cleanly, the sum is N or 99 or 101; UI labels this
+  // honestly ("Sum: N% (rounded)").
+  const equalPct = Math.round(100 / colors.length);
+  const displayPct = colors.map(() => equalPct);
+  return { priorities, displayPct };
 };
 
 /**
@@ -1397,19 +1341,19 @@ const normalizeColorWeights = (colors) => {
  * the Stage 2 user message. Returns a plain string (no trailing
  * newline — the caller decides how to join). Returns '' when:
  *   - palette is missing / has no colors
- *   - palette is "pure legacy" (no user-customized weighting; see
- *     isPaletteUnweighted)
  *
- * The block format is documented in ADR 0014 §4. Order follows
- * palette.colors order (matches the chip order in the UI). Accent
- * colors get the explicit "(ACCENT — mention at most N times total;
- * place where it adds focus)" clause.
+ * The block format is documented in ADR 0017. Order follows
+ * palette.colors order (matches the chip order in the UI and the
+ * drag-and-drop order in the edit modal). Each color line carries a
+ * "priority N" label and a uniform 1/N percent share. Accent colors
+ * get the explicit "(ACCENT — mention at most N times total; place
+ * where it adds focus)" clause. Per-accent placement text is
+ * rendered as ", placement: <region>" only when accent + non-empty.
  */
 const buildColorBudgetBlock = (palette) => {
   if (!palette || !Array.isArray(palette.colors) || palette.colors.length === 0) return '';
-  if (isPaletteUnweighted(palette)) return '';
 
-  const norm = normalizeColorWeights(palette.colors);
+  const norm = prioritiesFromOrder(palette.colors);
   const accentMax = typeof palette.accent_max_mentions === 'number'
     ? palette.accent_max_mentions
     : DEFAULT_ACCENT_MAX_MENTIONS;
@@ -1424,20 +1368,22 @@ const buildColorBudgetBlock = (palette) => {
 
   const lines = [];
   if (strengthPreamble) lines.push(strengthPreamble);
-  lines.push('Color usage budget (use these fractions as a guide; do not invent colors not on this list):');
-  for (let i = 0; i < norm.colors.length; i++) {
-    const c = norm.colors[i];
+  lines.push('Color usage budget (mention colors top-to-bottom in palette order; do not invent colors not on this list):');
+  for (let i = 0; i < palette.colors.length; i++) {
+    const c = palette.colors[i];
+    const priority = norm.priorities[i];
     const pct = norm.displayPct[i];
-    const accentTag = c.accent
+    const accentTag = c.accent === true
       ? ` (ACCENT — mention at most ${accentMax} time${accentMax === 1 ? '' : 's'} total; place where it adds focus)`
       : '';
     // ADR 0016 — accent placement region binding. Emitted only when the
     // color is an accent AND has a non-empty placement string. Keeps
     // the budget block terse for palettes that don't use placement.
-    const placementTag = (c.accent && typeof c.placement === 'string' && c.placement.trim().length > 0)
-      ? `, placement: ${c.placement.trim()}`
+    const placementRaw = (c && typeof c.placement === 'string') ? c.placement.trim() : '';
+    const placementTag = (c.accent === true && placementRaw.length > 0)
+      ? `, placement: ${placementRaw}`
       : '';
-    lines.push(`  - ${c.name} ${c.hex}: ${pct}%${accentTag}${placementTag} [STRENGTH: ${strength}]`);
+    lines.push(`  - ${c.name} ${c.hex}: priority ${priority} (~${pct}% share)${accentTag}${placementTag} [STRENGTH: ${strength}]`);
   }
   const sum = norm.displayPct.reduce((s, p) => s + p, 0);
   const sumNote = sum === 100 ? 'Sum: 100%' : `Sum: ${sum}% (rounded)`;
@@ -1446,15 +1392,16 @@ const buildColorBudgetBlock = (palette) => {
   return lines.join('\n');
 };
 
-// ADR 0016 — strength preamble lines for `buildColorBudgetBlock`. The
-// opening one-liner primes the LLM with the qualitative contract before
-// the per-color lines arrive. Subtle → moderate → strong → strict in
-// order of increasing enforcement.
+// ADR 0016 / ADR 0017 — strength preamble lines for
+// `buildColorBudgetBlock`. The opening one-liner primes the LLM with
+// the qualitative contract before the per-color lines arrive.
+// Subtle → moderate → strong → strict in order of increasing
+// enforcement.
 const STRENGTH_PREAMBLES = {
   subtle: 'STRENGTH: subtle — use these as gentle reference colors; feel free to introduce complementary tones that fit the subject.',
   moderate: 'STRENGTH: moderate — honor the palette closely; deviations allowed only for natural shadows and skin tones.',
-  strong: 'STRENGTH: strong — every named color must appear at least once in the prompt; no off-palette introductions.',
-  strict: 'STRENGTH: strict — every named color must appear the documented number of times (±0); no substitutions. The output will be validated post-hoc.'
+  strong: 'STRENGTH: strong — every named color must appear at least once in the prompt; the highest-priority color (top of the palette list) should appear most often; no off-palette introductions.',
+  strict: 'STRENGTH: strict — every named color must appear the priority-derived number of times (priority 1 expects ≥2, others ≥1; no substitutions). The output will be validated post-hoc.'
 };
 
 /**
@@ -1541,15 +1488,15 @@ const measureColorDistribution = (prompt, palette) => {
 };
 
 /**
- * ADR 0016 — append `strict_pass` + `strict_violations` to a
+ * ADR 0017 — append `strict_pass` + `strict_violations` to a
  * distribution result when the palette's strength is "strict". For
  * any other strength (or absent), returns the result unchanged. Per-
- * color expectation:
+ * color expectation (priority-driven, ADR 0017 §5):
  *   - accent colors: must appear at least 1 time AND not more than
  *     `palette.accent_max_mentions`.
- *   - non-accent colors: must appear at least
- *     `max(1, round(weight / 2))` times (the "documented count" the
- *     user agrees to when they pick strict).
+ *   - non-accent colors at position 0 (priority 1, highest): must
+ *     appear at least 2 times — the "dominant" bias.
+ *   - non-accent colors at position ≥ 1: must appear at least 1 time.
  * The first 10 violations are reported; `strict_pass` is the boolean
  * sum.
  */
@@ -1569,8 +1516,8 @@ const computeStrictPass = (counts, palette, result) => {
     const c = palette.colors[i];
     const m = counts[i];
     if (!c || !m) continue;
-    const expected_min = c.accent ? 1 : Math.max(1, Math.round((typeof c.weight === 'number' ? c.weight : DEFAULT_COLOR_WEIGHT) / 2));
-    const expected_max = c.accent ? accentMax : Infinity;
+    const expected_min = c.accent === true ? 1 : (i === 0 ? 2 : 1);
+    const expected_max = c.accent === true ? accentMax : Infinity;
     if (m.totalCount < expected_min) {
       violations.push({ name: c.name, hex: c.hex, expected_min, expected_max, measured: m.totalCount, reason: 'under_min' });
     } else if (m.totalCount > expected_max) {
@@ -1800,6 +1747,10 @@ const applyDirectiveUpdate = (directive, body) => {
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'src')));
+// ADR 0017 — serve the SortableJS UMD bundle from node_modules so the
+// edit-palette modal can use drag-and-drop reordering without copying
+// the file under version control.
+app.use('/sortable.min.js', express.static(path.join(__dirname, 'node_modules/sortablejs/Sortable.min.js')));
 app.use(express.static(path.join(__dirname)));
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2768,27 +2719,31 @@ const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
 
 /**
  * Pure helper: assemble the user-message envelope sent to the Stage 2
- * LLM. Extracted from callMiniMaxStage2 so the ADR 0014 budget-block
+ * LLM. Extracted from callMiniMaxStage2 so the ADR 0017 budget-block
  * inclusion logic is unit-testable without spinning up the server or
  * mocking the MiniMax HTTP call.
  *
  * Shape: `{ analysis, directives, color_budget? }`. `color_budget` is
- * included ONLY when a weighted palette is supplied — see
- * `isPaletteUnweighted` for the "pure legacy" opt-out.
+ * included whenever a palette with at least one color is supplied —
+ * priority is implicit in the array order, so any saved palette gets
+ * a deterministic budget block. ADR 0017 removed the "pure legacy"
+ * opt-out: there is no longer a way for a saved palette to carry
+ * "no user-customized weighting", because the act of saving it IS
+ * the customization signal.
  *
  * @param {object} analysis - the Stage 1 analysis (palette colors live in analysis.colors)
  * @param {string} directives - free-form user directives (Stage 2 input)
- * @param {object|null} palette - applied palette (ADR 0014)
+ * @param {object|null} palette - applied palette (ADR 0017)
  * @returns {object} the envelope object (callMiniMaxStage2 JSON-stringifies it)
  */
 const buildStage2Envelope = (analysis, directives, palette = null) => {
   const envelope = { analysis, directives: directives || '' };
-  // ADR 0014 — when a weighted palette is in play, append a
-  // deterministic color-budget block so the LLM has explicit per-color
-  // fractions + an accent cap to follow. The block lives inside the
-  // envelope JSON so it's part of the structured user message and
-  // travels through chat-refinement / re-runs unchanged.
-  if (palette && !isPaletteUnweighted(palette)) {
+  // ADR 0017 — when a palette is in play, append a deterministic
+  // color-budget block so the LLM has explicit priorities +
+  // uniform-share labels + an accent cap to follow. The block lives
+  // inside the envelope JSON so it's part of the structured user
+  // message and travels through chat-refinement / re-runs unchanged.
+  if (palette) {
     const block = buildColorBudgetBlock(palette);
     if (block) {
       envelope.color_budget = block;
@@ -3812,20 +3767,23 @@ app.post('/api/palettes/:id/restore/:version', (req, res) => {
 
     palettes[idx].name = target.name;
     palettes[idx].colors = (target.colors || []).map((c) => {
-      // ADR 0014 — preserve per-color weight/accent from the snapshot
-      // so a Restore faithfully returns to the weighted state. Older
-      // snapshots may lack these fields; readPalettes synthesis adds
-      // them on the next read.
+      // ADR 0017 — restore preserves accent + placement but the
+      // per-color `weight` field is intentionally not captured.
       const out = { hex: c.hex, name: c.name };
-      if (typeof c.weight === 'number') out.weight = c.weight;
       if (typeof c.accent === 'boolean') out.accent = c.accent;
+      if (typeof c.placement === 'string') out.placement = c.placement;
       return out;
     });
-    // ADR 0014 — restore palette-level accent_max_mentions too.
-    // Older snapshots may not have it; default keeps the palette valid.
+    // ADR 0014 / 0017 — restore palette-level accent_max_mentions +
+    // strength (older snapshots may not carry strength; default keeps
+    // the palette valid).
     palettes[idx].accent_max_mentions = typeof target.accent_max_mentions === 'number'
       ? target.accent_max_mentions
       : DEFAULT_ACCENT_MAX_MENTIONS;
+    palettes[idx].strength = typeof target.strength === 'string' &&
+      PALETTE_STRENGTH_LEVELS.includes(target.strength)
+      ? target.strength
+      : DEFAULT_PALETTE_STRENGTH;
     pushPaletteHistory(palettes[idx]);
     writePalettes(palettes);
     res.json({ success: true, data: palettes[idx] });
@@ -5217,17 +5175,12 @@ module.exports = {
   pushPaletteHistory,
   MAX_PALETTE_HISTORY,
   applyPaletteToAnalysis,
-  // ADR 0014 — weighted color distribution and accent highlighting
-  MIN_COLOR_WEIGHT,
-  MAX_COLOR_WEIGHT,
-  DEFAULT_COLOR_WEIGHT,
+  // ADR 0017 — order-based color priority (replaces ADR 0014 weight)
   MIN_ACCENT_MAX_MENTIONS,
   MAX_ACCENT_MAX_MENTIONS,
   DEFAULT_ACCENT_MAX_MENTIONS,
-  validatePaletteColorWeight,
   validatePaletteAccentMaxMentions,
-  isPaletteUnweighted,
-  normalizeColorWeights,
+  prioritiesFromOrder,
   buildColorBudgetBlock,
   buildStage2Envelope,
   measureColorDistribution,

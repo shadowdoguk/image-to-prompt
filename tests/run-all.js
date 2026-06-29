@@ -1260,46 +1260,44 @@ test('HTTP integration (ADR 0013): DELETE /api/palettes/:id still works (regress
   }
 });
 
-// ─── ADR 0014 — Phase 2: Stage 2 injection + telemetry ───────────────
+// ─── ADR 0017 — Phase 2: Stage 2 injection + telemetry ───────────────
 //
 // Phase 2 wires the budget block into the Stage 2 user-message
 // envelope and surfaces `distribution_metrics` in the /api/generate-prompt
 // response. Tests cover:
-//   - The pure `buildStage2Envelope` helper (budget block inclusion /
-//     exclusion per ADR 0014 §4 "pure legacy" opt-out).
+//   - The pure `buildStage2Envelope` helper (budget block inclusion).
 //   - HTTP integration for the parts of /api/generate-prompt that
 //     don't require a live MiniMax call (paletteId validation +
-//     lookup, 404 on missing palette). The actual LLM call is not
-//     mocked in this test suite; full end-to-end coverage is the
-//     Phase 5 UAT checklist (ADR 0014 §Verification).
+//     lookup, 404 on missing palette).
+// ADR 0017 removed the "pure legacy" opt-out: any saved palette emits
+// a budget block.
 
-test('ADR 0014: buildStage2Envelope includes color_budget when a weighted palette is supplied', () => {
+test('ADR 0017: buildStage2Envelope includes color_budget when a palette is supplied', () => {
   const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // Weights 8 and 5 → 8/13 ≈ 62% and 5/13 ≈ 38% (rounded).
   const envelope = buildStage2Envelope(
     { subject: 'x', colors: [{ hex: '#d97706', name: 'burnt orange' }] },
     'make it dramatic',
     {
       colors: [
-        { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
-        { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+        { hex: '#d97706', name: 'burnt orange' },
+        { hex: '#dc2626', name: 'signal red', accent: true }
       ],
       accent_max_mentions: 2
     }
   );
   assertTrue(typeof envelope.color_budget === 'string', 'color_budget string present');
-  // ADR 0016 — block now opens with a STRENGTH preamble line, then
-  // the "Color usage budget" header. Both must be present.
   assertTrue(envelope.color_budget.startsWith('STRENGTH:'), 'block opens with STRENGTH preamble (ADR 0016)');
   assertTrue(envelope.color_budget.includes('Color usage budget'), 'block contains the budget header');
-  assertTrue(envelope.color_budget.includes('burnt orange #d97706: 62%'), 'first color 62% (8/13 rounded)');
-  assertTrue(envelope.color_budget.includes('signal red #dc2626: 38% (ACCENT — mention at most 2 times'),
-              'accent tag + cap');
+  // ADR 0017: priority labels + uniform 1/N shares.
+  assertTrue(envelope.color_budget.includes('burnt orange #d97706: priority 1 (~50% share)'),
+    'top color labelled priority 1 with uniform 1/2 share');
+  assertTrue(envelope.color_budget.includes('signal red #dc2626: priority 2 (~50% share) (ACCENT — mention at most 2 times'),
+              'second color (accent) labelled priority 2 + accent tag');
   assertEqual(envelope.analysis.subject, 'x', 'analysis preserved');
   assertEqual(envelope.directives, 'make it dramatic', 'directives preserved');
 });
 
-test('ADR 0014: buildStage2Envelope omits color_budget when no palette is supplied', () => {
+test('ADR 0017: buildStage2Envelope omits color_budget when no palette is supplied', () => {
   const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
   const envelope = buildStage2Envelope(
     { subject: 'x', colors: [] },
@@ -1311,23 +1309,23 @@ test('ADR 0014: buildStage2Envelope omits color_budget when no palette is suppli
   assertEqual(envelope.directives, '', 'empty directives preserved');
 });
 
-test('ADR 0014: buildStage2Envelope omits color_budget for a "pure legacy" palette (no customization)', () => {
-  const { buildStage2Envelope, DEFAULT_COLOR_WEIGHT, DEFAULT_ACCENT_MAX_MENTIONS } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // Palette with all defaults → isPaletteUnweighted → no block.
-  // This is the backwards-compat guarantee: existing palettes behave
-  // exactly as they did before ADR 0014.
+test('ADR 0017: buildStage2Envelope emits a budget block for every saved palette (no "pure legacy" opt-out)', () => {
+  const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // ADR 0017 removed the pure-legacy gate. Any palette the user has
+  // explicitly saved carries a priority intent via its array order,
+  // so the block is always emitted.
   const envelope = buildStage2Envelope(
     { subject: 'x', colors: [{ hex: '#a', name: 'a' }, { hex: '#b', name: 'b' }] },
     '',
     {
       colors: [
-        { hex: '#a', name: 'a', weight: DEFAULT_COLOR_WEIGHT, accent: false },
-        { hex: '#b', name: 'b', weight: DEFAULT_COLOR_WEIGHT, accent: false }
+        { hex: '#a', name: 'a' },
+        { hex: '#b', name: 'b' }
       ],
-      accent_max_mentions: DEFAULT_ACCENT_MAX_MENTIONS
+      accent_max_mentions: 2
     }
   );
-  assertEqual(envelope.color_budget, undefined, 'pure legacy → no budget block');
+  assertTrue(typeof envelope.color_budget === 'string', 'every palette → budget block');
 });
 
 test('ADR 0014: buildStage2Envelope handles directives as non-string defensively', () => {
@@ -1401,15 +1399,15 @@ test('ADR 0014: POST /api/generate-prompt with a weighted palette includes palet
   resetPalettesFile();
   const srv = await startTestServer();
   try {
-    // Seed a weighted palette on disk
+    // Seed an ordered palette on disk (ADR 0017 — no weight field)
     const create = await fetchJson(`${srv.base}/api/palettes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ...validPaletteBody(),
         colors: [
-          { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
-          { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+          { hex: '#d97706', name: 'burnt orange' },
+          { hex: '#dc2626', name: 'signal red', accent: true }
         ],
         accent_max_mentions: 2
       })
@@ -1478,23 +1476,18 @@ test('ADR 0014: POST /api/generate-prompt without paletteId omits palette fields
   }
 });
 
-test('ADR 0014: POST /api/generate-prompt with a pure-legacy palette still returns palette_id + distribution_metrics (opt-out is request-side only)', async () => {
-  // A pure-legacy palette (all default weights) opts out of the budget
-  // block in the request envelope (covered by the buildStage2Envelope
-  // unit test above), but the response envelope still includes
-  // palette_id, palette_name, and distribution_metrics. The metrics
-  // are observational — they're useful regardless of weighting intent
-  // (the dashboard can show "the LLM didn't mention burnt orange
-  // even once" which is actionable info). This test documents the
-  // split: opt-out is on the REQUEST side, metrics are always on the
-  // RESPONSE side.
+test('ADR 0017: POST /api/generate-prompt with an accent-only palette returns palette_id + distribution_metrics', async () => {
+  // ADR 0017 removed the "pure legacy" opt-out entirely. Every saved
+  // palette emits a budget block (priority is the array order). The
+  // response envelope still includes palette_id + distribution_metrics
+  // because the dashboard renders the same fields regardless of
+  // strength / priority.
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
   const srv = await startTestServer();
   try {
-    // Seed a palette WITHOUT any weight/accent (will be synthesized to
-    // defaults by readPalettes — pure legacy from isPaletteUnweighted's
-    // perspective).
+    // Seed a palette without any per-color accent (just to confirm the
+    // metrics path is exercised for non-accent palettes too).
     const create = await fetchJson(`${srv.base}/api/palettes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1511,7 +1504,7 @@ test('ADR 0014: POST /api/generate-prompt with a pure-legacy palette still retur
         paletteId
       })
     });
-    assertEqual(r.status, 200, 'pure-legacy palette + real LLM → 200');
+    assertEqual(r.status, 200, 'plain palette + real LLM → 200');
     assertEqual(r.body.data.palette_id, paletteId, 'palette_id present (resolver ran)');
     assertTrue(r.body.data.distribution_metrics, 'distribution_metrics present (observational)');
     assertEqual(r.body.data.distribution_metrics.counts.length, 2, 'one count per palette color');
@@ -1531,47 +1524,26 @@ test('ADR 0014: POST /api/generate-prompt with a pure-legacy palette still retur
 // exercised through the existing `tests/run-all.js` require-and-call
 // pattern so the server isn't started.
 
-// Constants exported
-test('ADR 0014: weight + accent-cap constants are exported with sensible bounds', () => {
+// Constants exported (ADR 0017 — accent-cap constants only; per-color
+// weight is gone)
+test('ADR 0017: accent-cap constants are exported with sensible bounds', () => {
   const srv = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertEqual(srv.MIN_COLOR_WEIGHT, 1, 'MIN_COLOR_WEIGHT = 1');
-  assertEqual(srv.MAX_COLOR_WEIGHT, 10, 'MAX_COLOR_WEIGHT = 10');
-  assertEqual(srv.DEFAULT_COLOR_WEIGHT, 5, 'DEFAULT_COLOR_WEIGHT = 5');
   assertEqual(srv.MIN_ACCENT_MAX_MENTIONS, 1, 'MIN_ACCENT_MAX_MENTIONS = 1');
   assertEqual(srv.MAX_ACCENT_MAX_MENTIONS, 5, 'MAX_ACCENT_MAX_MENTIONS = 5');
   assertEqual(srv.DEFAULT_ACCENT_MAX_MENTIONS, 2, 'DEFAULT_ACCENT_MAX_MENTIONS = 2');
-  assertTrue(srv.MIN_COLOR_WEIGHT < srv.DEFAULT_COLOR_WEIGHT &&
-             srv.DEFAULT_COLOR_WEIGHT < srv.MAX_COLOR_WEIGHT,
-             'default is strictly between min and max');
+  // Removed (ADR 0017 — order-based priority replaces weight):
+  assertEqual(srv.MIN_COLOR_WEIGHT, undefined, 'MIN_COLOR_WEIGHT removed');
+  assertEqual(srv.MAX_COLOR_WEIGHT, undefined, 'MAX_COLOR_WEIGHT removed');
+  assertEqual(srv.DEFAULT_COLOR_WEIGHT, undefined, 'DEFAULT_COLOR_WEIGHT removed');
+  assertEqual(srv.validatePaletteColorWeight, undefined, 'validatePaletteColorWeight removed');
+  assertEqual(srv.normalizeColorWeights, undefined, 'normalizeColorWeights removed');
+  assertEqual(srv.isPaletteUnweighted, undefined, 'isPaletteUnweighted removed');
+  // Replaced:
+  assertTrue(typeof srv.prioritiesFromOrder === 'function', 'prioritiesFromOrder exported');
 });
 
-// Weight validator — every edge case in the matrix
-test('ADR 0014: validatePaletteColorWeight accepts the integer range and rejects everything else', () => {
-  const { validatePaletteColorWeight } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // Accepts: integer in [1, 10]
-  for (const w of [1, 2, 5, 7, 10]) {
-    assertEqual(validatePaletteColorWeight(w), null, `weight ${w} accepted`);
-  }
-  // Rejects: out of range
-  assertTrue(validatePaletteColorWeight(0) !== null, '0 rejected (below MIN)');
-  assertTrue(validatePaletteColorWeight(-1) !== null, '-1 rejected (below MIN)');
-  assertTrue(validatePaletteColorWeight(11) !== null, '11 rejected (above MAX)');
-  assertTrue(validatePaletteColorWeight(100) !== null, '100 rejected (above MAX)');
-  // Rejects: non-integer
-  assertTrue(validatePaletteColorWeight(5.5) !== null, '5.5 rejected (non-integer)');
-  assertTrue(validatePaletteColorWeight(0.1) !== null, '0.1 rejected (non-integer)');
-  // Rejects: wrong type
-  assertTrue(validatePaletteColorWeight('5') !== null, '"5" rejected (string)');
-  assertTrue(validatePaletteColorWeight(null) !== null, 'null rejected');
-  assertTrue(validatePaletteColorWeight(undefined) !== null, 'undefined rejected');
-  assertTrue(validatePaletteColorWeight(NaN) !== null, 'NaN rejected');
-  assertTrue(validatePaletteColorWeight(Infinity) !== null, 'Infinity rejected');
-  assertTrue(validatePaletteColorWeight(-Infinity) !== null, '-Infinity rejected');
-  assertTrue(validatePaletteColorWeight(true) !== null, 'true rejected (boolean)');
-});
-
-// Accent-cap validator — same edge cases
-test('ADR 0014: validatePaletteAccentMaxMentions accepts the integer range and rejects everything else', () => {
+// Accent-cap validator — same edge cases (still valid in ADR 0017)
+test('ADR 0017: validatePaletteAccentMaxMentions accepts the integer range and rejects everything else', () => {
   const { validatePaletteAccentMaxMentions } = require(path.join(PROJECT_ROOT, 'server.js'));
   for (const n of [1, 2, 3, 4, 5]) {
     assertEqual(validatePaletteAccentMaxMentions(n), null, `cap ${n} accepted`);
@@ -1585,200 +1557,109 @@ test('ADR 0014: validatePaletteAccentMaxMentions accepts the integer range and r
   assertTrue(validatePaletteAccentMaxMentions(NaN) !== null, 'NaN rejected');
 });
 
-// normalizeColorWeights — the algorithm that handles the brief's
-// "sum of weights not equal to 100%" requirement by NOT requiring a
-// sum at all. Every fixture in the ADR edge-case matrix.
-test('ADR 0014: normalizeColorWeights — empty input returns empty output', () => {
-  const { normalizeColorWeights } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const r = normalizeColorWeights([]);
-  assertEqual(r.colors.length, 0, 'no colors');
-  assertEqual(r.fractions.length, 0, 'no fractions');
+// prioritiesFromOrder — replacement for normalizeColorWeights
+test('ADR 0017: prioritiesFromOrder — empty input returns empty arrays', () => {
+  const { prioritiesFromOrder } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = prioritiesFromOrder([]);
+  assertEqual(r.priorities.length, 0, 'no priorities');
   assertEqual(r.displayPct.length, 0, 'no displayPct');
-  assertEqual(r.totalWeight, 0, 'totalWeight 0');
 });
 
-test('ADR 0014: normalizeColorWeights — single color gets 100%', () => {
-  const { normalizeColorWeights } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const r = normalizeColorWeights([{ hex: '#d97706', name: 'burnt orange', weight: 7, accent: false }]);
-  assertEqual(r.colors.length, 1, 'one color');
-  assertEqual(r.fractions[0], 1, 'fraction 1.0');
+test('ADR 0017: prioritiesFromOrder — single color → priority 1 + uniform 100%', () => {
+  const { prioritiesFromOrder } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = prioritiesFromOrder([{ hex: '#d97706', name: 'burnt orange' }]);
+  assertEqual(r.priorities[0], 1, 'priority 1');
   assertEqual(r.displayPct[0], 100, 'displayPct 100');
-  assertEqual(r.totalWeight, 7, 'totalWeight');
 });
 
-test('ADR 0014: normalizeColorWeights — all weights default → equal fractions', () => {
-  const { normalizeColorWeights, DEFAULT_COLOR_WEIGHT } = require(path.join(PROJECT_ROOT, 'server.js'));
+test('ADR 0017: prioritiesFromOrder — N colors → priorities 1..N + uniform 1/N share', () => {
+  const { prioritiesFromOrder } = require(path.join(PROJECT_ROOT, 'server.js'));
   const colors = [
-    { hex: '#d97706', name: 'a', weight: DEFAULT_COLOR_WEIGHT, accent: false },
-    { hex: '#7c2d12', name: 'b', weight: DEFAULT_COLOR_WEIGHT, accent: false },
-    { hex: '#dc2626', name: 'c', weight: DEFAULT_COLOR_WEIGHT, accent: false }
+    { hex: '#d97706', name: 'a' },
+    { hex: '#7c2d12', name: 'b' },
+    { hex: '#dc2626', name: 'c' }
   ];
-  const r = normalizeColorWeights(colors);
-  assertEqual(r.totalWeight, 15, 'total = 3 * 5');
-  for (const f of r.fractions) {
-    assertTrue(Math.abs(f - 1 / 3) < 1e-9, `fraction ≈ 1/3 (got ${f})`);
-  }
-  for (const p of r.displayPct) {
-    assertEqual(p, 33, `displayPct 33 (rounded 1/3)`);
-  }
-});
-
-test('ADR 0014: normalizeColorWeights — uneven weights produce proportional fractions', () => {
-  const { normalizeColorWeights } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // weights 8 and 2 → 80% / 20%
-  const r = normalizeColorWeights([
-    { hex: '#d97706', name: 'a', weight: 8, accent: false },
-    { hex: '#7c2d12', name: 'b', weight: 2, accent: false }
-  ]);
-  assertEqual(r.totalWeight, 10, 'totalWeight 10');
-  assertTrue(Math.abs(r.fractions[0] - 0.8) < 1e-9, 'first fraction 0.8');
-  assertTrue(Math.abs(r.fractions[1] - 0.2) < 1e-9, 'second fraction 0.2');
-  assertEqual(r.displayPct[0], 80, 'first displayPct 80');
-  assertEqual(r.displayPct[1], 20, 'second displayPct 20');
-});
-
-test('ADR 0014: normalizeColorWeights — displayPct may not sum to 100 after rounding (UI labels honestly)', () => {
-  const { normalizeColorWeights } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // weights 1, 1, 1 → 33.33% each → 33+33+33 = 99 (sum < 100)
-  const r = normalizeColorWeights([
-    { hex: '#a', name: 'a', weight: 1, accent: false },
-    { hex: '#b', name: 'b', weight: 1, accent: false },
-    { hex: '#c', name: 'c', weight: 1, accent: false }
-  ]);
+  const r = prioritiesFromOrder(colors);
+  assertEqual(r.priorities.join(','), '1,2,3', 'priorities are 1-indexed');
+  // 100/3 = 33.33 → 33 each
+  assertEqual(r.displayPct.join(','), '33,33,33', 'uniform 1/N');
   const sum = r.displayPct.reduce((s, p) => s + p, 0);
-  assertEqual(sum, 99, 'displayPct sum = 99 (rounded down 3x from 33.33)');
+  assertEqual(sum, 99, 'sum = 99 after rounding');
 });
 
-test('ADR 0014: normalizeColorWeights — accent flag is preserved on returned objects', () => {
-  const { normalizeColorWeights } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const r = normalizeColorWeights([
-    { hex: '#a', name: 'a', weight: 5, accent: false },
-    { hex: '#b', name: 'b', weight: 5, accent: true }
-  ]);
-  assertEqual(r.colors[0].accent, false, 'first accent preserved');
-  assertEqual(r.colors[1].accent, true, 'second accent preserved');
+test('ADR 0017: prioritiesFromOrder — defensive against non-array input', () => {
+  const { prioritiesFromOrder } = require(path.join(PROJECT_ROOT, 'server.js'));
+  for (const bad of [null, undefined, 'not an array', 42]) {
+    const r = prioritiesFromOrder(bad);
+    assertEqual(r.priorities.length, 0, `${JSON.stringify(bad)} → empty priorities`);
+    assertEqual(r.displayPct.length, 0, `${JSON.stringify(bad)} → empty displayPct`);
+  }
 });
 
-test('ADR 0014: normalizeColorWeights — defensive against bad input (non-arrays, garbage weights)', () => {
-  const { normalizeColorWeights } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // Non-array input → empty output (never throws)
-  const r1 = normalizeColorWeights(null);
-  assertEqual(r1.totalWeight, 0, 'null → empty');
-  const r2 = normalizeColorWeights(undefined);
-  assertEqual(r2.totalWeight, 0, 'undefined → empty');
-  const r3 = normalizeColorWeights('not an array');
-  assertEqual(r3.totalWeight, 0, 'string → empty');
-  // Garbage weight values are clamped to the default (validators at the
-  // boundary already reject these; normalizeColorWeights is defense in
-  // depth so the dashboard can never see NaN fractions).
-  const r4 = normalizeColorWeights([{ hex: '#a', name: 'a', weight: 0, accent: false }]);
-  assertEqual(r4.totalWeight, 5, 'weight 0 clamped to default 5');
-  assertEqual(r4.displayPct[0], 100, 'single color → 100%');
-  const r5 = normalizeColorWeights([{ hex: '#a', name: 'a', weight: NaN, accent: false }]);
-  assertEqual(r5.totalWeight, 5, 'NaN weight clamped to default 5');
-  const r6 = normalizeColorWeights([
-    { hex: '#a', name: 'a', weight: 'heavy', accent: false },
-    { hex: '#b', name: 'b', weight: -1, accent: false }
-  ]);
-  assertEqual(r6.totalWeight, 10, 'string weight + negative both clamped to default 5');
-});
-
-// isPaletteUnweighted — the "pure legacy" gate
-test('ADR 0014: isPaletteUnweighted — default palette (no customization) is unweighted', () => {
-  const { isPaletteUnweighted, DEFAULT_COLOR_WEIGHT, DEFAULT_ACCENT_MAX_MENTIONS } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const palette = {
-    colors: [
-      { hex: '#a', name: 'a', weight: DEFAULT_COLOR_WEIGHT, accent: false },
-      { hex: '#b', name: 'b', weight: DEFAULT_COLOR_WEIGHT, accent: false }
-    ],
-    accent_max_mentions: DEFAULT_ACCENT_MAX_MENTIONS
-  };
-  assertEqual(isPaletteUnweighted(palette), true, 'all defaults → unweighted');
-});
-
-test('ADR 0014: isPaletteUnweighted — any non-default weight, accent, or cap flips to weighted', () => {
-  const { isPaletteUnweighted, DEFAULT_COLOR_WEIGHT, DEFAULT_ACCENT_MAX_MENTIONS } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const base = {
-    colors: [
-      { hex: '#a', name: 'a', weight: DEFAULT_COLOR_WEIGHT, accent: false },
-      { hex: '#b', name: 'b', weight: DEFAULT_COLOR_WEIGHT, accent: false }
-    ],
-    accent_max_mentions: DEFAULT_ACCENT_MAX_MENTIONS
-  };
-  assertEqual(isPaletteUnweighted({ ...base, colors: [{ ...base.colors[0], weight: 7 }, base.colors[1]] }), false, 'one non-default weight → weighted');
-  assertEqual(isPaletteUnweighted({ ...base, colors: [{ ...base.colors[0], accent: true }, base.colors[1]] }), false, 'one accent → weighted');
-  assertEqual(isPaletteUnweighted({ ...base, accent_max_mentions: 3 }), false, 'non-default cap → weighted');
-});
-
-test('ADR 0014: isPaletteUnweighted — empty palette is unweighted', () => {
-  const { isPaletteUnweighted } = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertEqual(isPaletteUnweighted(null), true, 'null');
-  assertEqual(isPaletteUnweighted({}), true, 'no colors');
-  assertEqual(isPaletteUnweighted({ colors: [] }), true, 'empty colors');
-});
-
-// buildColorBudgetBlock — the deterministic text injected into Stage 2
-test('ADR 0014: buildColorBudgetBlock — returns empty for missing / empty / unweighted palettes', () => {
+// buildColorBudgetBlock — now emits "priority N" labels + 1/N shares
+test('ADR 0017: buildColorBudgetBlock — returns empty for missing / empty palette', () => {
   const { buildColorBudgetBlock } = require(path.join(PROJECT_ROOT, 'server.js'));
   assertEqual(buildColorBudgetBlock(null), '', 'null');
   assertEqual(buildColorBudgetBlock({}), '', 'no colors');
   assertEqual(buildColorBudgetBlock({ colors: [] }), '', 'empty colors');
-  // Pure default (no user customization) → empty (ADR 0014 §4 "pure legacy")
-  assertEqual(buildColorBudgetBlock({
-    colors: [
-      { hex: '#a', name: 'a', weight: 5, accent: false },
-      { hex: '#b', name: 'b', weight: 5, accent: false }
-    ],
-    accent_max_mentions: 2
-  }), '', 'all defaults → empty (pure legacy)');
 });
 
-test('ADR 0014: buildColorBudgetBlock — uneven weights produce the documented format', () => {
+test('ADR 0017: buildColorBudgetBlock — priority labels + uniform shares replace percentages', () => {
   const { buildColorBudgetBlock } = require(path.join(PROJECT_ROOT, 'server.js'));
   const block = buildColorBudgetBlock({
     colors: [
-      { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
-      { hex: '#7c2d12', name: 'deep brown', weight: 2, accent: false }
+      { hex: '#d97706', name: 'burnt orange' },
+      { hex: '#7c2d12', name: 'deep brown' },
+      { hex: '#dc2626', name: 'signal red' }
     ],
     accent_max_mentions: 2
   });
   assertTrue(block.startsWith('STRENGTH:'), 'opens with STRENGTH preamble (ADR 0016)');
   assertTrue(block.includes('Color usage budget'), 'contains budget header');
-  assertTrue(block.includes('burnt orange #d97706: 80%'), 'first color 80%');
-  assertTrue(block.includes('deep brown #7c2d12: 20%'), 'second color 20%');
-  assertTrue(block.includes('Sum: 100%'), 'sum line present');
+  assertTrue(block.includes('mention colors top-to-bottom in palette order'),
+    'header instructs top-to-bottom ordering (ADR 0017)');
+  // Top color is priority 1; uniform 1/3 share.
+  assertTrue(block.includes('burnt orange #d97706: priority 1 (~33% share)'),
+    'top color labelled priority 1 (~33% share)');
+  assertTrue(block.includes('deep brown #7c2d12: priority 2 (~33% share)'),
+    'second color labelled priority 2 (~33% share)');
+  assertTrue(block.includes('signal red #dc2626: priority 3 (~33% share)'),
+    'third color labelled priority 3 (~33% share)');
+  assertTrue(block.includes('Sum: 99% (rounded)'), 'sum line labels rounding honestly');
   // No accents → no cap note
   assertTrue(!block.includes('accent cap'), 'no accent cap when no accents');
 });
 
-test('ADR 0014: buildColorBudgetBlock — accent colors get the (ACCENT — mention at most N times) clause', () => {
+test('ADR 0017: buildColorBudgetBlock — accent colors get the (ACCENT — mention at most N times) clause', () => {
   const { buildColorBudgetBlock } = require(path.join(PROJECT_ROOT, 'server.js'));
   const block = buildColorBudgetBlock({
     colors: [
-      { hex: '#d97706', name: 'burnt orange', weight: 5, accent: false },
-      { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+      { hex: '#d97706', name: 'burnt orange' },
+      { hex: '#dc2626', name: 'signal red', accent: true }
     ],
     accent_max_mentions: 2
   });
-  assertTrue(block.includes('signal red #dc2626: 50% (ACCENT — mention at most 2 times total'),
+  assertTrue(block.includes('signal red #dc2626: priority 2 (~50% share) (ACCENT — mention at most 2 times total'),
               'accent tag with singular/plural-correct cap phrasing');
-  assertTrue(block.includes('Sum: 100% (accent cap: 2 mentions)'), 'sum line includes accent cap');
+  assertTrue(block.includes('Sum: 100% (accent cap: 2 mentions)'),
+    'sum line includes accent cap when accent present');
 });
 
-test('ADR 0014: buildColorBudgetBlock — singular vs plural in accent phrasing', () => {
+test('ADR 0017: buildColorBudgetBlock — singular vs plural in accent phrasing', () => {
   const { buildColorBudgetBlock } = require(path.join(PROJECT_ROOT, 'server.js'));
   const block1 = buildColorBudgetBlock({
-    colors: [{ hex: '#d97706', name: 'a', weight: 5, accent: true }],
+    colors: [{ hex: '#d97706', name: 'a', accent: true }],
     accent_max_mentions: 1
   });
   assertTrue(block1.includes('mention at most 1 time total'), 'singular "time"');
   assertTrue(block1.includes('accent cap: 1 mention'), 'singular "mention"');
 });
 
-// measureColorDistribution — the dashboard's source of truth
-test('ADR 0014: measureColorDistribution — empty prompt returns zeros', () => {
+// measureColorDistribution — same logic as before (priority-aware strict
+// checks in computeStrictPass; counts/measurement unchanged)
+test('ADR 0017: measureColorDistribution — empty prompt returns zeros', () => {
   const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const m = measureColorDistribution('', { colors: [{ hex: '#d97706', name: 'a', weight: 5, accent: false }] });
+  const m = measureColorDistribution('', { colors: [{ hex: '#d97706', name: 'a' }] });
   assertEqual(m.totalMentions, 0, 'no mentions');
   assertEqual(m.totalWords, 0, 'no words');
   assertEqual(m.counts.length, 1, 'one color in counts (zero count)');
@@ -1786,39 +1667,37 @@ test('ADR 0014: measureColorDistribution — empty prompt returns zeros', () => 
   assertTrue(typeof m.measuredAt === 'string', 'measuredAt set');
 });
 
-test('ADR 0014: measureColorDistribution — counts name occurrences case-insensitively', () => {
+test('ADR 0017: measureColorDistribution — counts name occurrences case-insensitively', () => {
   const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
   const m = measureColorDistribution(
     'A burnt orange sky above burnt-orange fields and another BURNT ORANGE wash.',
-    { colors: [{ hex: '#d97706', name: 'burnt orange', weight: 5, accent: false }] }
+    { colors: [{ hex: '#d97706', name: 'burnt orange' }] }
   );
-  // All three occurrences are the same color, hyphen/case-normalized
   assertTrue(m.counts[0].nameCount >= 3, `at least 3 name hits (got ${m.counts[0].nameCount})`);
   assertEqual(m.counts[0].hexCount, 0, 'no hex literal in this prompt');
   assertEqual(m.totalMentions, m.counts[0].nameCount, 'totalMentions sums counts');
 });
 
-test('ADR 0014: measureColorDistribution — counts hex with and without leading #', () => {
+test('ADR 0017: measureColorDistribution — counts hex with and without leading #', () => {
   const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const palette = { colors: [{ hex: '#d97706', name: 'unique-xyz-name', weight: 5, accent: false }] };
+  const palette = { colors: [{ hex: '#d97706', name: 'unique-xyz-name' }] };
   const m1 = measureColorDistribution('Use #d97706 here.', palette);
   assertEqual(m1.counts[0].hexCount, 1, '"#d97706" counted once');
   const m2 = measureColorDistribution('Use d97706 here.', palette);
   assertEqual(m2.counts[0].hexCount, 1, '"d97706" (no #) counted once');
   const m3 = measureColorDistribution('#d97706 and d97706 together.', palette);
-  // Two distinct forms; the overlap subtraction prevents double-counting
   assertEqual(m3.counts[0].hexCount, 2, 'two distinct forms counted');
 });
 
-test('ADR 0014: measureColorDistribution — counts multiple colors in one prompt', () => {
+test('ADR 0017: measureColorDistribution — counts multiple colors in one prompt', () => {
   const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
   const m = measureColorDistribution(
     'Burnt orange dominates. The signal red peeks through. Deep brown grounds the rest. Burnt orange again.',
     {
       colors: [
-        { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
-        { hex: '#dc2626', name: 'signal red', weight: 5, accent: true },
-        { hex: '#7c2d12', name: 'deep brown', weight: 2, accent: false }
+        { hex: '#d97706', name: 'burnt orange' },
+        { hex: '#dc2626', name: 'signal red', accent: true },
+        { hex: '#7c2d12', name: 'deep brown' }
       ]
     }
   );
@@ -1829,7 +1708,7 @@ test('ADR 0014: measureColorDistribution — counts multiple colors in one promp
   assertTrue(m.totalWords > 0, 'word count populated');
 });
 
-test('ADR 0014: measureColorDistribution — empty palette returns zero counts but reports words', () => {
+test('ADR 0017: measureColorDistribution — empty palette returns zero counts but reports words', () => {
   const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
   const m = measureColorDistribution('A short prompt.', { colors: [] });
   assertEqual(m.counts.length, 0, 'no counts');
@@ -1837,42 +1716,97 @@ test('ADR 0014: measureColorDistribution — empty palette returns zero counts b
   assertEqual(m.totalWords, 3, 'three words');
 });
 
-// Validation pipeline — extended validatePaletteColorsFlexible accepts
-// optional weight/accent, validatePalette accepts accent_max_mentions
-test('ADR 0014: validatePaletteColorsFlexible accepts optional weight + accent on input', () => {
+// computeStrictPass — priority-derived expected counts
+test('ADR 0017: computeStrictPass — priority 1 (position 0) expects ≥2 mentions, others ≥1', () => {
+  const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // Top color mentioned twice → strict_pass true.
+  // Lower-priority colors each mentioned once → strict_pass true.
+  const palette = {
+    strength: 'strict',
+    accent_max_mentions: 2,
+    colors: [
+      { hex: '#cc3344', name: 'Crimson' },
+      { hex: '#f4e9d8', name: 'Bone white' },
+      { hex: '#3b82f6', name: 'Ocean blue' }
+    ]
+  };
+  const prompt = 'Crimson anchors the composition. Crimson once more. Bone white scatters in. Ocean blue drifts.';
+  const result = measureColorDistribution(prompt, palette);
+  assertEqual(result.strict_pass, true,
+    `strict_pass true (violations: ${JSON.stringify(result.strict_violations)})`);
+  assertEqual(result.strict_violations.length, 0, 'no violations');
+});
+
+test('ADR 0017: computeStrictPass — non-accent at position 0 with 1 mention → strict_pass false', () => {
+  const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    strength: 'strict',
+    accent_max_mentions: 2,
+    colors: [
+      { hex: '#cc3344', name: 'Crimson' },
+      { hex: '#f4e9d8', name: 'Bone white' }
+    ]
+  };
+  // Top color mentioned only once → expected_min=2, under_min violation.
+  const prompt = 'Crimson is here. Bone white there.';
+  const result = measureColorDistribution(prompt, palette);
+  assertEqual(result.strict_pass, false, 'priority 1 with 1 mention → under_min');
+  assertTrue(result.strict_violations.some((v) => v.name === 'Crimson' && v.reason === 'under_min'),
+    'Crimson violation reason is under_min');
+});
+
+test('ADR 0017: computeStrictPass — non-accent at position ≥ 1 with 1 mention → strict_pass true', () => {
+  const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    strength: 'strict',
+    accent_max_mentions: 2,
+    colors: [
+      { hex: '#cc3344', name: 'Crimson' },
+      { hex: '#f4e9d8', name: 'Bone white' },
+      { hex: '#3b82f6', name: 'Ocean blue' }
+    ]
+  };
+  // Crimson twice (covers priority-1 min=2). Bone white + ocean blue once each (priority-1 min=1).
+  const prompt = 'Crimson, crimson — and bone white. Then ocean blue drifts.';
+  const result = measureColorDistribution(prompt, palette);
+  assertEqual(result.strict_pass, true,
+    `strict_pass true (violations: ${JSON.stringify(result.strict_violations)})`);
+});
+
+// Validation pipeline — weight is forbidden; accent-only is preserved.
+test('ADR 0017: validatePaletteColorsFlexible accepts colors without weight (no weight field present)', () => {
   const { validatePaletteColorsFlexible } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // No weight/accent — old behaviour preserved
   const r1 = validatePaletteColorsFlexible([{ hex: '#d97706', name: 'a' }]);
   assertEqual(r1.error, null, 'no extra fields → ok');
-  assertEqual(r1.colors[0].weight, undefined, 'weight not added to output');
+  assertEqual(r1.colors[0].weight, undefined, 'weight NOT added to output');
   assertEqual(r1.colors[0].accent, undefined, 'accent not added to output');
-  // With weight + accent
+  // With accent only (no weight)
   const r2 = validatePaletteColorsFlexible([
-    { hex: '#d97706', name: 'a', weight: 7, accent: true },
-    { hex: '#7c2d12', name: 'b', weight: 3, accent: false }
+    { hex: '#d97706', name: 'a', accent: true },
+    { hex: '#7c2d12', name: 'b', accent: false }
   ]);
-  assertEqual(r2.error, null, 'valid weight/accent → ok');
-  assertEqual(r2.colors[0].weight, 7, 'weight 7 round-tripped');
+  assertEqual(r2.error, null, 'accent-only → ok');
   assertEqual(r2.colors[0].accent, true, 'accent true round-tripped');
-  assertEqual(r2.colors[1].weight, 3, 'weight 3 round-tripped');
   assertEqual(r2.colors[1].accent, false, 'accent false round-tripped');
 });
 
-test('ADR 0014: validatePaletteColorsFlexible rejects invalid weight / accent', () => {
+test('ADR 0017: validatePaletteColorsFlexible rejects weight on a color (400)', () => {
   const { validatePaletteColorsFlexible } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // Out-of-range weight
-  const r1 = validatePaletteColorsFlexible([{ hex: '#d97706', name: 'a', weight: 11 }]);
-  assertTrue(r1.error && r1.error.includes('colors[0].weight'), 'weight 11 error mentions index');
-  // Non-integer weight
-  const r2 = validatePaletteColorsFlexible([{ hex: '#d97706', name: 'a', weight: 5.5 }]);
-  assertTrue(r2.error && r2.error.includes('colors[0].weight'), 'weight 5.5 error mentions index');
-  // Non-boolean accent
+  const r1 = validatePaletteColorsFlexible([{ hex: '#d97706', name: 'a', weight: 5 }]);
+  assertTrue(r1.error && r1.error.includes('colors[0].weight'),
+    'weight field error mentions colors[0].weight');
+  assertTrue(/weight is no longer accepted/.test(r1.error),
+    'error explains weight is deprecated');
+  // Even a valid-looking integer is rejected — write path is "weight-free".
+  const r2 = validatePaletteColorsFlexible([{ hex: '#d97706', name: 'a', weight: 1 }]);
+  assertTrue(r2.error !== null, 'weight 1 still rejected');
+  // Non-boolean accent still rejected (regression on accent validation).
   const r3 = validatePaletteColorsFlexible([{ hex: '#d97706', name: 'a', accent: 'yes' }]);
   assertTrue(r3.error && r3.error.includes('colors[0].accent'), 'accent string error mentions index');
   assertTrue(r3.error.includes('boolean'), 'accent error mentions type');
 });
 
-test('ADR 0014: validatePalette rejects invalid accent_max_mentions on palette body', () => {
+test('ADR 0017: validatePalette rejects invalid accent_max_mentions on palette body', () => {
   const { validatePalette } = require(path.join(PROJECT_ROOT, 'server.js'));
   const base = validPaletteBody();
   const r1 = validatePalette({ ...base, accent_max_mentions: 6 });
@@ -1886,11 +1820,8 @@ test('ADR 0014: validatePalette rejects invalid accent_max_mentions on palette b
   assertTrue(r4 !== null, 'cap 2.5 rejected (non-integer)');
 });
 
-test('ADR 0014: validatePaletteEdit accepts partial body with accent_max_mentions', () => {
+test('ADR 0017: validatePaletteEdit accepts partial body with accent_max_mentions', () => {
   const { validatePaletteEdit } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // accent_max_mentions alone is enough for a valid edit (existing rule:
-  // at least one of name/colors — we extend it to also include
-  // accent_max_mentions).
   const r1 = validatePaletteEdit({ accent_max_mentions: 3 }, { existingNames: new Set() });
   assertEqual(r1, null, 'accent_max_mentions alone is valid');
   const r2 = validatePaletteEdit({ name: 'x', accent_max_mentions: 3 }, { existingNames: new Set() });
@@ -1899,92 +1830,86 @@ test('ADR 0014: validatePaletteEdit accepts partial body with accent_max_mention
   assertTrue(r3 !== null, 'out-of-range accent_max_mentions rejected');
 });
 
-// applyPaletteUpdate + snapshotPalette round-trip the new fields
-test('ADR 0014: applyPaletteUpdate applies accent_max_mentions when present', () => {
+test('ADR 0017: applyPaletteUpdate applies accent_max_mentions when present', () => {
   const { applyPaletteUpdate } = require(path.join(PROJECT_ROOT, 'server.js'));
   const p = { name: 'p', colors: [{ hex: '#a', name: 'a' }], accent_max_mentions: 2 };
   applyPaletteUpdate(p, { accent_max_mentions: 4 });
   assertEqual(p.accent_max_mentions, 4, 'cap updated');
-  // Invalid value rejected, palette untouched
   const before = p.accent_max_mentions;
   const err = applyPaletteUpdate(p, { accent_max_mentions: 99 });
   assertTrue(err !== null, 'invalid cap rejected');
   assertEqual(p.accent_max_mentions, before, 'palette unchanged on rejection');
 });
 
-test('ADR 0014: applyPaletteUpdate applies per-color weight/accent from validatePaletteColorsFlexible output', () => {
-  const { applyPaletteUpdate, validatePaletteColorsFlexible } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const r = validatePaletteColorsFlexible([
-    { hex: '#d97706', name: 'a', weight: 8, accent: true },
-    { hex: '#7c2d12', name: 'b', weight: 2, accent: false }
-  ]);
-  const p = { name: 'p', colors: [{ hex: '#000', name: 'old' }] };
-  const err = applyPaletteUpdate(p, { colors: r.colors });
-  assertEqual(err, null, 'apply succeeds');
-  assertEqual(p.colors[0].weight, 8, 'weight 8 applied');
-  assertEqual(p.colors[0].accent, true, 'accent true applied');
-  assertEqual(p.colors[1].weight, 2, 'weight 2 applied');
-  assertEqual(p.colors[1].accent, false, 'accent false applied');
-});
-
-test('ADR 0014: snapshotPalette captures weight + accent + accent_max_mentions for history restore', () => {
+test('ADR 0017: snapshotPalette captures accent + accent_max_mentions + placement', () => {
   const { snapshotPalette } = require(path.join(PROJECT_ROOT, 'server.js'));
   const palette = {
     name: 'Sunset',
     colors: [
-      { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
-      { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+      { hex: '#d97706', name: 'burnt orange' },
+      { hex: '#dc2626', name: 'signal red', accent: true, placement: 'upper-left quadrant' }
     ],
     accent_max_mentions: 3,
+    strength: 'strict',
     history: []
   };
   const snap = snapshotPalette(palette);
-  assertEqual(snap.colors[0].weight, 8, 'v1 captures weight 8');
-  assertEqual(snap.colors[1].accent, true, 'v1 captures accent true');
-  assertEqual(snap.accent_max_mentions, 3, 'v1 captures accent_max_mentions');
+  // ADR 0017: weight NOT captured.
+  assertEqual(snap.colors[0].weight, undefined, 'weight NOT captured (ADR 0017)');
+  assertEqual(snap.colors[1].accent, true, 'accent captured');
+  assertEqual(snap.colors[1].placement, 'upper-left quadrant', 'placement captured');
+  assertEqual(snap.accent_max_mentions, 3, 'accent_max_mentions captured');
+  assertEqual(snap.strength, 'strict', 'strength captured');
 });
 
-// readPalettes synthesis — legacy palette gets the new defaults
-test('ADR 0014: readPalettes synthesises weight + accent defaults for legacy colors on disk', () => {
+// readPalettes synthesis — old weight-bearing palettes are normalized
+// to the weightless shape. Position (order) carries the priority.
+test('ADR 0017: readPalettes strips legacy weight from pre-ADR-0017 disk entries', () => {
   const fs2 = require('fs');
   const path2 = require('path');
   const tmpFile = path2.join(PROJECT_ROOT, 'data', 'palettes.json');
   const before = fs2.existsSync(tmpFile) ? fs2.readFileSync(tmpFile, 'utf8') : '[]';
   try {
-    // Hand-craft a "pre-ADR 0014" palette (no weight/accent per color,
-    // no palette-level accent_max_mentions) and write it to disk.
+    // Hand-craft a pre-ADR-0017 palette (carries weight 8 on every color).
     fs2.writeFileSync(tmpFile, JSON.stringify([{
       id: 'palette_legacy00000001',
-      name: 'Legacy palette',
-      colors: [{ hex: '#d97706', name: 'burnt orange' }],
+      name: 'Legacy weighted',
+      colors: [{ hex: '#d97706', name: 'burnt orange', weight: 8, accent: false }],
       source_run_id: 'run_0000000000000001',
       source_preset_id: 'preset_x',
       created_at: '2026-01-01T00:00:00.000Z',
+      accent_max_mentions: 2,
       history: []
     }]));
-    const { readPalettes, DEFAULT_COLOR_WEIGHT, DEFAULT_ACCENT_MAX_MENTIONS } =
+    const { readPalettes, DEFAULT_ACCENT_MAX_MENTIONS } =
       require(path.join(PROJECT_ROOT, 'server.js'));
     const palettes = readPalettes();
     const legacy = palettes.find((p) => p.id === 'palette_legacy00000001');
     assertTrue(!!legacy, 'legacy palette survives read');
-    assertEqual(legacy.colors[0].weight, DEFAULT_COLOR_WEIGHT, 'weight synthesised to default');
+    // Weight must NOT echo back — the shape is now weightless.
+    assertEqual(legacy.colors[0].weight, undefined,
+      'legacy weight stripped from read output');
+    // Accent + cap synthesize normally.
     assertEqual(legacy.colors[0].accent, false, 'accent synthesised to false');
-    assertEqual(legacy.accent_max_mentions, DEFAULT_ACCENT_MAX_MENTIONS, 'cap synthesised to default');
+    assertEqual(legacy.accent_max_mentions, DEFAULT_ACCENT_MAX_MENTIONS,
+      'cap synthesised to default');
   } finally {
     fs2.writeFileSync(tmpFile, before, 'utf8');
   }
 });
 
-test('ADR 0014: readPalettes keeps explicit weight/accent values that are already valid', () => {
+test('ADR 0017: readPalettes preserves accent + placement from on-disk entries', () => {
   const fs2 = require('fs');
   const path2 = require('path');
   const tmpFile = path2.join(PROJECT_ROOT, 'data', 'palettes.json');
   const before = fs2.existsSync(tmpFile) ? fs2.readFileSync(tmpFile, 'utf8') : '[]';
   try {
     fs2.writeFileSync(tmpFile, JSON.stringify([{
-      id: 'palette_weighted000001',
-      name: 'Weighted palette',
-      colors: [{ hex: '#dc2626', name: 'signal red', weight: 9, accent: true }],
+      id: 'palette_ordered000001',
+      name: 'Ordered palette',
+      colors: [
+        { hex: '#dc2626', name: 'signal red', accent: true, placement: 'bottom right' }
+      ],
       source_run_id: 'run_0000000000000002',
       source_preset_id: 'preset_x',
       created_at: '2026-01-01T00:00:00.000Z',
@@ -1993,50 +1918,17 @@ test('ADR 0014: readPalettes keeps explicit weight/accent values that are alread
     }]));
     const { readPalettes } = require(path.join(PROJECT_ROOT, 'server.js'));
     const palettes = readPalettes();
-    const weighted = palettes.find((p) => p.id === 'palette_weighted000001');
-    assertEqual(weighted.colors[0].weight, 9, 'weight 9 preserved');
-    assertEqual(weighted.colors[0].accent, true, 'accent true preserved');
-    assertEqual(weighted.accent_max_mentions, 4, 'cap 4 preserved');
+    const ordered = palettes.find((p) => p.id === 'palette_ordered000001');
+    assertEqual(ordered.colors[0].accent, true, 'accent true preserved');
+    assertEqual(ordered.colors[0].placement, 'bottom right', 'placement preserved');
+    assertEqual(ordered.accent_max_mentions, 4, 'cap 4 preserved');
   } finally {
     fs2.writeFileSync(tmpFile, before, 'utf8');
   }
 });
 
-test('ADR 0014: readPalettes clamps invalid on-disk weight/accent values to defaults (defense in depth)', () => {
-  const fs2 = require('fs');
-  const path2 = require('path');
-  const tmpFile = path2.join(PROJECT_ROOT, 'data', 'palettes.json');
-  const before = fs2.existsSync(tmpFile) ? fs2.readFileSync(tmpFile, 'utf8') : '[]';
-  try {
-    fs2.writeFileSync(tmpFile, JSON.stringify([{
-      id: 'palette_garbage00001',
-      name: 'Garbage weighted',
-      colors: [
-        { hex: '#111111', name: 'a', weight: 99, accent: 'maybe' },
-        { hex: '#222222', name: 'b', weight: 0.5, accent: 1 }
-      ],
-      source_run_id: 'run_0000000000000003',
-      source_preset_id: 'preset_x',
-      created_at: '2026-01-01T00:00:00.000Z',
-      accent_max_mentions: 999,
-      history: []
-    }]));
-    const { readPalettes, DEFAULT_COLOR_WEIGHT } = require(path.join(PROJECT_ROOT, 'server.js'));
-    const palettes = readPalettes();
-    const g = palettes.find((p) => p.id === 'palette_garbage00001');
-    assertEqual(g.colors[0].weight, DEFAULT_COLOR_WEIGHT, 'weight 99 clamped to default');
-    assertEqual(g.colors[0].accent, false, 'accent "maybe" clamped to false');
-    assertEqual(g.colors[1].weight, DEFAULT_COLOR_WEIGHT, 'weight 0.5 clamped to default');
-    assertEqual(g.colors[1].accent, false, 'accent 1 clamped to false');
-    assertEqual(g.accent_max_mentions, 2, 'cap 999 clamped to default 2');
-  } finally {
-    fs2.writeFileSync(tmpFile, before, 'utf8');
-  }
-});
-
-// HTTP integration: the existing POST /api/palettes still works with
-// the new optional fields; the first PUT normalises the on-disk shape
-test('ADR 0014: POST /api/palettes round-trips weight + accent + accent_max_mentions', async () => {
+// HTTP integration: ADR 0017 — weight is forbidden on the write path.
+test('ADR 0017: POST /api/palettes round-trips accent + accent_max_mentions (weight forbidden)', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
   const srv = await startTestServer();
@@ -2047,18 +1939,18 @@ test('ADR 0014: POST /api/palettes round-trips weight + accent + accent_max_ment
       body: JSON.stringify({
         ...validPaletteBody(),
         colors: [
-          { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
-          { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+          { hex: '#d97706', name: 'burnt orange', accent: false },
+          { hex: '#dc2626', name: 'signal red', accent: true }
         ],
         accent_max_mentions: 3
       })
     });
     assertEqual(r.status, 201, 'POST → 201');
-    assertEqual(r.body.data.colors[0].weight, 8, 'weight 8 stored');
+    assertEqual(r.body.data.colors[0].weight, undefined, 'weight NOT stored (ADR 0017)');
     assertEqual(r.body.data.colors[1].accent, true, 'accent true stored');
     assertEqual(r.body.data.accent_max_mentions, 3, 'accent_max_mentions 3 stored');
-    // history v1 also captures the weighting state (so Restore is faithful)
-    assertEqual(r.body.data.history[0].colors[0].weight, 8, 'history v1 captures weight');
+    // history v1 captures the order state.
+    assertEqual(r.body.data.history[0].colors[0].weight, undefined, 'history v1 has NO weight');
     assertEqual(r.body.data.history[0].accent_max_mentions, 3, 'history v1 captures cap');
   } finally {
     await srv.close();
@@ -2066,17 +1958,18 @@ test('ADR 0014: POST /api/palettes round-trips weight + accent + accent_max_ment
   }
 });
 
-test('ADR 0014: POST /api/palettes rejects invalid weight on a color', async () => {
+test('ADR 0017: POST /api/palettes rejects any weight on a color (400)', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
   const srv = await startTestServer();
   try {
+    // Even the in-range integer 5 is rejected — the field itself is forbidden.
     const r = await fetchJson(`${srv.base}/api/palettes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ...validPaletteBody(),
-        colors: [{ hex: '#d97706', name: 'a', weight: 99, accent: false }]
+        colors: [{ hex: '#d97706', name: 'a', weight: 5, accent: false }]
       })
     });
     assertEqual(r.status, 400, 'POST → 400');
@@ -2087,7 +1980,7 @@ test('ADR 0014: POST /api/palettes rejects invalid weight on a color', async () 
   }
 });
 
-test('ADR 0014: POST /api/palettes/custom accepts weight/accent/accent_max_mentions (no source_run_id required)', async () => {
+test('ADR 0017: POST /api/palettes/custom accepts accent/accent_max_mentions (no source_run_id required)', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
   const srv = await startTestServer();
@@ -2098,14 +1991,14 @@ test('ADR 0014: POST /api/palettes/custom accepts weight/accent/accent_max_menti
       body: JSON.stringify({
         name: 'Brand kit',
         colors: [
-          { hex: '#0f172a', name: 'ink', weight: 9, accent: false },
-          { hex: '#f59e0b', name: 'amber', weight: 4, accent: true }
+          { hex: '#0f172a', name: 'ink', accent: false },
+          { hex: '#f59e0b', name: 'amber', accent: true }
         ],
         accent_max_mentions: 1
       })
     });
     assertEqual(r.status, 201, 'POST custom → 201');
-    assertEqual(r.body.data.colors[0].weight, 9, 'weight 9 stored on custom');
+    assertEqual(r.body.data.colors[0].weight, undefined, 'weight NOT stored on custom (ADR 0017)');
     assertEqual(r.body.data.colors[1].accent, true, 'accent true stored on custom');
     assertEqual(r.body.data.accent_max_mentions, 1, 'cap 1 stored on custom');
   } finally {
@@ -2140,7 +2033,7 @@ test('ADR 0014: PUT /api/palettes/:id with accent_max_mentions updates + appends
   }
 });
 
-test('ADR 0014: PUT /api/palettes/:id with colors including weight/accent round-trips through history', async () => {
+test('ADR 0017: PUT /api/palettes/:id with colors round-trips order + accent (weight forbidden)', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
   const srv = await startTestServer();
@@ -2156,14 +2049,17 @@ test('ADR 0014: PUT /api/palettes/:id with colors including weight/accent round-
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         colors: [
-          { hex: '#0ea5e9', name: 'sea', weight: 7, accent: false },
-          { hex: '#dc2626', name: 'signal', weight: 5, accent: true }
+          { hex: '#0ea5e9', name: 'sea' },
+          { hex: '#dc2626', name: 'signal', accent: true }
         ]
       })
     });
     assertEqual(r.status, 200, 'PUT colors → 200');
-    assertEqual(r.body.data.colors[0].weight, 7, 'weight 7 round-tripped');
+    // Order round-tripped — top-of-list = priority 1.
+    assertEqual(r.body.data.colors[0].hex, '#0ea5e9', 'first color stays first (priority 1)');
     assertEqual(r.body.data.colors[1].accent, true, 'accent true round-tripped');
+    // Weight never appears.
+    assertEqual(r.body.data.colors[0].weight, undefined, 'weight NOT in stored body');
     assertEqual(r.body.data.history.length, 2, 'history grew');
     assertEqual(r.body.data.history[1].colors[1].accent, true, 'history v2 captures accent');
   } finally {
@@ -2172,39 +2068,65 @@ test('ADR 0014: PUT /api/palettes/:id with colors including weight/accent round-
   }
 });
 
-test('ADR 0014: POST /api/palettes/:id/restore/:version restores weight + accent_max_mentions too', async () => {
+test('ADR 0017: PUT /api/palettes/:id rejects any weight on a color (400)', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
   const srv = await startTestServer();
   try {
-    // v1: create with weighting
+    const create = await fetchJson(`${srv.base}/api/palettes`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(validPaletteBody())
+    });
+    const id = create.body.data.id;
+    const r = await fetchJson(`${srv.base}/api/palettes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        colors: [{ hex: '#d97706', name: 'a', weight: 8, accent: true }]
+      })
+    });
+    assertEqual(r.status, 400, 'PUT with weight → 400');
+    assertTrue(r.body.error.includes('colors[0].weight'), 'error names colors[0].weight');
+  } finally {
+    await srv.close();
+    restorePalettesFile(snapshot);
+  }
+});
+
+test('ADR 0017: POST /api/palettes/:id/restore/:version restores accent + accent_max_mentions (no weight on disk)', async () => {
+  const snapshot = snapshotPalettesFile();
+  resetPalettesFile();
+  const srv = await startTestServer();
+  try {
+    // v1: create with an accent + non-default cap
     const create = await fetchJson(`${srv.base}/api/palettes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ...validPaletteBody(),
-        colors: [{ hex: '#d97706', name: 'a', weight: 8, accent: true }],
+        colors: [{ hex: '#d97706', name: 'a', accent: true }],
         accent_max_mentions: 3
       })
     });
     const id = create.body.data.id;
-    // v2: PUT a default-weighted version (no accent, weight 5, cap 2)
+    // v2: PUT a cap-reduced version (accent stays, cap drops)
     await fetchJson(`${srv.base}/api/palettes/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        colors: [{ hex: '#d97706', name: 'a' }], // weight/accent default
         accent_max_mentions: 2
       })
     });
-    // Restore v1 → should bring back weight: 8, accent: true, cap: 3
+    // Restore v1 → cap rolls back to 3
     const restore = await fetchJson(`${srv.base}/api/palettes/${id}/restore/1`, {
       method: 'POST'
     });
     assertEqual(restore.status, 200, 'restore v1 → 200');
-    assertEqual(restore.body.data.colors[0].weight, 8, 'weight restored');
     assertEqual(restore.body.data.colors[0].accent, true, 'accent restored');
     assertEqual(restore.body.data.accent_max_mentions, 3, 'cap restored');
+    assertEqual(restore.body.data.colors[0].weight, undefined,
+      'restored body has no weight field (ADR 0017)');
     // A v3 entry is appended so the rollback is itself recorded
     assertEqual(restore.body.data.history.length, 3, 'history has v1, v2, v3');
   } finally {
@@ -3343,16 +3265,16 @@ test('End-to-end: save → apply → edit → restore → export → import (dat
   }
 });
 
-// ─── ADR 0014 — Phase 3: edit modal UI (weight slider + accent + preview bars) ─
+// ─── ADR 0017 — Phase 3: edit modal UI (priority chip + drag handle + accent + preview bars) ─
 //
-// Phase 3 ships the user-facing controls that drive ADR 0014's weighting
-// metadata: per-color weight slider (1-10), accent checkbox, palette-level
-// accent cap input, and a live "target distribution" bar chart under the
-// preview swatches. These tests assert the HTML template, CSS hooks, and
-// JS shape via file-string inspection — same pattern used for prior ADRs.
+// Phase 3 ships the user-facing controls that drive ADR 0017's order-based
+// priority: a per-row priority chip, drag handle for reordering, accent
+// checkbox, palette-level accent cap input, and a live "target distribution"
+// bar chart under the preview swatches. These tests assert the HTML
+// template, CSS hooks, and JS shape via file-string inspection.
 
-// HTML structure — the edit modal now carries the new controls
-test('ADR 0014: edit modal HTML has the accent-cap input + distribution bar container (Phase 3)', () => {
+// HTML structure — the edit modal carries the new controls + handles + chips
+test('ADR 0017: edit modal HTML has accent-cap input + distribution bar container + priority + handle', () => {
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
   assertTrue(/id="edit-palette-accent-max"/.test(html), 'accent-cap number input exists');
   assertTrue(/<label[^>]+for="edit-palette-accent-max"/.test(html),
@@ -3367,21 +3289,27 @@ test('ADR 0014: edit modal HTML has the accent-cap input + distribution bar cont
              'distribution bar container exists');
   assertTrue(/class="palette-preview__bars"/.test(html),
              'distribution container uses palette-preview__bars class');
-  assertTrue(/aria-label="Live target distribution as you adjust weights and accents"/.test(html),
+  assertTrue(/aria-label="Live target distribution as you reorder and flag accents"/.test(html),
              'distribution container has descriptive aria-label');
   assertTrue(/id="edit-palette-distribution-sum"/.test(html),
              'distribution sum annotation exists');
+  // SortableJS bundle is loaded.
+  assertTrue(/<script[^>]+src="\/sortable\.min\.js"/.test(html),
+             'sortable.min.js included');
 });
 
-test('ADR 0014: edit modal hint mentions weight + accent (Phase 3)', () => {
+test('ADR 0017: edit modal hint mentions reorder + accent (no weight)', () => {
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
   const hint = html.match(/<p[^>]+id="edit-palette-modal-hint"[^>]*>([\s\S]*?)<\/p>/);
   assertTrue(hint && hint[1], 'hint paragraph found');
-  assertTrue(/weight/i.test(hint[1]), 'hint mentions weight');
+  assertTrue(/drag/i.test(hint[1]) && /priority/i.test(hint[1]),
+    'hint mentions drag + priority');
   assertTrue(/accent/i.test(hint[1]), 'hint mentions accent');
+  assertTrue(!/per-color weight/i.test(hint[1]),
+    'hint no longer mentions per-color weight');
 });
 
-test('ADR 0014: edit modal accessible role/label structure preserved (Phase 3)', () => {
+test('ADR 0017: edit modal accessible role/label structure preserved', () => {
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
   assertTrue(/id="edit-palette-modal"[^>]*role="dialog"/.test(html),
              'modal still has role=dialog');
@@ -3389,17 +3317,20 @@ test('ADR 0014: edit modal accessible role/label structure preserved (Phase 3)',
              'modal still has aria-labelledby');
 });
 
-// CSS — selectors that Phase 3 introduces
-test('ADR 0014: stylesheet has --color-accent + accent / weight / distribution bar rules (Phase 3)', () => {
+// CSS — selectors that Phase 3 introduces (priority chip, drag handle)
+test('ADR 0017: stylesheet has accent / priority chip / drag handle / distribution bar rules', () => {
   const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
   assertTrue(/--color-accent:\s*#f59e0b/i.test(css), '--color-accent defined');
   assertTrue(/--color-accent-soft/.test(css), '--color-accent-soft defined');
   assertTrue(/\.edit-palette-color-row\[data-accent="true"\]/.test(css),
              'accent row visual treatment');
-  assertTrue(/\.edit-palette-color-row__weight/.test(css),
-             'weight slider rule');
+  assertTrue(/\.edit-palette-color-row__priority\b/.test(css),
+             'priority chip rule');
+  assertTrue(/\.edit-palette-color-row__handle\b/.test(css),
+             'drag handle rule');
   assertTrue(/\.edit-palette-color-row__accent\b/.test(css),
              'accent checkbox rule');
+  assertTrue(/\.sortable-ghost/.test(css), 'sortable ghost rule');
   assertTrue(/\.palette-preview__bar-row/.test(css),
              'distribution bar row rule');
   assertTrue(/\.palette-preview__bar-track/.test(css),
@@ -3412,15 +3343,21 @@ test('ADR 0014: stylesheet has --color-accent + accent / weight / distribution b
              'distribution sum annotation rule');
   assertTrue(/\.edit-palette-accent-cap-row/.test(css),
              'accent cap row rule');
+  // weight selector removed (ADR 0017)
+  assertTrue(!/\.edit-palette-color-row__weight/.test(css),
+             'weight slider CSS REMOVED');
   // Distinct from --accent (the UI blue)
   assertTrue(/--accent:\s*#3b82f6/.test(css), '--accent UI blue preserved');
 });
 
-// JS — buffer shape + render functions exist
-test('ADR 0014: app.js handles weight + accent + accent_max_mentions in the edit buffer (Phase 3)', () => {
+// JS — buffer shape + render functions exist for ADR 0017
+test('ADR 0017: app.js handles priority chip + drag handle + SortableJS + accent', () => {
   const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Server-mirrored helper kept under the same name to avoid
+  // renaming the call sites throughout the app; asserts of its
+  // behaviour live in the server-side tests.
   assertTrue(/clientNormalizeColorWeights/.test(js),
-             'client-side normalize helper exists');
+             'client-side priorities helper exists (name preserved)');
   assertTrue(/renderEditPaletteDistributionBars/.test(js),
              'distribution bar renderer exists');
   assertTrue(/editPaletteAccentMax/.test(js),
@@ -3431,18 +3368,32 @@ test('ADR 0014: app.js handles weight + accent + accent_max_mentions in the edit
              'distribution sum DOM cache entry exists');
   assertTrue(/data-accent="true"/.test(js),
              'data-accent attribute is set when accent is checked');
-  assertTrue(/\.type\s*=\s*['"]range['"]/.test(js),
-             'weight slider rendered as range input');
-  assertTrue(/\.type\s*=\s*['"]checkbox['"]/.test(js) && /edit-palette-color-row__accent/.test(js),
+  // Priority chip + drag handle are rendered as live DOM (not just
+  // declared in CSS) — assert the JS that produces them.
+  assertTrue(/edit-palette-color-row__priority/.test(js),
+             'priority chip class rendered in JS');
+  assertTrue(/edit-palette-color-row__handle/.test(js),
+             'drag handle class rendered in JS');
+  // SortableJS is initialized.
+  assertTrue(/Sortable\.create/.test(js),
+             'Sortable.create called for drag-and-drop');
+  assertTrue(/wireEditPaletteColorsSortable/.test(js),
+             'sortable wire helper exists');
+  // No weight input or weight slider rendered.
+  assertTrue(!/edit-palette-color-row__weight\b/.test(js),
+             'weight slider code REMOVED');
+  assertTrue(!/['"]range['"]/.test(js.split('\n').filter((l) => l.includes('edit-palette-color-row'))).valueOf(undefined),
+             'no range input rendered in palette rows');
+  // accent checkbox + accent_max_mentions still wired.
+  assertTrue(/['"]checkbox['"]/.test(js) && /edit-palette-color-row__accent/.test(js),
              'accent checkbox rendered');
   assertTrue(/accent_max_mentions/.test(js),
              'accent_max_mentions is sent in submit');
-  assertTrue(/\.min\s*=\s*['"]1['"]/.test(js) && /\.max\s*=\s*['"]10['"]/.test(js),
-             'slider min=1 max=10 in JS');
 });
 
-// HTTP round-trip — Phase 3 fields reach the server
-test('ADR 0014: PUT /api/palettes/:id accepts weight + accent + accent_max_mentions together (Phase 3 round-trip)', async () => {
+// HTTP round-trip — accent + accent_max_mentions reach the server.
+// (Weight is forbidden on the write path in ADR 0017.)
+test('ADR 0017: PUT /api/palettes/:id accepts accent + accent_max_mentions (weight forbidden)', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
   const srv = await startTestServer();
@@ -3459,22 +3410,22 @@ test('ADR 0014: PUT /api/palettes/:id accepts weight + accent + accent_max_menti
       body: JSON.stringify({
         name: 'Sunset palette v3',
         colors: [
-          { hex: '#0ea5e9', name: 'sea',   weight: 7, accent: false },
-          { hex: '#dc2626', name: 'alert', weight: 4, accent: true }
+          { hex: '#0ea5e9', name: 'sea' },
+          { hex: '#dc2626', name: 'alert', accent: true }
         ],
         accent_max_mentions: 1
       })
     });
     assertEqual(r.status, 200, 'PUT → 200');
     assertEqual(r.body.data.name, 'Sunset palette v3', 'name updated');
-    assertEqual(r.body.data.colors[0].weight, 7, 'weight 7 round-tripped');
-    assertEqual(r.body.data.colors[0].accent, false, 'accent false round-tripped');
-    assertEqual(r.body.data.colors[1].weight, 4, 'weight 4 round-tripped');
+    // First color has no accent declared → normalized to absent (undefined).
+    assertEqual(r.body.data.colors[0].accent, undefined,
+      'absent accent stays absent in normalized body');
     assertEqual(r.body.data.colors[1].accent, true, 'accent true round-tripped');
+    assertEqual(r.body.data.colors[0].weight, undefined, 'weight NOT in stored body');
     assertEqual(r.body.data.accent_max_mentions, 1, 'accent_max_mentions 1 round-tripped');
-    // history v2 captures all three new fields so Restore is faithful
     const v2 = r.body.data.history[r.body.data.history.length - 1];
-    assertEqual(v2.colors[0].weight, 7, 'history v2 captures weight');
+    assertEqual(v2.colors[0].weight, undefined, 'history v2 does NOT capture weight (ADR 0017)');
     assertEqual(v2.colors[1].accent, true, 'history v2 captures accent');
     assertEqual(v2.accent_max_mentions, 1, 'history v2 captures cap');
   } finally {
@@ -3681,8 +3632,8 @@ test('ADR 0014: GET /api/palettes/:id/distribution returns the latest telemetry 
       body: JSON.stringify({
         ...validPaletteBody(),
         colors: [
-          { hex: '#d97706', name: 'burnt orange', weight: 8, accent: false },
-          { hex: '#dc2626', name: 'signal red', weight: 5, accent: true }
+          { hex: '#d97706', name: 'burnt orange' },
+          { hex: '#dc2626', name: 'signal red', accent: true }
         ],
         accent_max_mentions: 2
       })
@@ -6027,7 +5978,7 @@ test('ADR 0016: DEFAULT_ZIMAGE_STAGE2_PROMPT includes rules 11 + 12 (strength + 
     'canonical prompt discusses placement regions');
 });
 
-test('ADR 0016: HTTP integration — POST /api/palettes accepts strength + placement', async () => {
+test('ADR 0017: HTTP integration — POST /api/palettes accepts strength + placement (weight rejected)', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
   const srv = await startTestServer();
@@ -6036,10 +5987,10 @@ test('ADR 0016: HTTP integration — POST /api/palettes accepts strength + place
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: 'i16 palette ' + Date.now(),
+        name: 'i17 palette ' + Date.now(),
         colors: [
-          { hex: '#cc3344', name: 'Crimson', weight: 8, accent: true, placement: 'upper-left quadrant' },
-          { hex: '#f4e9d8', name: 'Bone white', weight: 5, accent: false }
+          { hex: '#cc3344', name: 'Crimson', accent: true, placement: 'upper-left quadrant' },
+          { hex: '#f4e9d8', name: 'Bone white' }
         ],
         accent_max_mentions: 2,
         strength: 'strict'
@@ -6048,7 +5999,7 @@ test('ADR 0016: HTTP integration — POST /api/palettes accepts strength + place
     assertEqual(r.status, 201, `POST status 201 (got ${r.status})`);
     assertEqual(r.body.data.strength, 'strict', 'strength round-trips through POST');
     assertEqual(r.body.data.colors[0].placement, 'upper-left quadrant', 'placement round-trips through POST');
-    // Cleanup the palette we just created.
+    assertEqual(r.body.data.colors[0].weight, undefined, 'weight NOT stored (ADR 0017)');
     await fetch(`${srv.base}/api/palettes/${encodeURIComponent(r.body.data.id)}`, { method: 'DELETE' });
   } finally {
     await srv.close();
