@@ -25,6 +25,9 @@
     isGenerating: false,
     isPopulatingSubject: false,  // ADR 0004 — "Populate with AI" in flight
     isPopulatingCameraAngle: false,  // ADR 0008 — camera-angle "Populate with AI" in flight
+    isPopulatingActions: false,    // ADR 0018 — actions "Populate with AI" in flight
+    isPopulatingMood: false,       // ADR 0018 — mood "Populate with AI" in flight
+    isPopulatingLighting: false,   // ADR 0018 — lighting "Populate with AI" in flight
     editingPresetId: null,  // null when creating new
     selectedFieldSources: {},  // { [fieldName]: 'analysis' | 'preset' } (ADR 0002)
     palettes: [],               // ADR 0006 — saved color palettes
@@ -333,6 +336,31 @@
     contrast: 'Contrast'
   };
 
+  // ADR 0018 — Curated preset taxonomies for mood and lighting. These are
+  // a static, code-defined library of one-click descriptors that
+  // complement the AI "Populate with AI" button. They are intentionally
+  // NOT persisted (unlike saved directives, ADR 0009) because they are a
+  // canonical taxonomy shared by every user on every job. Each category
+  // is rendered as a labelled chip-group beneath the Populate-with-AI
+  // button; clicking a chip fills the field's input/textarea with the
+  // chip's label. The user is free to edit the value after clicking —
+  // the chip is a quick starting point, not a lock.
+  const MOOD_PRESETS = [
+    { category: 'Positive',     items: ['joyful', 'happy', 'playful', 'hopeful', 'serene', 'content', 'romantic', 'triumphant', 'whimsical'] },
+    { category: 'Reflective',   items: ['introspective', 'contemplative', 'melancholic', 'wistful', 'nostalgic', 'somber', 'lonely', 'pensive', 'brooding'] },
+    { category: 'Intense',      items: ['dramatic', 'tense', 'ominous', 'mysterious', 'anxious', 'urgent', 'fierce', 'defiant', 'restless'] },
+    { category: 'Atmospheric',  items: ['dreamlike', 'ethereal', 'surreal', 'mystical', 'magical', 'transcendent', 'cinematic'] },
+    { category: 'Still',        items: ['quiet', 'peaceful', 'calm', 'meditative', 'intimate', 'hushed', 'restrained'] }
+  ];
+
+  const LIGHTING_PRESETS = [
+    { category: 'Natural',      items: ['golden hour', 'blue hour', 'midday sun', 'overcast', 'dappled', 'twilight', 'dawn', 'harsh sun'] },
+    { category: 'Directional',  items: ['backlit', 'side-lit', 'top-down', 'underlit', 'rim-lit', 'edge-lit', 'silhouette'] },
+    { category: 'Quality',      items: ['soft diffused', 'hard shadows', 'harsh contrast', 'low-contrast', 'flat', 'specular'] },
+    { category: 'Stylized',     items: ['chiaroscuro', 'low-key', 'high-key', 'neon', 'candlelight', 'fireplace', 'streetlight', 'fluorescent'] },
+    { category: 'Studio',       items: ['studio softbox', 'three-point', 'ring light', 'Rembrandt', 'butterfly', 'split'] }
+  ];
+
   const openPresetModal = (preset = null) => {
     state.editingPresetId = preset ? preset.id : null;
     dom.presetModalTitle.textContent = preset ? 'Edit preset' : 'New preset';
@@ -537,6 +565,54 @@
 
   // ─── Analyze (Step 3) ─────────────────────────────────────────────────
 
+  /**
+   * ADR 0018 — Render a curated preset chip row for a single field.
+   * Builds a `<div class="preset-chips">` containing one chip-group
+   * per category in the supplied taxonomy. Each chip-group has a small
+   * category label followed by a wrap-flow row of clickable chips.
+   *
+   * Click handler: calls `applyPresetToField(fieldName, chip.label)`,
+   * which sets the field's DOM value (textarea or input[type="text"],
+   * whichever was rendered) and updates `state.currentAnalysis`.
+   * No persistence; no "selected" state; chips are a one-click
+   * starting point.
+   */
+  const renderPresetChips = (fieldName, taxonomy) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'preset-chips';
+    wrap.setAttribute('aria-label', `${fieldName} preset chips`);
+
+    taxonomy.forEach((group) => {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'preset-chip-group';
+
+      const label = document.createElement('span');
+      label.className = 'preset-chip-label';
+      label.textContent = group.category;
+      groupEl.appendChild(label);
+
+      const chipsRow = document.createElement('div');
+      chipsRow.className = 'preset-chip-row';
+
+      group.items.forEach((item) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'preset-chip';
+        chip.textContent = item;
+        chip.dataset.presetField = fieldName;
+        chip.dataset.presetValue = item;
+        chip.setAttribute('aria-label', `Set ${fieldName} to "${item}"`);
+        chip.addEventListener('click', () => applyPresetToField(fieldName, item));
+        chipsRow.appendChild(chip);
+      });
+
+      groupEl.appendChild(chipsRow);
+      wrap.appendChild(groupEl);
+    });
+
+    return wrap;
+  };
+
   const renderAnalysisEditor = (analysis) => {
     dom.analysisFields.innerHTML = '';
     const preset = state.presets.find((p) => p.id === state.selectedPresetId);
@@ -706,6 +782,123 @@
         actionWrap.appendChild(hint);
 
         row.appendChild(actionWrap);
+      }
+
+      // ADR 0018 — "Populate with AI" button directly beneath the actions
+      // textarea. Triggers a focused, actions-only re-analysis via
+      // /api/actions and updates the actions textarea value in-place.
+      // Mirrors the camera_angle button (ADR 0008) — no preset chips
+      // because actions are too image-specific for a curated taxonomy
+      // (ADR 0018 §5). The button is only rendered for the actions
+      // field; other fields are unaffected.
+      if (fieldName === 'actions') {
+        const actionWrap = document.createElement('div');
+        actionWrap.className = 'field-row__action';
+
+        const populateBtn = document.createElement('button');
+        populateBtn.type = 'button';
+        populateBtn.className = 'btn-secondary btn-populate-actions';
+        populateBtn.disabled = !state.currentFile || state.isPopulatingActions;
+        populateBtn.setAttribute('aria-label', 'Populate actions with AI actions-only re-analysis');
+
+        const btnText = document.createElement('span');
+        btnText.className = 'btn-text';
+        btnText.textContent = 'Populate with AI';
+        populateBtn.appendChild(btnText);
+
+        const btnSpinner = document.createElement('span');
+        btnSpinner.className = 'btn-spinner';
+        btnSpinner.hidden = true;
+        btnSpinner.setAttribute('aria-hidden', 'true');
+        populateBtn.appendChild(btnSpinner);
+
+        populateBtn.addEventListener('click', () => populateActionsWithAI(populateBtn));
+        actionWrap.appendChild(populateBtn);
+
+        const hint = document.createElement('span');
+        hint.className = 'field-action-hint';
+        hint.textContent = 'Re-analyses the image with a focused actions-only prompt.';
+        actionWrap.appendChild(hint);
+
+        row.appendChild(actionWrap);
+      }
+
+      // ADR 0018 — "Populate with AI" button + curated mood preset chips
+      // beneath the mood textarea. The button triggers a focused,
+      // mood-only re-analysis via /api/mood; the chips provide a
+      // zero-credit, one-click manual override that complements the AI
+      // option. Chips are static and code-defined (not persisted like
+      // saved directives, ADR 0009). The button and chips are only
+      // rendered for the mood field; other fields are unaffected.
+      if (fieldName === 'mood') {
+        const actionWrap = document.createElement('div');
+        actionWrap.className = 'field-row__action';
+
+        const populateBtn = document.createElement('button');
+        populateBtn.type = 'button';
+        populateBtn.className = 'btn-secondary btn-populate-mood';
+        populateBtn.disabled = !state.currentFile || state.isPopulatingMood;
+        populateBtn.setAttribute('aria-label', 'Populate mood with AI mood-only re-analysis');
+
+        const btnText = document.createElement('span');
+        btnText.className = 'btn-text';
+        btnText.textContent = 'Populate with AI';
+        populateBtn.appendChild(btnText);
+
+        const btnSpinner = document.createElement('span');
+        btnSpinner.className = 'btn-spinner';
+        btnSpinner.hidden = true;
+        btnSpinner.setAttribute('aria-hidden', 'true');
+        populateBtn.appendChild(btnSpinner);
+
+        populateBtn.addEventListener('click', () => populateMoodWithAI(populateBtn));
+        actionWrap.appendChild(populateBtn);
+
+        const hint = document.createElement('span');
+        hint.className = 'field-action-hint';
+        hint.textContent = 'Re-analyses the image with a focused mood-only prompt.';
+        actionWrap.appendChild(hint);
+
+        row.appendChild(actionWrap);
+
+        row.appendChild(renderPresetChips('mood', MOOD_PRESETS));
+      }
+
+      // ADR 0018 — "Populate with AI" button + curated lighting preset
+      // chips beneath the lighting input. Mirrors the mood block —
+      // button for AI re-analysis, chips for quick manual override.
+      if (fieldName === 'lighting') {
+        const actionWrap = document.createElement('div');
+        actionWrap.className = 'field-row__action';
+
+        const populateBtn = document.createElement('button');
+        populateBtn.type = 'button';
+        populateBtn.className = 'btn-secondary btn-populate-lighting';
+        populateBtn.disabled = !state.currentFile || state.isPopulatingLighting;
+        populateBtn.setAttribute('aria-label', 'Populate lighting with AI lighting-only re-analysis');
+
+        const btnText = document.createElement('span');
+        btnText.className = 'btn-text';
+        btnText.textContent = 'Populate with AI';
+        populateBtn.appendChild(btnText);
+
+        const btnSpinner = document.createElement('span');
+        btnSpinner.className = 'btn-spinner';
+        btnSpinner.hidden = true;
+        btnSpinner.setAttribute('aria-hidden', 'true');
+        populateBtn.appendChild(btnSpinner);
+
+        populateBtn.addEventListener('click', () => populateLightingWithAI(populateBtn));
+        actionWrap.appendChild(populateBtn);
+
+        const hint = document.createElement('span');
+        hint.className = 'field-action-hint';
+        hint.textContent = 'Re-analyses the image with a focused lighting-only prompt.';
+        actionWrap.appendChild(hint);
+
+        row.appendChild(actionWrap);
+
+        row.appendChild(renderPresetChips('lighting', LIGHTING_PRESETS));
       }
 
       // ADR 0006 — color section is the single home for palette actions:
@@ -973,6 +1166,137 @@
       btn.disabled = false;
       setButtonLoading(btn, false, 'Populate with AI');
     }
+  };
+
+  /**
+   * ADR 0018 — "Populate with AI" handler for the `actions` field.
+   * Re-uploads the current image to `/api/actions` (actions-only system
+   * prompt, independent of the active preset) and replaces the actions
+   * textarea value in place. Mirrors `populateCameraAngleWithAI`'s
+   * shape (ADR 0008) — single-attempt, no edit-prompt companion,
+   * 60-second timeout inherited from the server helper.
+   *
+   * Client-side "no image" guard: if `state.currentFile` is null when
+   * the button is clicked, surface a clear error and return without
+   * firing the network request. Prevents a 400 from the route.
+   */
+  const populateActionsWithAI = async (btn) => {
+    if (!state.currentFile) {
+      return showError('No image uploaded. Upload an image first.');
+    }
+    if (state.isPopulatingActions) return;
+
+    state.isPopulatingActions = true;
+    btn.disabled = true;
+    setButtonLoading(btn, true, 'Populating…');
+
+    const fd = new FormData();
+    fd.append('image', state.currentFile);
+
+    try {
+      const data = await apiCall('/api/actions', { method: 'POST', body: fd });
+      const actionsTextarea = dom.analysisFields.querySelector('textarea[data-field="actions"]');
+      if (actionsTextarea) actionsTextarea.value = data.actions;
+      if (state.currentAnalysis) state.currentAnalysis.actions = data.actions;
+      hideError();
+    } catch (e) {
+      showError(`Populate failed: ${e.message}`);
+    } finally {
+      state.isPopulatingActions = false;
+      btn.disabled = false;
+      setButtonLoading(btn, false, 'Populate with AI');
+    }
+  };
+
+  /**
+   * ADR 0018 — "Populate with AI" handler for the `mood` field.
+   * Re-uploads the current image to `/api/mood` (mood-only system prompt)
+   * and replaces the mood textarea value in place. Complements the
+   * curated mood preset chips (click a chip for a zero-credit quick
+   * override; click the button for an AI-derived description).
+   */
+  const populateMoodWithAI = async (btn) => {
+    if (!state.currentFile) {
+      return showError('No image uploaded. Upload an image first.');
+    }
+    if (state.isPopulatingMood) return;
+
+    state.isPopulatingMood = true;
+    btn.disabled = true;
+    setButtonLoading(btn, true, 'Populating…');
+
+    const fd = new FormData();
+    fd.append('image', state.currentFile);
+
+    try {
+      const data = await apiCall('/api/mood', { method: 'POST', body: fd });
+      const moodTextarea = dom.analysisFields.querySelector('textarea[data-field="mood"]');
+      if (moodTextarea) moodTextarea.value = data.mood;
+      if (state.currentAnalysis) state.currentAnalysis.mood = data.mood;
+      hideError();
+    } catch (e) {
+      showError(`Populate failed: ${e.message}`);
+    } finally {
+      state.isPopulatingMood = false;
+      btn.disabled = false;
+      setButtonLoading(btn, false, 'Populate with AI');
+    }
+  };
+
+  /**
+   * ADR 0018 — "Populate with AI" handler for the `lighting` field.
+   * Re-uploads the current image to `/api/lighting` (lighting-only
+   * system prompt) and replaces the lighting input value in place.
+   * Complements the curated lighting preset chips.
+   */
+  const populateLightingWithAI = async (btn) => {
+    if (!state.currentFile) {
+      return showError('No image uploaded. Upload an image first.');
+    }
+    if (state.isPopulatingLighting) return;
+
+    state.isPopulatingLighting = true;
+    btn.disabled = true;
+    setButtonLoading(btn, true, 'Populating…');
+
+    const fd = new FormData();
+    fd.append('image', state.currentFile);
+
+    try {
+      const data = await apiCall('/api/lighting', { method: 'POST', body: fd });
+      const lightingInput = dom.analysisFields.querySelector('input[data-field="lighting"]');
+      if (lightingInput) lightingInput.value = data.lighting;
+      if (state.currentAnalysis) state.currentAnalysis.lighting = data.lighting;
+      hideError();
+    } catch (e) {
+      showError(`Populate failed: ${e.message}`);
+    } finally {
+      state.isPopulatingLighting = false;
+      btn.disabled = false;
+      setButtonLoading(btn, false, 'Populate with AI');
+    }
+  };
+
+  /**
+   * ADR 0018 — Curated preset chip click handler. Sets the field's
+   * input/textarea value to the chip's label (a one-line descriptor)
+   * and updates `state.currentAnalysis[fieldName]` so the analysis
+   * snapshot stays in sync with the DOM. The user is free to edit
+   * the value after clicking — chips are a quick starting point,
+   * not a lock. Each click is independent (chips do not "stick" as
+   * selected); the user can chain chips or layer in their own words.
+   *
+   * The DOM lookup mirrors the populate handlers' pattern: query the
+   * rendered analysis editor by data-field attribute so the handler
+   * works regardless of whether the field was rendered as <textarea>
+   * (textarea fields like `mood`) or <input type="text"> (text fields
+   * like `lighting`).
+   */
+  const applyPresetToField = (fieldName, value) => {
+    const el = dom.analysisFields.querySelector(`[data-field="${fieldName}"]`);
+    if (!el) return;
+    el.value = value;
+    if (state.currentAnalysis) state.currentAnalysis[fieldName] = value;
   };
 
   /**

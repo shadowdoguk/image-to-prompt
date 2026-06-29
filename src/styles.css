@@ -283,7 +283,10 @@ body {
 
 .btn-populate-subject,
 .btn-edit-subject-prompt,
-.btn-populate-camera-angle {
+.btn-populate-camera-angle,
+.btn-populate-actions,
+.btn-populate-mood,
+.btn-populate-lighting {
   font-size: 0.82rem;
   padding: 0.45rem 0.95rem;
 }
@@ -296,6 +299,77 @@ body {
   color: var(--text-muted);
   line-height: 1.4;
   align-self: center;
+}
+
+/* ADR 0018 — Curated preset chip rows (mood + lighting). Sits beneath
+   the "Populate with AI" button on the analysis editor. The row is a
+   flex column of category groups; each group is a flex row of a small
+   label + a wrap-flow set of clickable chips. Chips share visual
+   language with the directive-tag-chip (ADR 0009) so users
+   immediately recognise them as clickable selectors, but they are
+   button-style (filled border, accent on hover) — they fire an action
+   on click rather than toggle a filter. */
+.preset-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin-top: 0.55rem;
+  padding-top: 0.55rem;
+  border-top: 1px dashed var(--border-color);
+  width: 100%;
+}
+
+.preset-chip-group {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.preset-chip-label {
+  flex: 0 0 5.5rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  line-height: 1.7;
+  padding-top: 0.18rem;
+}
+
+.preset-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.preset-chip {
+  display: inline-flex;
+  align-items: center;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 0.22rem 0.7rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.preset-chip:hover,
+.preset-chip:focus-visible {
+  background: var(--bg-elevated);
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.preset-chip:active {
+  background: var(--accent-soft, rgba(99, 102, 241, 0.15));
 }
 
 /* ADR 0006 — Save palette action under the colors chips. Mirrors the
@@ -1648,6 +1722,10 @@ body {
   .result-actions { flex-direction: column; }
   .btn-primary, .btn-secondary, .btn-copy, .btn-danger { width: 100%; }
   .modal-content { max-height: 95vh; }
+  /* ADR 0018 — On narrow screens the chip label column collapses and the
+     category label sits above the chip row so the chips get full width. */
+  .preset-chip-group { flex-direction: column; gap: 0.3rem; }
+  .preset-chip-label { flex: 0 0 auto; padding-top: 0; }
 }
 
 /* ─── Saved directives (ADR 0009) ─────────────────────────────────── */

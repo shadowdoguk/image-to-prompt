@@ -36,14 +36,28 @@ The product has two top-level surfaces:
     │  (Stage 1.S)         │ excludes style / medium / aesthetic
     └────────────────────┘
                │
-               │  "Populate with AI" (ADR 0008)
-               │  user clicks → /api/camera-angle → camera-only refresh
-               ▼
-    ┌───────────────────────┐
-    │  Camera-angle re-analysis│ camera-only prompt, preset-independent
-    │  (Stage 1.C)             │ excludes subject / lighting / color /
-    │                          │ mood / style / medium
-    └───────────────────────┘
+│  "Populate with AI" (ADR 0008)
+                │  user clicks → /api/camera-angle → camera-only refresh
+                ▼
+     ┌───────────────────────┐
+     │  Camera-angle re-analysis│ camera-only prompt, preset-independent
+     │  (Stage 1.C)             │ excludes subject / lighting / color /
+     │                          │ mood / style / medium
+     └───────────────────────┘
+                │
+                │  "Populate with AI" (ADR 0018)
+                │  user clicks → /api/actions, /api/mood, /api/lighting
+                │  → actions / mood / lighting-only refresh
+                ▼
+     ┌──────────────────────────────────────────────────────┐
+     │  Actions / Mood / Lighting re-analysis  (Stage 1.A / │
+     │  1.M / 1.L) — focused per-field prompts, preset-     │
+     │  independent. Mood and Lighting additionally ship    │
+     │  with curated preset chips (5 categories each) that  │
+     │  the user can click for a zero-credit quick override. │
+     │  Actions gets the AI button only (no presets — too   │
+     │  image-specific for a curated taxonomy).              │
+     └──────────────────────────────────────────────────────┘
 ```
 
 - **Stage 1** is always run. Produces a JSON object containing every field in
@@ -148,6 +162,8 @@ The product has two top-level surfaces:
 | Palette run telemetry | `data/palette_runs.json` | n/a (append log) | **ADR 0014 (implemented).** Per-palette capped log (≤50 entries) of `measureColorDistribution` outputs from each Stage 2 run that used a saved palette. Driven by `appendPaletteRun` inside `/api/generate-prompt`. Read via `GET /api/palettes/:id/distribution` (404 when no runs yet) for the Phase 4 distribution dashboard. |
 | Subject prompt | `data/subject_prompt.json` | n/a (single global) | System prompt for `POST /api/subject` (ADR 0005). Editable from UI; seeded with the shipped default on first read. |
 | Camera-angle prompt | code constant `DEFAULT_CAMERA_ANGLE_PROMPT` in `server.js` | n/a (single global) | System prompt for `POST /api/camera-angle` (ADR 0008). NOT persisted to disk — the shipped default is the source of truth at runtime. UI editor is out of scope for ADR 0008. |
+| Actions / Mood / Lighting prompts | code constants `DEFAULT_ACTIONS_PROMPT`, `DEFAULT_MOOD_PROMPT`, `DEFAULT_LIGHTING_PROMPT` in `server.js` | n/a (single global each) | System prompts for `POST /api/actions`, `POST /api/mood`, `POST /api/lighting` (ADR 0018). NOT persisted to disk — shipped defaults are the source of truth at runtime. UI editor is out of scope for ADR 0018. |
+| Mood / Lighting curated presets | code constants `MOOD_PRESETS`, `LIGHTING_PRESETS` in `src/app.js` | n/a (single global each) | Static, code-defined taxonomies of one-click descriptors rendered as chips beneath the Populate-with-AI button on the `mood` and `lighting` fields (ADR 0018). NOT persisted (unlike saved directives, ADR 0009) — they are a canonical taxonomy shared by every user. Mood: 5 categories × 7-9 items (Positive / Reflective / Intense / Atmospheric / Still). Lighting: 5 categories × 6-8 items (Natural / Directional / Quality / Stylized / Studio). Clicking a chip sets the field value to the chip's label and updates `state.currentAnalysis`. The user is free to edit the value after clicking — chips are a quick starting point, not a lock. |
 | Stage 2 override | `data/stage2_overrides.json` | `presetId` | Per-preset override of `preset.stage2_system_prompt` (ADR 0007). Editable from UI via the "Edit prompt" button beside "Generate prompt". When present, used instead of the preset's built-in Stage 2 prompt on the next `POST /api/generate-prompt`. |
 | Saved directive | `data/directives.json` | `id` (`directive_<16 hex>`) | name, content, tags, history[], usage_count, last_used_at, created_at, updated_at (ADR 0009). Selectable from the apply `<select>` below the directives textarea; editable from the Manage modal; rollback via version history; importable / exportable as `.i2p.json` envelope. The textarea is the source of truth at Stage 2 time; saved directives are a library loaded into the textarea via Apply. |
 | Chat session | `data/chat_sessions.json` | `id` (`chat_<16 hex>`) | preset_id, preset_name, run_id, title, original_prompt, current_prompt, analysis_snapshot, messages[], created_at, updated_at (ADR 0011). Anchored to a finished Stage 2 run; activated immediately after `displayResult`. `messages` is append-only (`role: user \| assistant`, `content`, `suggested_prompt: string \| null`, `timestamp`). Apply advances `current_prompt` from an assistant's `suggested_prompt`. Persists across server restarts. |
@@ -159,6 +175,14 @@ The product has two top-level surfaces:
 textarea: `subject`, `subject_orientation`, `actions`, `mood`, `composition`, `texture`
 text: `style`, `lighting`, `era`, `camera_angle`, `artistic_medium`, `depth_of_field`, `contrast`
 colors: `colors` (array of `{hex, name}`)
+
+**Per-field re-analysis endpoints (ADR 0004 / 0008 / 0018):** five of these
+fields — `subject`, `camera_angle`, `actions`, `mood`, `lighting` — have
+dedicated "Populate with AI" buttons in the analysis editor. Each posts the
+uploaded image to a focused, preset-independent endpoint and updates the
+field's value in place. `mood` and `lighting` additionally ship with
+curated preset chip taxonomies (ADR 0018 §4) that provide zero-credit
+quick-pick overrides alongside the AI option.
 
 ## Accuracy contract (per ADR-0001)
 

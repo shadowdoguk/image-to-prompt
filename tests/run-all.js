@@ -2649,6 +2649,445 @@ test('Frontend JS: populateCameraAngleWithAI handler + camera_angle button + no-
     'src/app.js must track isPopulatingCameraAngle state flag for the in-flight guard');
 });
 
+// ─── ADR 0018 — actions / mood / lighting re-analysis + curated presets
+
+test('POST /api/actions endpoint is registered (ADR 0018)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const re = /app\.(get|post|put|delete)\(['"](\/api\/[^'"]+)['"]/g;
+  const endpoints = [];
+  let m;
+  while ((m = re.exec(serverText)) !== null) endpoints.push(m[1] + ' ' + m[2]);
+  assertTrue(endpoints.some((e) => e === 'post /api/actions'),
+    `POST /api/actions must be registered; found endpoints: ${endpoints.join(', ')}`);
+});
+
+test('POST /api/mood endpoint is registered (ADR 0018)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const re = /app\.(get|post|put|delete)\(['"](\/api\/[^'"]+)['"]/g;
+  const endpoints = [];
+  let m;
+  while ((m = re.exec(serverText)) !== null) endpoints.push(m[1] + ' ' + m[2]);
+  assertTrue(endpoints.some((e) => e === 'post /api/mood'),
+    `POST /api/mood must be registered; found endpoints: ${endpoints.join(', ')}`);
+});
+
+test('POST /api/lighting endpoint is registered (ADR 0018)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const re = /app\.(get|post|put|delete)\(['"](\/api\/[^'"]+)['"]/g;
+  const endpoints = [];
+  let m;
+  while ((m = re.exec(serverText)) !== null) endpoints.push(m[1] + ' ' + m[2]);
+  assertTrue(endpoints.some((e) => e === 'post /api/lighting'),
+    `POST /api/lighting must be registered; found endpoints: ${endpoints.join(', ')}`);
+});
+
+test('callMiniMaxActionsAnalysis helper + DEFAULT_ACTIONS_PROMPT are exported (ADR 0018)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof server.callMiniMaxActionsAnalysis === 'function',
+    'callMiniMaxActionsAnalysis must be exported from server.js');
+  assertTrue(typeof server.DEFAULT_ACTIONS_PROMPT === 'string' && server.DEFAULT_ACTIONS_PROMPT.length > 0,
+    'DEFAULT_ACTIONS_PROMPT must be a non-empty string exported from server.js');
+});
+
+test('callMiniMaxMoodAnalysis helper + DEFAULT_MOOD_PROMPT are exported (ADR 0018)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof server.callMiniMaxMoodAnalysis === 'function',
+    'callMiniMaxMoodAnalysis must be exported from server.js');
+  assertTrue(typeof server.DEFAULT_MOOD_PROMPT === 'string' && server.DEFAULT_MOOD_PROMPT.length > 0,
+    'DEFAULT_MOOD_PROMPT must be a non-empty string exported from server.js');
+});
+
+test('callMiniMaxLightingAnalysis helper + DEFAULT_LIGHTING_PROMPT are exported (ADR 0018)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof server.callMiniMaxLightingAnalysis === 'function',
+    'callMiniMaxLightingAnalysis must be exported from server.js');
+  assertTrue(typeof server.DEFAULT_LIGHTING_PROMPT === 'string' && server.DEFAULT_LIGHTING_PROMPT.length > 0,
+    'DEFAULT_LIGHTING_PROMPT must be a non-empty string exported from server.js');
+});
+
+test('POST /api/actions/mood/lighting use multer single-image upload middleware (ADR 0018)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  for (const path of ['/api/actions', '/api/mood', '/api/lighting']) {
+    const re = new RegExp(`app\\.post\\(['"]${path.replace(/\//g, '\\/')}['"]\\s*,\\s*upload\\.single\\(['"]image['"]\\)`);
+    assertTrue(re.test(serverText),
+      `POST ${path} must use upload.single("image") middleware to match the /api/camera-angle pattern`);
+  }
+});
+
+test('DEFAULT_ACTIONS_PROMPT excludes adjacent-field commentary (ADR 0018)', () => {
+  const { DEFAULT_ACTIONS_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // Must explicitly forbid the core exclusion categories.
+  assertTrue(/subject/i.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must forbid subject description');
+  assertTrue(/lighting/i.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must forbid lighting commentary');
+  assertTrue(/color/i.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must forbid color commentary');
+  assertTrue(/mood/i.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must forbid mood commentary');
+  assertTrue(/camera angle/i.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must forbid camera-angle commentary');
+  assertTrue(/artistic style/i.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must forbid artistic-style commentary');
+  assertTrue(/creative medium/i.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must forbid creative-medium commentary');
+  assertTrue(/aesthetic/i.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must forbid aesthetic commentary');
+
+  // Must list subjective aesthetic adjectives as forbidden vocabulary.
+  const forbiddenAdjectives = ['beautiful', 'striking', 'dramatic', 'elegant', 'majestic'];
+  for (const adj of forbiddenAdjectives) {
+    assertTrue(DEFAULT_ACTIONS_PROMPT.includes(adj),
+      `prompt must list "${adj}" as forbidden aesthetic vocabulary`);
+  }
+
+  // Must enforce the schema-level length floor.
+  assertTrue(/60/.test(DEFAULT_ACTIONS_PROMPT),
+    'prompt must enforce 60-character minimum length');
+});
+
+test('DEFAULT_ACTIONS_PROMPT mandates the five actions categories (ADR 0018)', () => {
+  const { DEFAULT_ACTIONS_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const categories = [
+    /BODY KINEMATICS/i,
+    /OBJECT INTERACTIONS/i,
+    /MULTI-FIGURE DYNAMICS/i,
+    /IMPLIED MOTION/i,
+    /SCENE NARRATIVE/i
+  ];
+  for (const re of categories) {
+    assertTrue(re.test(DEFAULT_ACTIONS_PROMPT),
+      `prompt must mandate coverage of category matching: ${re}`);
+  }
+
+  // Spot-check kinematics vocabulary that should appear so the LLM has
+  // concrete examples for the body-kinematics / implied-motion categories.
+  const requiredVocab = ['seated', 'standing', 'mid-stride', 'leaning', 'caugh'];
+  for (const term of requiredVocab) {
+    assertTrue(DEFAULT_ACTIONS_PROMPT.toLowerCase().includes(term.toLowerCase()),
+      `prompt must include kinematics vocabulary example: "${term}"`);
+  }
+});
+
+test('DEFAULT_MOOD_PROMPT excludes adjacent-field commentary (ADR 0018)', () => {
+  const { DEFAULT_MOOD_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // Must forbid commentary on adjacent fields by name.
+  assertTrue(/lighting/i.test(DEFAULT_MOOD_PROMPT),
+    'prompt must forbid lighting commentary');
+  assertTrue(/camera angle/i.test(DEFAULT_MOOD_PROMPT),
+    'prompt must forbid camera-angle commentary');
+  assertTrue(/color palette/i.test(DEFAULT_MOOD_PROMPT),
+    'prompt must forbid color-palette commentary');
+  assertTrue(/composition/i.test(DEFAULT_MOOD_PROMPT),
+    'prompt must forbid composition commentary');
+  assertTrue(/artistic style/i.test(DEFAULT_MOOD_PROMPT),
+    'prompt must forbid artistic-style commentary');
+  assertTrue(/creative medium/i.test(DEFAULT_MOOD_PROMPT),
+    'prompt must forbid creative-medium commentary');
+  assertTrue(/aesthetic/i.test(DEFAULT_MOOD_PROMPT),
+    'prompt must forbid aesthetic commentary');
+
+  // Must list subjective aesthetic adjectives as forbidden vocabulary.
+  const forbiddenAdjectives = ['beautiful', 'striking', 'dramatic', 'elegant', 'majestic'];
+  for (const adj of forbiddenAdjectives) {
+    assertTrue(DEFAULT_MOOD_PROMPT.includes(adj),
+      `prompt must list "${adj}" as forbidden aesthetic vocabulary`);
+  }
+
+  // Must enforce the schema-level length floor.
+  assertTrue(/60/.test(DEFAULT_MOOD_PROMPT),
+    'prompt must enforce 60-character minimum length');
+});
+
+test('DEFAULT_MOOD_PROMPT mandates the five mood categories (ADR 0018)', () => {
+  const { DEFAULT_MOOD_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const categories = [
+    /PRIMARY EMOTIONAL TONE/i,
+    /SECONDARY UNDERCURRENT/i,
+    /ATMOSPHERE/i,
+    /PACING/i,
+    /VIEWER-RESPONSE CUE/i
+  ];
+  for (const re of categories) {
+    assertTrue(re.test(DEFAULT_MOOD_PROMPT),
+      `prompt must mandate coverage of category matching: ${re}`);
+  }
+
+  // Spot-check affective vocabulary the LLM should be primed with.
+  const requiredVocab = ['joyful', 'melancholic', 'bittersweet', 'contemplative', 'energetic'];
+  for (const term of requiredVocab) {
+    assertTrue(DEFAULT_MOOD_PROMPT.toLowerCase().includes(term.toLowerCase()),
+      `prompt must include mood vocabulary example: "${term}"`);
+  }
+});
+
+test('DEFAULT_LIGHTING_PROMPT excludes adjacent-field commentary (ADR 0018)', () => {
+  const { DEFAULT_LIGHTING_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // Must forbid commentary on adjacent fields by name.
+  assertTrue(/subject/i.test(DEFAULT_LIGHTING_PROMPT),
+    'prompt must forbid subject description');
+  assertTrue(/mood/i.test(DEFAULT_LIGHTING_PROMPT),
+    'prompt must forbid mood commentary');
+  assertTrue(/color palette/i.test(DEFAULT_LIGHTING_PROMPT),
+    'prompt must forbid color-palette commentary');
+  assertTrue(/composition/i.test(DEFAULT_LIGHTING_PROMPT),
+    'prompt must forbid composition commentary');
+  assertTrue(/artistic style/i.test(DEFAULT_LIGHTING_PROMPT),
+    'prompt must forbid artistic-style commentary');
+  assertTrue(/creative medium/i.test(DEFAULT_LIGHTING_PROMPT),
+    'prompt must forbid creative-medium commentary');
+  assertTrue(/aesthetic/i.test(DEFAULT_LIGHTING_PROMPT),
+    'prompt must forbid aesthetic commentary');
+
+  // Must list subjective aesthetic adjectives as forbidden vocabulary.
+  const forbiddenAdjectives = ['beautiful', 'striking', 'dramatic', 'elegant', 'majestic'];
+  for (const adj of forbiddenAdjectives) {
+    assertTrue(DEFAULT_LIGHTING_PROMPT.includes(adj),
+      `prompt must list "${adj}" as forbidden aesthetic vocabulary`);
+  }
+
+  // Must enforce the schema-level length floor.
+  assertTrue(/20/.test(DEFAULT_LIGHTING_PROMPT),
+    'prompt must enforce 20-character minimum length');
+});
+
+test('DEFAULT_LIGHTING_PROMPT mandates the five lighting categories (ADR 0018)', () => {
+  const { DEFAULT_LIGHTING_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const categories = [
+    /LIGHT SOURCE/i,
+    /DIRECTION/i,
+    /QUALITY/i,
+    /COLOR TEMPERATURE/i,
+    /SHADOW BEHAVIOR/i
+  ];
+  for (const re of categories) {
+    assertTrue(re.test(DEFAULT_LIGHTING_PROMPT),
+      `prompt must mandate coverage of category matching: ${re}`);
+  }
+
+  // Spot-check cinematography vocabulary the LLM should be primed with.
+  const requiredVocab = ['golden', 'rim', 'diffused', 'specular', 'chiaroscuro'];
+  for (const term of requiredVocab) {
+    assertTrue(DEFAULT_LIGHTING_PROMPT.toLowerCase().includes(term.toLowerCase()),
+      `prompt must include lighting vocabulary example: "${term}"`);
+  }
+});
+
+test('HTTP integration: /api/actions rejects missing file with 400 (ADR 0018)', async () => {
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/actions`, { method: 'POST' });
+    assertEqual(r.status, 400, 'no file → 400');
+    assertTrue(/no image/i.test(r.body && r.body.error), 'error names missing image');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('HTTP integration: /api/mood rejects missing file with 400 (ADR 0018)', async () => {
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/mood`, { method: 'POST' });
+    assertEqual(r.status, 400, 'no file → 400');
+    assertTrue(/no image/i.test(r.body && r.body.error), 'error names missing image');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('HTTP integration: /api/lighting rejects missing file with 400 (ADR 0018)', async () => {
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/lighting`, { method: 'POST' });
+    assertEqual(r.status, 400, 'no file → 400');
+    assertTrue(/no image/i.test(r.body && r.body.error), 'error names missing image');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('HTTP integration: /api/actions with valid upload reaches LLM call (ADR 0018)', async () => {
+  const srv = await startTestServer();
+  try {
+    const fd = new FormData();
+    fd.append('image', new Blob([new Uint8Array([0xff, 0xd8, 0xff])], { type: 'image/jpeg' }), 'tiny.jpg');
+    const r = await fetchJson(`${srv.base}/api/actions`, { method: 'POST', body: fd });
+    assertTrue(r.status === 200 || r.status === 500 || r.status === 503,
+      `expected 200/500/503 (got ${r.status}) — proves multer + key-guard worked`);
+    assertTrue(r.status !== 400, 'must not 400 (route guard misbehaved)');
+  } finally {
+    await srv.close();
+    cleanupUploads();
+  }
+});
+
+test('HTTP integration: /api/mood with valid upload reaches LLM call (ADR 0018)', async () => {
+  const srv = await startTestServer();
+  try {
+    const fd = new FormData();
+    fd.append('image', new Blob([new Uint8Array([0xff, 0xd8, 0xff])], { type: 'image/jpeg' }), 'tiny.jpg');
+    const r = await fetchJson(`${srv.base}/api/mood`, { method: 'POST', body: fd });
+    assertTrue(r.status === 200 || r.status === 500 || r.status === 503,
+      `expected 200/500/503 (got ${r.status}) — proves multer + key-guard worked`);
+    assertTrue(r.status !== 400, 'must not 400 (route guard misbehaved)');
+  } finally {
+    await srv.close();
+    cleanupUploads();
+  }
+});
+
+test('HTTP integration: /api/lighting with valid upload reaches LLM call (ADR 0018)', async () => {
+  const srv = await startTestServer();
+  try {
+    const fd = new FormData();
+    fd.append('image', new Blob([new Uint8Array([0xff, 0xd8, 0xff])], { type: 'image/jpeg' }), 'tiny.jpg');
+    const r = await fetchJson(`${srv.base}/api/lighting`, { method: 'POST', body: fd });
+    assertTrue(r.status === 200 || r.status === 500 || r.status === 503,
+      `expected 200/500/503 (got ${r.status}) — proves multer + key-guard worked`);
+    assertTrue(r.status !== 400, 'must not 400 (route guard misbehaved)');
+  } finally {
+    await srv.close();
+    cleanupUploads();
+  }
+});
+
+test('Frontend CSS: .btn-populate-actions/mood/lighting selectors defined (ADR 0018)', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  assertTrue(/\.btn-populate-actions/.test(css),
+    'CSS must define .btn-populate-actions selector');
+  assertTrue(/\.btn-populate-mood/.test(css),
+    'CSS must define .btn-populate-mood selector');
+  assertTrue(/\.btn-populate-lighting/.test(css),
+    'CSS must define .btn-populate-lighting selector');
+  // Preset chip styles
+  assertTrue(/\.preset-chips\b/.test(css),
+    'CSS must define .preset-chips selector');
+  assertTrue(/\.preset-chip\b/.test(css),
+    'CSS must define .preset-chip selector');
+  assertTrue(/\.preset-chip-group\b/.test(css),
+    'CSS must define .preset-chip-group selector');
+  assertTrue(/\.preset-chip-label\b/.test(css),
+    'CSS must define .preset-chip-label selector');
+});
+
+test('Frontend JS: three populate handlers + button renderings + state flags (ADR 0018)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+
+  for (const handler of ['populateActionsWithAI', 'populateMoodWithAI', 'populateLightingWithAI']) {
+    const re = new RegExp(`const ${handler}\\s*=`);
+    assertTrue(re.test(js),
+      `src/app.js must define ${handler} handler`);
+    // no-image guard
+    const guardRe = new RegExp(`${handler}[\\s\\S]{0,400}?if\\s*\\(\\s*!\\s*state\\.currentFile\\s*\\)`);
+    assertTrue(guardRe.test(js),
+      `${handler} must guard on state.currentFile before fetching`);
+  }
+
+  for (const path of ['/api/actions', '/api/mood', '/api/lighting']) {
+    assertTrue(js.includes(`'${path}'`),
+      `src/app.js must POST to ${path}`);
+  }
+
+  // Per-field state flags
+  for (const flag of ['isPopulatingActions', 'isPopulatingMood', 'isPopulatingLighting']) {
+    assertTrue(js.includes(flag),
+      `src/app.js must track ${flag} state flag`);
+  }
+
+  // Per-field button rendering + class
+  for (const field of ['actions', 'mood', 'lighting']) {
+    const re = new RegExp(`fieldName\\s*===\\s*['"]${field}['"]`);
+    assertTrue(re.test(js),
+      `src/app.js must render the Populate-with-AI button for fieldName === "${field}"`);
+    const cls = `btn-populate-${field}`;
+    assertTrue(js.includes(cls),
+      `src/app.js must apply the .${cls} class`);
+  }
+
+  // In-place DOM updates for each field
+  assertTrue(/textarea\[data-field=['"]actions['"]\]/.test(js),
+    'src/app.js must query textarea[data-field="actions"] for in-place update');
+  assertTrue(/textarea\[data-field=['"]mood['"]\]/.test(js),
+    'src/app.js must query textarea[data-field="mood"] for in-place update');
+  assertTrue(/input\[data-field=['"]lighting['"]\]/.test(js),
+    'src/app.js must query input[data-field="lighting"] for in-place update');
+});
+
+test('Frontend JS: mood and lighting curated presets taxonomies defined (ADR 0018)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+
+  // Taxonomy constants exist
+  assertTrue(/MOOD_PRESETS\s*=/.test(js),
+    'src/app.js must define MOOD_PRESETS taxonomy');
+  assertTrue(/LIGHTING_PRESETS\s*=/.test(js),
+    'src/app.js must define LIGHTING_PRESETS taxonomy');
+
+  // Mood taxonomy: 5 categories with the canonical labels.
+  const moodCategories = ['Positive', 'Reflective', 'Intense', 'Atmospheric', 'Still'];
+  for (const cat of moodCategories) {
+    const re = new RegExp(`category:\\s*['"]${cat}['"]`);
+    assertTrue(re.test(js),
+      `MOOD_PRESETS must include category "${cat}"`);
+  }
+
+  // Lighting taxonomy: 5 categories with the canonical labels.
+  const lightingCategories = ['Natural', 'Directional', 'Quality', 'Stylized', 'Studio'];
+  for (const cat of lightingCategories) {
+    const re = new RegExp(`category:\\s*['"]${cat}['"]`);
+    assertTrue(re.test(js),
+      `LIGHTING_PRESETS must include category "${cat}"`);
+  }
+
+  // Spot-check at least one chip from each mood category.
+  const moodChipSamples = {
+    Positive:    'joyful',
+    Reflective:  'melancholic',
+    Intense:     'dramatic',
+    Atmospheric: 'dreamlike',
+    Still:       'meditative'
+  };
+  for (const [cat, chip] of Object.entries(moodChipSamples)) {
+    // Loose check: chip name appears somewhere in the file (anywhere).
+    assertTrue(js.includes(`'${chip}'`) || js.includes(`"${chip}"`),
+      `MOOD_PRESETS must include chip "${chip}" in category "${cat}"`);
+  }
+
+  // Spot-check at least one chip from each lighting category.
+  const lightingChipSamples = {
+    Natural:     'golden hour',
+    Directional: 'backlit',
+    Quality:     'soft diffused',
+    Stylized:    'chiaroscuro',
+    Studio:      'studio softbox'
+  };
+  for (const [cat, chip] of Object.entries(lightingChipSamples)) {
+    assertTrue(js.includes(`'${chip}'`) || js.includes(`"${chip}"`),
+      `LIGHTING_PRESETS must include chip "${chip}" in category "${cat}"`);
+  }
+
+  // renderPresetChips helper exists.
+  assertTrue(/const renderPresetChips\s*=/.test(js),
+    'src/app.js must define renderPresetChips helper');
+
+  // applyPresetToField helper exists.
+  assertTrue(/const applyPresetToField\s*=/.test(js),
+    'src/app.js must define applyPresetToField helper');
+
+  // Chip rows are wired by passing the field name into renderPresetChips
+  // (the helper closes over `fieldName` and routes clicks via
+  // applyPresetToField). Each call site therefore names the field.
+  assertTrue(/renderPresetChips\(\s*['"]mood['"]\s*,\s*MOOD_PRESETS\s*\)/.test(js),
+    'src/app.js must call renderPresetChips("mood", MOOD_PRESETS) to wire mood chips');
+  assertTrue(/renderPresetChips\(\s*['"]lighting['"]\s*,\s*LIGHTING_PRESETS\s*\)/.test(js),
+    'src/app.js must call renderPresetChips("lighting", LIGHTING_PRESETS) to wire lighting chips');
+});
+
 // ─── ADR 0009 — saved directives ──────────────────────────────────
 
 const DIRECTIVES_FILE = path.join(PROJECT_ROOT, 'data', 'directives.json');

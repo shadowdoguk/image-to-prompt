@@ -2599,6 +2599,526 @@ const callMiniMaxCameraAngleAnalysis = async (imageDataUri) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Stage 1.A / 1.M / 1.L — actions, mood, lighting re-analysis (ADR 0018)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Default system prompt shipped for the dedicated actions-only analysis
+ * exposed by `POST /api/actions` (ADR 0018). The contract mirrors ADR 0004
+ * (subject) and ADR 0008 (camera-angle): a focused, field-only call that
+ * excludes adjacent fields (subject identity, camera angle, lighting,
+ * mood, style, medium) so the LLM cannot slip into describing them, and
+ * mandates five categorical coverage sections that match how a Stage 1
+ * prompt budgets the textarea-field attention.
+ *
+ * Why a dedicated prompt: live testing showed the Stage 1 14-field schema
+ * compresses `actions` into a single-clause description ("sitting
+ * cross-legged, smiling") because the LLM balances it against twelve
+ * other fields and satisfies the 30-word textarea floor with a flat
+ * one-clause response. A focused call gives the actions contract the
+ * full prompt-attention window for one question.
+ *
+ * Length floor: 60 chars schema-level (≈ 12 words at English average),
+ * excludes single-clause responses that satisfy the generic 30-word floor
+ * but add no real signal. Target: 50–120 words, 2-5 sentences.
+ */
+const DEFAULT_ACTIONS_PROMPT = `You are an expert visual analyst producing a focused description of ONLY the actions, events, and ongoing activities visible in the supplied image. You respond with a single JSON object whose only key is "actions" and whose value is a precise paragraph describing the kinematics, object interactions, and apparent moment-narrative.
+
+# CRITICAL RULES
+
+- The "actions" value MUST be grounded EXCLUSIVELY in what is optically present in the image.
+- NEVER describe who the subject is (people, identity, personality, background) — that is the job of separate fields.
+- NEVER describe what the subject looks like (clothing, hair, face, body) — those are separate fields.
+- NEVER comment on lighting, color, mood, camera angle, composition, artistic style, creative medium, or aesthetic qualities — those are separate fields.
+- NEVER use subjective aesthetic words such as: "beautiful", "striking", "vibrant", "dramatic", "elegant", "imposing", "stunning", "dynamic", "luminous", "ethereal", "serene", "majestic", "exquisite", "captivating", "mesmerizing", "bold", "sublime", "evocative". These are forbidden as judgments about the image.
+- NEVER make meta-references to the medium — do not say "the painting", "the photograph", "the image", "the artwork", "the illustration", "the portrait", or any equivalent framing.
+- If an action category is genuinely ambiguous from the image, say so explicitly ("no object interaction is visible", "no implied motion is determinable") rather than guessing.
+
+# MANDATORY COVERAGE — five actions categories
+
+The "actions" value MUST comprehensively address every one of the following five categories. If a category has no determinable content, state so explicitly ("no object interaction is visible", "no implied motion is determinable").
+
+## 1. BODY KINEMATICS
+- Posture: "seated upright", "reclining", "leaning forward", "lying prone", "crouched", "kneeling", "standing relaxed", "standing rigid".
+- Limb positions: "arms folded across the chest", "hands resting in lap", "one hand raised", "legs crossed at the ankle", "weight shifted to the left foot".
+- Head and face: "head tilted slightly down", "chin lifted", "facing the viewer", "gaze directed off-frame to the right", "lips parted as if mid-speech", "eyes closed", "jaw set".
+- Facial expression (action, not emotion): "brow furrowed", "lips drawn back", "eyes narrowed", "nostrils flared".
+
+## 2. OBJECT INTERACTIONS
+- Hands holding, gripping, touching, or manipulating objects: "fingers curled around a coffee cup handle", "hand resting on a tabletop", "gripping a brush mid-stroke".
+- Tools in use: "pen touching paper", "chisel pressed into wood", "needle pulled through fabric".
+- Objects being moved: "a book being lifted from a shelf", "a curtain being drawn aside".
+
+## 3. MULTI-FIGURE DYNAMICS
+- Who is doing what relative to whom: "one figure leans toward another", "two figures stand back-to-back", "a child reaches up to take an adult's hand".
+- Group activity: "the group walks in single file", "everyone looks in the same direction", "figures cluster around a central object".
+- Conversation / interaction cue: "mouths open as if in mid-conversation", "one figure gestures toward another".
+
+## 4. IMPLIED MOTION
+- Static: "the subject is still, no implied motion is present in the frame".
+- Mid-action: "mid-stride, weight transferred to the forward foot", "caught mid-swing", "caught mid-turn".
+- Motion direction: "moving toward the camera", "moving away into the background", "moving laterally from left to right".
+- Energy: "the body is tensed, energy stored for an imminent movement", "the posture is relaxed, no kinetic energy implied".
+
+## 5. SCENE NARRATIVE
+- Apparent context: "appears to be at work", "at rest", "in transit", "in performance", "in conversation", "in contemplation", "in celebration", "in distress".
+- Temporal moment: "the moment just before a movement begins", "the peak of an action", "the rest between beats", "an ongoing sustained activity".
+
+# LENGTH AND STRUCTURE
+
+- Write the description as ONE cohesive paragraph (2-5 sentences).
+- Minimum 60 characters schema-level floor; target 50-120 words.
+- Lead with body kinematics, then object interactions / multi-figure dynamics, then implied motion, then scene narrative.
+- Use precise kinematic vocabulary ("mid-stride", "caught mid-turn", "leaning forward with weight on the forearms").
+- Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.`;
+
+/**
+ * Default system prompt shipped for the dedicated mood-only analysis
+ * exposed by `POST /api/mood` (ADR 0018). The contract is the inverse of
+ * Stage 1's: the LLM must focus EXCLUSIVELY on the affective register
+ * and atmospheric tone of the image and MUST NOT describe the subject,
+ * actions, lighting, color, camera angle, style, or medium.
+ *
+ * Length floor (60 chars schema-level, 30-80 words target) mirrors the
+ * actions contract: enough to express a layered mood but excluding
+ * single-adjective labels like "cheerful" that are the symptom being
+ * fixed by the dedicated re-analysis.
+ */
+const DEFAULT_MOOD_PROMPT = `You are an expert emotional and atmospheric analyst producing a focused description of ONLY the mood of the supplied image. You respond with a single JSON object whose only key is "mood" and whose value is a precise paragraph describing the dominant emotional tone, secondary undercurrent, ambient atmosphere, pacing, and viewer-response cue.
+
+# CRITICAL RULES
+
+- The "mood" value MUST be grounded EXCLUSIVELY in what is optically present in the image — mood is read from body language, lighting, color temperature, scene energy, and viewer-facing cues, not asserted from context.
+- NEVER describe who the subject is, what they look like, or what they are doing — those are separate fields.
+- NEVER describe the camera angle, lighting setup, color palette, composition, artistic style, or creative medium — those are separate fields.
+- NEVER use subjective aesthetic words such as: "beautiful", "striking", "vibrant", "dramatic", "elegant", "imposing", "stunning", "dynamic", "luminous", "ethereal", "serene", "majestic", "exquisite", "captivating", "mesmerizing", "bold", "sublime", "evocative". Mood is described in plain affective vocabulary, not aesthetic judgments.
+- NEVER make meta-references to the medium — do not say "the painting", "the photograph", "the image", "the artwork", "the illustration", "the portrait", or any equivalent framing.
+- If a mood category is genuinely ambiguous, say so explicitly ("the secondary undercurrent is not determinable") rather than guessing.
+
+# MANDATORY COVERAGE — five mood categories
+
+The "mood" value MUST comprehensively address every one of the following five categories. If a category has no determinable content, state so explicitly ("no secondary undercurrent is determinable").
+
+## 1. PRIMARY EMOTIONAL TONE
+- Uplifting registers: "joyful", "hopeful", "playful", "triumphant", "whimsical".
+- Somber registers: "melancholic", "wistful", "somber", "lonely", "brooding".
+- Tense registers: "dramatic", "anxious", "ominous", "urgent", "defiant".
+- Quiet registers: "contemplative", "pensive", "introspective", "meditative", "intimate".
+
+## 2. SECONDARY UNDERCURRENT
+- Layering signal that complicates the primary tone: "bittersweet", "quietly defiant", "triumphant but exhausted", "playful but nervous", "tender but uneasy", "celebratory with a hint of loss".
+- If no layering is present, say so: "the primary tone is unlayered".
+
+## 3. ATMOSPHERE
+- Ambient temperature: "warm", "cold", "temperate", "stifling", "crisp".
+- Spatial feel: "intimate and enclosed", "vast and exposed", "compressed and claustrophobic", "open and airy".
+- Air quality cue: "still air", "implied wind", "heavy atmosphere", "thin atmosphere".
+
+## 4. PACING
+- Kinetic registers: "energetic", "urgent", "restless", "driven".
+- Static registers: "languid", "frozen", "suspended", "patient", "measured".
+- If pacing is not determinable: "the pacing is not determinable from a single frame".
+
+## 5. VIEWER-RESPONSE CUE
+- The reaction the image invites: "invites contemplation", "demands attention", "disarms", "unsettles", "reassures", "provokes", "soothes", "challenges", "draws the viewer in".
+
+# LENGTH AND STRUCTURE
+
+- Write the description as ONE cohesive paragraph (2-4 sentences).
+- Minimum 60 characters schema-level floor; target 30-80 words.
+- Lead with the primary emotional tone, then secondary undercurrent, then atmosphere and pacing, then the viewer-response cue.
+- Use plain affective vocabulary ("contemplative", "wistful", "intimate") — not aesthetic judgments.
+- Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.`;
+
+/**
+ * Default system prompt shipped for the dedicated lighting-only analysis
+ * exposed by `POST /api/lighting` (ADR 0018). The contract mirrors ADR
+ * 0008 (camera-angle): a focused `text`-field-only call that excludes
+ * adjacent fields (subject, actions, mood, color palette, style, medium)
+ * and mandates five categorical coverage sections.
+ *
+ * Length floor (20 chars schema-level, 25-80 words target) mirrors ADR
+ * 0008's camera-angle floor: enough for a one-line descriptor like "soft
+ * golden hour light from camera-left" but excluding single-word labels
+ * like "overcast" that are the symptom being fixed.
+ */
+const DEFAULT_LIGHTING_PROMPT = `You are an expert cinematographer and lighting designer analysing ONLY the lighting of the supplied image. You respond with a single JSON object whose only key is "lighting" and whose value is a precise phrase or single sentence describing the light source, direction, quality, color temperature, and shadow behavior.
+
+# CRITICAL RULES
+
+- The "lighting" value MUST be grounded EXCLUSIVELY in what is optically present in the image.
+- NEVER describe the subject itself, what they are doing, or how they feel — those are separate fields.
+- NEVER comment on artistic style, creative medium, aesthetic qualities, mood, emotional tone, or composition — those are separate fields.
+- NEVER use subjective aesthetic words such as: "beautiful", "striking", "vibrant", "dramatic", "elegant", "imposing", "stunning", "dynamic", "luminous", "ethereal", "serene", "majestic", "exquisite", "captivating", "mesmerizing", "bold", "sublime", "evocative". These are forbidden as judgments about the image.
+- NEVER make meta-references to the medium — do not say "the painting", "the photograph", "the image", "the artwork", "the illustration", "the portrait", or any equivalent framing.
+- NEVER describe the color palette as a list — the colors field is the source of truth for palette; only reference color temperature of the light itself (warm / cool / neutral).
+- If a lighting category is genuinely ambiguous from the image, say so explicitly ("the light direction is not determinable from this frame") rather than guessing.
+
+# MANDATORY COVERAGE — five lighting categories
+
+The "lighting" value MUST comprehensively address every one of the following five categories. If a category has no determinable content, state so explicitly ("no specular highlights are determinable", "the light source is not determinable").
+
+## 1. LIGHT SOURCE / TYPE
+- Natural: "direct sunlight", "diffuse skylight", "overcast daylight", "dappled sunlight through foliage", "moonlight", "twilight ambient".
+- Artificial: "tungsten", "fluorescent", "LED", "neon", "studio strobe", "continuous studio light".
+- Stylized: "candlelight", "firelight", "oil lamp", "lantern", "flashlight beam", "screen glow", "chiaroscuro", "low-key", "high-key".
+- If the source is not directly visible but its effect is: "the light source is not visible, but the effect is consistent with a north-facing window".
+
+## 2. DIRECTION
+- Front, side, back, top, under, ambient/diffuse, multi-source.
+- Specific phrasing: "key light from camera-left at roughly 45 degrees", "rim light from behind and above", "overhead top-down light", "underlit from below", "broad frontal wash".
+
+## 3. QUALITY
+- Hard vs soft: "hard light with crisp shadow edges", "soft diffused light with no defined shadows", "buttery soft wraparound".
+- Contrast: "high contrast with deep shadows", "low-contrast flat light", "moderate contrast with mid-tone separation".
+- Specular highlights: "specular highlights visible on skin and metallic surfaces", "no specular highlights, all surfaces matte".
+
+## 4. COLOR TEMPERATURE
+- Warm: "warm tungsten at roughly 3200K", "golden hour at roughly 3000K", "amber candlelight", "firelight orange".
+- Cool: "cool overcast at roughly 6500K", "blue hour at roughly 8000K", "moonlight blue".
+- Neutral: "neutral daylight at roughly 5500K", "balanced white-balanced light".
+- Mixed: "mixed warm key and cool fill", "competing color temperatures from multiple sources".
+
+## 5. SHADOW BEHAVIOR
+- Present / absent: "no visible shadows, light is fully diffuse", "shadows present throughout the frame".
+- Quality: "hard-edged shadows", "soft-edged shadows", "penumbra-rich shadows".
+- Geometry: "long shadows raking across the floor", "short shadows directly beneath the subject", "multiple shadow directions indicating multi-source light", "single dominant shadow direction".
+
+# LENGTH AND STRUCTURE
+
+- Write the description as ONE concise phrase or single sentence (or 2-3 sentences for complex multi-source setups).
+- Minimum 20 characters schema-level floor; target 25-80 words.
+- Lead with the source / type, then direction and quality, then color temperature, then shadow behavior.
+- Use precise lighting vocabulary ("key light", "rim light", "fill", "specular highlight", "diffused", "directional", "ambient").
+- Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.`;
+
+/**
+ * Stage 1.A — dedicated actions-only re-analysis.
+ * Runs ONLY for `POST /api/actions` (ADR 0018). Independent of the active
+ * preset. Mirrors `callMiniMaxCameraAngleAnalysis` (ADR 0008): single-
+ * attempt, schema builder inline, 60-second timeout, file-path cleanup
+ * on both success and error paths (handled by the route wrapper).
+ */
+const callMiniMaxActionsAnalysis = async (imageDataUri) => {
+  if (!minimaxConfigured) {
+    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+  }
+
+  const systemPrompt = DEFAULT_ACTIONS_PROMPT;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: MINIMAX_MODEL,
+        max_tokens: 600,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Analyse the image and respond with the JSON object containing only the "actions" field — a precise paragraph describing the kinematics, object interactions, multi-figure dynamics, implied motion, and scene narrative visible in the frame.' },
+              { type: 'image_url', image_url: { url: imageDataUri } }
+            ]
+          }
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'actions_factual_analysis',
+            strict: true,
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                actions: { type: 'string', minLength: 60 }
+              },
+              required: ['actions']
+            }
+          }
+        }
+      })
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`MiniMax M3 actions analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+
+    let parsed;
+    const trimmed = content.trim();
+
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e1) {
+      const codeBlock = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (codeBlock) {
+        try { parsed = JSON.parse(codeBlock[1]); } catch (e2) { /* fall through */ }
+      }
+      if (!parsed) {
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          try { parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)); }
+          catch (e3) { throw new Error(`Actions analysis response was not valid JSON: ${e3.message}`); }
+        } else {
+          throw new Error('Actions analysis response contained no JSON object.');
+        }
+      }
+    }
+
+    const schemaName = 'actions_factual_analysis';
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed[schemaName] && typeof parsed[schemaName] === 'object') {
+      parsed = parsed[schemaName];
+    }
+
+    if (typeof parsed?.actions !== 'string' || parsed.actions.length === 0) {
+      throw new Error('Actions analysis response did not contain an "actions" string.');
+    }
+
+    return parsed.actions;
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error.name === 'AbortError') throw new Error('Actions analysis request timed out after 60 seconds.');
+    throw error;
+  }
+};
+
+/**
+ * Stage 1.M — dedicated mood-only re-analysis.
+ * Runs ONLY for `POST /api/mood` (ADR 0018). Independent of the active
+ * preset. Mirrors `callMiniMaxActionsAnalysis` — single-attempt, schema
+ * builder inline, 60-second timeout.
+ */
+const callMiniMaxMoodAnalysis = async (imageDataUri) => {
+  if (!minimaxConfigured) {
+    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+  }
+
+  const systemPrompt = DEFAULT_MOOD_PROMPT;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: MINIMAX_MODEL,
+        max_tokens: 600,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Analyse the image and respond with the JSON object containing only the "mood" field — a precise paragraph describing the primary emotional tone, secondary undercurrent, atmosphere, pacing, and viewer-response cue of the frame.' },
+              { type: 'image_url', image_url: { url: imageDataUri } }
+            ]
+          }
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'mood_factual_analysis',
+            strict: true,
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                mood: { type: 'string', minLength: 60 }
+              },
+              required: ['mood']
+            }
+          }
+        }
+      })
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`MiniMax M3 mood analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+
+    let parsed;
+    const trimmed = content.trim();
+
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e1) {
+      const codeBlock = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (codeBlock) {
+        try { parsed = JSON.parse(codeBlock[1]); } catch (e2) { /* fall through */ }
+      }
+      if (!parsed) {
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          try { parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)); }
+          catch (e3) { throw new Error(`Mood analysis response was not valid JSON: ${e3.message}`); }
+        } else {
+          throw new Error('Mood analysis response contained no JSON object.');
+        }
+      }
+    }
+
+    const schemaName = 'mood_factual_analysis';
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed[schemaName] && typeof parsed[schemaName] === 'object') {
+      parsed = parsed[schemaName];
+    }
+
+    if (typeof parsed?.mood !== 'string' || parsed.mood.length === 0) {
+      throw new Error('Mood analysis response did not contain a "mood" string.');
+    }
+
+    return parsed.mood;
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error.name === 'AbortError') throw new Error('Mood analysis request timed out after 60 seconds.');
+    throw error;
+  }
+};
+
+/**
+ * Stage 1.L — dedicated lighting-only re-analysis.
+ * Runs ONLY for `POST /api/lighting` (ADR 0018). Independent of the
+ * active preset. Mirrors `callMiniMaxCameraAngleAnalysis` (ADR 0008):
+ * single-attempt, schema builder inline, 60-second timeout, 20-char
+ * schema floor (above the generic 15-char `text` floor).
+ */
+const callMiniMaxLightingAnalysis = async (imageDataUri) => {
+  if (!minimaxConfigured) {
+    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+  }
+
+  const systemPrompt = DEFAULT_LIGHTING_PROMPT;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: MINIMAX_MODEL,
+        max_tokens: 600,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Analyse the image and respond with the JSON object containing only the "lighting" field — a precise phrase or single sentence describing the light source, direction, quality, color temperature, and shadow behavior of the frame.' },
+              { type: 'image_url', image_url: { url: imageDataUri } }
+            ]
+          }
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'lighting_factual_analysis',
+            strict: true,
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                lighting: { type: 'string', minLength: 20 }
+              },
+              required: ['lighting']
+            }
+          }
+        }
+      })
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`MiniMax M3 lighting analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+
+    let parsed;
+    const trimmed = content.trim();
+
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e1) {
+      const codeBlock = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (codeBlock) {
+        try { parsed = JSON.parse(codeBlock[1]); } catch (e2) { /* fall through */ }
+      }
+      if (!parsed) {
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          try { parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)); }
+          catch (e3) { throw new Error(`Lighting analysis response was not valid JSON: ${e3.message}`); }
+        } else {
+          throw new Error('Lighting analysis response contained no JSON object.');
+        }
+      }
+    }
+
+    const schemaName = 'lighting_factual_analysis';
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed[schemaName] && typeof parsed[schemaName] === 'object') {
+      parsed = parsed[schemaName];
+    }
+
+    if (typeof parsed?.lighting !== 'string' || parsed.lighting.length === 0) {
+      throw new Error('Lighting analysis response did not contain a "lighting" string.');
+    }
+
+    return parsed.lighting;
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error.name === 'AbortError') throw new Error('Lighting analysis request timed out after 60 seconds.');
+    throw error;
+  }
+};
+
 /**
  * Stage 1.S — dedicated factual-only subject re-analysis.
  * Runs ONLY for `POST /api/subject` (ADR 0004). Independent of the active
@@ -3231,6 +3751,135 @@ app.post('/api/camera-angle', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         camera_angle: cameraAngle,
+        model: MINIMAX_MODEL
+      }
+    });
+  } catch (error) {
+    if (filePath && fs.existsSync(filePath)) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+    }
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Routes — Actions / Mood / Lighting re-analysis (ADR 0018)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /api/actions` — re-analyse the uploaded image with an actions-only
+ * system prompt and return a single `actions` field. Independent of the
+ * active preset (ADR 0018 §1). Powers the "Populate with AI" button beneath
+ * the actions textarea in the analysis editor.
+ *
+ * Response envelope mirrors `/api/camera-angle` (ADR 0008) for symmetry:
+ * `{ success, data: { actions, model } }`.
+ */
+app.post('/api/actions', upload.single('image'), async (req, res) => {
+  let filePath = null;
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
+    filePath = req.file.path;
+
+    if (!minimaxConfigured) {
+      fs.unlinkSync(filePath);
+      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+    }
+
+    const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
+    const actions = await callMiniMaxActionsAnalysis(imageDataUri);
+
+    fs.unlinkSync(filePath);
+    filePath = null;
+
+    res.json({
+      success: true,
+      data: {
+        actions,
+        model: MINIMAX_MODEL
+      }
+    });
+  } catch (error) {
+    if (filePath && fs.existsSync(filePath)) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+    }
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `POST /api/mood` — re-analyse the uploaded image with a mood-only system
+ * prompt and return a single `mood` field. Independent of the active
+ * preset (ADR 0018 §1). Powers the "Populate with AI" button beneath the
+ * mood textarea in the analysis editor, complementing the curated mood
+ * preset chips.
+ *
+ * Response envelope mirrors `/api/camera-angle` (ADR 0008) for symmetry:
+ * `{ success, data: { mood, model } }`.
+ */
+app.post('/api/mood', upload.single('image'), async (req, res) => {
+  let filePath = null;
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
+    filePath = req.file.path;
+
+    if (!minimaxConfigured) {
+      fs.unlinkSync(filePath);
+      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+    }
+
+    const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
+    const mood = await callMiniMaxMoodAnalysis(imageDataUri);
+
+    fs.unlinkSync(filePath);
+    filePath = null;
+
+    res.json({
+      success: true,
+      data: {
+        mood,
+        model: MINIMAX_MODEL
+      }
+    });
+  } catch (error) {
+    if (filePath && fs.existsSync(filePath)) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+    }
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `POST /api/lighting` — re-analyse the uploaded image with a lighting-only
+ * system prompt and return a single `lighting` field. Independent of the
+ * active preset (ADR 0018 §1). Powers the "Populate with AI" button beneath
+ * the lighting input in the analysis editor, complementing the curated
+ * lighting preset chips.
+ *
+ * Response envelope mirrors `/api/camera-angle` (ADR 0008) for symmetry:
+ * `{ success, data: { lighting, model } }`.
+ */
+app.post('/api/lighting', upload.single('image'), async (req, res) => {
+  let filePath = null;
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
+    filePath = req.file.path;
+
+    if (!minimaxConfigured) {
+      fs.unlinkSync(filePath);
+      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+    }
+
+    const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
+    const lighting = await callMiniMaxLightingAnalysis(imageDataUri);
+
+    fs.unlinkSync(filePath);
+    filePath = null;
+
+    res.json({
+      success: true,
+      data: {
+        lighting,
         model: MINIMAX_MODEL
       }
     });
@@ -5147,6 +5796,10 @@ module.exports = {
   DEFAULT_SUBJECT_PROMPT,
   MAX_SUBJECT_PROMPT_LENGTH,
   DEFAULT_CAMERA_ANGLE_PROMPT,
+  // ADR 0018 — actions / mood / lighting re-analysis
+  DEFAULT_ACTIONS_PROMPT,
+  DEFAULT_MOOD_PROMPT,
+  DEFAULT_LIGHTING_PROMPT,
   MAX_PALETTE_NAME_LENGTH,
   MAX_PALETTE_COLORS,
   HEX_COLOR_REGEX,
@@ -5160,6 +5813,10 @@ module.exports = {
   validateSubjectPrompt,
   callMiniMaxSubjectAnalysis,
   callMiniMaxCameraAngleAnalysis,
+  // ADR 0018 — actions / mood / lighting re-analysis helpers
+  callMiniMaxActionsAnalysis,
+  callMiniMaxMoodAnalysis,
+  callMiniMaxLightingAnalysis,
   generatePaletteId,
   generateRunId,
   readPalettes,

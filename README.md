@@ -14,6 +14,7 @@ An AI-powered web application that transforms uploaded images into refined, deta
 - **Responsive design** — works on mobile, tablet, and desktop
 - **Saved color palettes** — name and reuse a palette from any run. After analyze, a "Save palette…" button sits directly under the analyzed colors — click it, name the palette, and it becomes available in the Step 1 picker to override the auto-analyzed colors on the next job. Per-color **weight** (1–10) + **accent flag** + palette-level **accent cap** shape how the palette influences generated prompts: the server appends a deterministic `Color usage budget` block to the Stage 2 user message, and a distribution dashboard panel surfaces measured vs target mention counts per color (ADR 0014).
 - **Saved directives** — name, tag, version, search, share, and reuse your favorite Stage 2 directives. Below the directives textarea, a "Save directive…" button captures the current text as a named, tagged directive; a "Manage directives…" modal lets you edit, search, filter, restore prior versions, and import/export directive sets as `.i2p.json` files. Usage frequency and last-used date are tracked automatically each time you apply a directive.
+- **Focused re-analysis + curated presets for Actions / Mood / Lighting** — three new "Populate with AI" buttons (ADR 0018) sit directly beneath the `actions`, `mood`, and `lighting` fields in the analysis editor, each delegating a focused MiniMax M3 vision call to a single field via dedicated endpoints (`/api/actions`, `/api/mood`, `/api/lighting`). For `mood` and `lighting`, a curated taxonomy of preset chips is rendered beneath the button — five labeled categories (Positive / Reflective / Intense / Atmospheric / Still for mood; Natural / Directional / Quality / Stylized / Studio for lighting). Click a chip to fill the field with a one-line descriptor; edit after clicking. Chips are a zero-credit quick override; the AI button is the custom image-derived escape hatch.
 
 ## Architecture
 
@@ -224,6 +225,111 @@ for one question.
   "success": true,
   "data": {
     "camera_angle": "Eye-level medium shot captured from a three-quarter front-right perspective, with a normal lens showing natural perspective, shallow depth of field softly blurring the background, and a static frame with no implied motion.",
+    "model": "MiniMax-Text-01"
+  }
+}
+```
+
+### `POST /api/actions`
+
+Re-analyse an uploaded image with an actions-only system prompt and return a
+single `actions` field. Powers the "Populate with AI" button beneath the
+actions textarea in the analysis editor (ADR 0018).
+
+Independent of the active preset. The shipped prompt excludes the subject
+identity, clothing, lighting, color, mood, camera angle, composition,
+style, and medium — those are separate fields — and mandates coverage of
+five actions categories: body kinematics (posture, limbs, head, facial
+expression), object interactions (hands, tools, manipulation), multi-figure
+dynamics (relative action, group activity), implied motion (static vs
+mid-action, direction, energy), and scene narrative (apparent context,
+temporal moment).
+
+Live testing showed the 14-field Stage 1 schema compresses `actions` into a
+single-clause description (`"sitting cross-legged, smiling"`) because the
+LLM balances it against twelve other fields and satisfies the 30-word
+textarea floor with a flat response. This endpoint gives the actions
+contract the full prompt-attention window for one question.
+
+**Request:** `multipart/form-data`
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "actions": "Seated cross-legged on a polished wooden floor, the woman rests her clasped hands in her lap with her eyes closed in serene contemplation. Her head tilts slightly forward, lips drawn together in a soft, settled expression. No object interaction is visible and no implied motion is present — the frame captures a moment of stillness, the body settled at the end of an exhale.",
+    "model": "MiniMax-Text-01"
+  }
+}
+```
+
+### `POST /api/mood`
+
+Re-analyse an uploaded image with a mood-only system prompt and return a
+single `mood` field. Powers the "Populate with AI" button beneath the mood
+textarea in the analysis editor (ADR 0018), complementing the curated
+mood preset chips.
+
+Independent of the active preset. The shipped prompt excludes the
+subject, actions, lighting setup, color palette, composition, style, and
+medium — those are separate fields — and mandates coverage of five mood
+categories: primary emotional tone, secondary undercurrent (layering
+signal), atmosphere (ambient temperature + spatial feel), pacing
+(kinetic vs static), and viewer-response cue (the reaction the image
+invites).
+
+The 14-field Stage 1 schema compresses `mood` into one or two adjectives
+(`"cheerful"`, `"melancholic"`) because the LLM has no consistent mood
+vocabulary across presets. This endpoint gives the mood contract the full
+prompt-attention window for one question, and produces layered
+multi-clause descriptions.
+
+**Request:** `multipart/form-data`
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "mood": "Contemplative and serene, with a bittersweet undercurrent — the warmth of the wooden floor and the soft natural light pull the moment toward comfort, while the closed eyes and bowed head introduce a private, almost grief-tinged inwardness. The atmosphere is intimate and enclosed, the air still. Pacing is languid and meditative, the energy of a long-held breath.",
+    "model": "MiniMax-Text-01"
+  }
+}
+```
+
+### `POST /api/lighting`
+
+Re-analyse an uploaded image with a lighting-only system prompt and return
+a single `lighting` field. Powers the "Populate with AI" button beneath
+the lighting input in the analysis editor (ADR 0018), complementing the
+curated lighting preset chips.
+
+Independent of the active preset. The shipped prompt excludes the subject,
+actions, mood, color palette, composition, style, and medium — those are
+separate fields — and mandates coverage of five lighting categories: light
+source / type (natural / artificial / stylized), direction (front / side /
+back / top / under), quality (hard vs soft, contrast, specular
+highlights), color temperature (warm / cool / neutral / mixed), and shadow
+behavior (present / absent, hard-edged, soft, geometry).
+
+The 14-field Stage 1 schema compresses `lighting` into a short label
+(`"soft natural light"`, `"studio lighting"`) because the LLM balances it
+against twelve other fields and satisfies the 4-word `text` floor with a
+flat response. This endpoint gives the lighting contract the full
+prompt-attention window for one question.
+
+**Request:** `multipart/form-data`
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "lighting": "Soft diffused natural daylight from a north-facing window at camera-left, falling across the subject with a warm golden cast; shadows are soft-edged and short, falling toward camera-right.",
     "model": "MiniMax-Text-01"
   }
 }
