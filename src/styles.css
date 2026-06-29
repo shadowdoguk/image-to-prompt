@@ -869,6 +869,17 @@ body {
 
 .palette-picker-controls .select { flex: 1; min-width: 220px; }
 
+.palette-picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+#palette-picker-edit-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .palette-picker-hint {
   font-size: 0.82rem;
   color: var(--text-muted);

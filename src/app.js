@@ -120,6 +120,7 @@
     paletteSelect: $('palette-select'),
     paletteManageBtn: $('palette-manage-btn'),
     palettePickerHint: $('palette-picker-hint'),
+    palettePickerEditBtn: $('palette-picker-edit-btn'),
     savePaletteBtn: $('save-palette-btn'),
     paletteApplySelect: $('palette-apply-select'),
     paletteApplyBtn: $('palette-apply-btn'),
@@ -1329,6 +1330,7 @@
     }
 
     updatePalettePickerHint();
+    updatePalettePickerEditBtn();
   };
 
   const updatePalettePickerHint = () => {
@@ -1348,6 +1350,41 @@
     const source = preset ? `extracted from "${preset.name}"` : `extracted from ${palette.source_preset_id}`;
     dom.palettePickerHint.hidden = false;
     dom.palettePickerHint.textContent = `Will replace the auto-analyzed colors with ${palette.colors.length} saved color${palette.colors.length === 1 ? '' : 's'} (${source}).`;
+  };
+
+  /**
+   * Step 1 access to palette editing — the only place the user can pick
+   * a saved palette before running an analysis. The button label and
+   * disabled state reflect the current picker state:
+   *   • no palettes exist           → "Manage palettes…"  (opens manager; useful for creating the first one)
+   *   • a palette is selected       → "Edit palette…"     (opens the edit modal for that palette, ADR 0013)
+   *   • palettes exist, none picked → "Manage palettes…"  (opens manager so the user can browse / edit / delete)
+   * The behavior matches the user's wording "modify the color palettes":
+   * selecting a palette gives a one-click path into the per-color editor;
+   * otherwise the manager is the right landing surface.
+   */
+  const updatePalettePickerEditBtn = () => {
+    if (!dom.palettePickerEditBtn) return;
+    const id = state.selectedPaletteId;
+    const palette = id ? state.palettes.find((p) => p.id === id) : null;
+    dom.palettePickerEditBtn.disabled = false;
+    if (palette) {
+      dom.palettePickerEditBtn.textContent = 'Edit palette…';
+      dom.palettePickerEditBtn.dataset.mode = 'edit';
+      dom.palettePickerEditBtn.dataset.paletteId = palette.id;
+      dom.palettePickerEditBtn.setAttribute('aria-label', `Edit the saved palette "${palette.name}"`);
+    } else {
+      dom.palettePickerEditBtn.textContent = 'Manage palettes…';
+      dom.palettePickerEditBtn.dataset.mode = 'manage';
+      delete dom.palettePickerEditBtn.dataset.paletteId;
+      const any = state.palettes.length > 0;
+      dom.palettePickerEditBtn.setAttribute(
+        'aria-label',
+        any
+          ? 'Browse, rename, or delete saved color palettes'
+          : 'Create or manage saved color palettes'
+      );
+    }
   };
 
   const loadPalettes = async () => {
@@ -1386,7 +1423,19 @@
   dom.paletteSelect.addEventListener('change', (e) => {
     state.selectedPaletteId = e.target.value || null;
     updatePalettePickerHint();
+    updatePalettePickerEditBtn();
   });
+
+  if (dom.palettePickerEditBtn) {
+    dom.palettePickerEditBtn.addEventListener('click', () => {
+      if (dom.palettePickerEditBtn.dataset.mode === 'edit'
+          && dom.palettePickerEditBtn.dataset.paletteId) {
+        openEditPaletteModal(dom.palettePickerEditBtn.dataset.paletteId);
+      } else {
+        openPaletteManagerModal();
+      }
+    });
+  }
 
   dom.paletteManageBtn.addEventListener('click', () => openPaletteManagerModal());
 
