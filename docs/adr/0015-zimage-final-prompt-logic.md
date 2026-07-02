@@ -3,6 +3,7 @@
 ## Status
 
 Accepted. Implemented 2026-06-28.
+**Superseded for the Z-Image preset family by ADR 0019** (single-prose pastel-focal-glow contract). The sentinel pattern (`DEFAULT_ZIMAGE_STAGE2_PROMPT` substitution via `getEffectiveStage2Prompt`) and the per-preset override path (ADR 0007) remain valid.
 
 ## Type
 

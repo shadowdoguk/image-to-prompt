@@ -1657,6 +1657,170 @@ test('ADR 0017: buildColorBudgetBlock — singular vs plural in accent phrasing'
 
 // measureColorDistribution — same logic as before (priority-aware strict
 // checks in computeStrictPass; counts/measurement unchanged)
+test('Issue #8: buildColorBudgetBlock drops hex codes when isZImage (Issue #9 drops strength semantics)', () => {
+  // ADR 0019 — preset-aware palette emission. Z-Image interprets hex
+  // strings as text glyphs (Qwen3-4B is bilingual; Z-Image has
+  // text-in-image as a documented strength) and the guide §5.3 says
+  // use pigment names only. The FLUX/SDXL default path is preserved
+  // — passes opts.isZImage: true to swap to the Z-Image emission.
+  const { buildColorBudgetBlock } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    name: 'pastel-focal',
+    strength: 'strong',
+    colors: [
+      { hex: '#ff0000', name: 'Cadmium-coral', accent: true, placement: 'upper-left quadrant' },
+      { hex: '#cdeac0', name: 'Pale sage' }
+    ]
+  };
+  const fluxBlock = buildColorBudgetBlock(palette);
+  const zimageBlock = buildColorBudgetBlock(palette, { isZImage: true });
+  assertTrue(fluxBlock.includes('#ff0000'),
+    'FLUX/SDXL default path keeps hex codes');
+  assertTrue(fluxBlock.includes('[STRENGTH: strong]'),
+    'FLUX/SDXL default path keeps STRENGTH tag');
+  assertTrue(fluxBlock.includes('placement: upper-left quadrant'),
+    'FLUX/SDXL default path keeps per-accent placement region');
+  assertTrue(!zimageBlock.includes('#ff0000'),
+    'Z-Image path drops hex codes (Issue #8)');
+  assertTrue(!zimageBlock.includes('[STRENGTH: strong]'),
+    'Z-Image path drops STRENGTH tag (Issue #9)');
+  assertTrue(!zimageBlock.includes('placement: upper-left quadrant'),
+    'Z-Image path drops placement region binding');
+  assertTrue(zimageBlock.includes('Cadmium-coral'),
+    'Z-Image block still names the pigment');
+  assertTrue(zimageBlock.includes('Pale sage'),
+    'Z-Image block still names the muted surround');
+});
+
+test('Issue #15: buildAspectRatioDirective returns the prose directive for valid ratios, empty string otherwise', () => {
+  const {
+    buildAspectRatioDirective,
+    VALID_ASPECT_RATIOS,
+    ASPECT_RATIO_LABEL
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(buildAspectRatioDirective(''), '', 'empty string → empty directive');
+  assertEqual(buildAspectRatioDirective(null), '', 'null → empty directive');
+  assertEqual(buildAspectRatioDirective(undefined), '', 'undefined → empty directive');
+  assertEqual(buildAspectRatioDirective('bogus'), '', 'unknown ratio → empty directive (server rejects with 400 later)');
+  for (const r of VALID_ASPECT_RATIOS) {
+    const d = buildAspectRatioDirective(r);
+    assertTrue(d.includes('Aspect ratio:'), `directive for '${r}' starts with "Aspect ratio:"`);
+    assertTrue(d.includes(ASPECT_RATIO_LABEL[r]),
+      `directive for '${r}' names the doc §6 block-3 label "${ASPECT_RATIO_LABEL[r]}"`);
+  }
+});
+
+test('Issue #15: /api/generate-prompt 400s on invalid aspectRatio', () => {
+  // POST /api/generate-prompt with aspectRatio not in
+  // VALID_ASPECT_RATIOS. Tests cover the validation in the route.
+  // We test only that the rejection happens; full HTTP flow is
+  // covered by integration tests elsewhere.
+  const { VALID_ASPECT_RATIOS } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(VALID_ASPECT_RATIOS.has('square'), 'square is valid');
+  assertTrue(VALID_ASPECT_RATIOS.has('portrait'), 'portrait is valid');
+  assertTrue(VALID_ASPECT_RATIOS.has('landscape'), 'landscape is valid');
+  assertTrue(VALID_ASPECT_RATIOS.has('panoramic'), 'panoramic is valid');
+  assertTrue(!VALID_ASPECT_RATIOS.has('ultrawide'), 'ultrawide is NOT valid');
+  assertTrue(!VALID_ASPECT_RATIOS.has('4:3'), '4:3 is NOT valid (must be a name not a ratio)');
+});
+
+test('Issue #14: buildChatSystemPrompt appends the Z-Image constraints block for Z-Image sessions', () => {
+  const {
+    buildChatSystemPrompt,
+    ZIMAGE_PRESET_IDS,
+    ZIMAGE_CHAT_CONSTRAINTS_BLOCK
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof ZIMAGE_CHAT_CONSTRAINTS_BLOCK === 'string' && ZIMAGE_CHAT_CONSTRAINTS_BLOCK.length > 0,
+    'ZIMAGE_CHAT_CONSTRAINTS_BLOCK is a non-empty string');
+  assertTrue(ZIMAGE_PRESET_IDS.has('preset_alla_prima_oil'),
+    'ZIMAGE_PRESET_IDS includes the original sentinel preset');
+  assertTrue(ZIMAGE_PRESET_IDS.has('preset_968c0ccdf6fc6151'),
+    'ZIMAGE_PRESET_IDS includes the imported sentinel preset');
+  assertTrue(!ZIMAGE_PRESET_IDS.has('preset_photorealistic'),
+    'photorealistic preset is NOT in ZIMAGE_PRESET_IDS');
+  assertTrue(!ZIMAGE_PRESET_IDS.has('preset_sd_danbooru'),
+    'Danbooru preset is NOT in ZIMAGE_PRESET_IDS');
+
+  const baseSession = {
+    preset_id: 'preset_alla_prima_oil',
+    original_prompt: 'Oil painting on canvas, alla prima, palette knife.',
+    current_prompt: 'Oil painting on canvas, alla prima, palette knife.',
+    analysis_snapshot: { subject: 'x' }
+  };
+  const zPrompt = buildChatSystemPrompt(baseSession);
+  assertTrue(zPrompt.includes('Z-IMAGE CONTRACT'),
+    'Z-Image session prompt includes the Z-Image contract header');
+  assertTrue(zPrompt.includes('FORBIDDEN VOCABULARY'),
+    'Z-Image session prompt includes the forbidden-vocabulary list');
+  assertTrue(/color contrast/i.test(zPrompt),
+    'Z-Image session prompt references color-contrast glow mechanism');
+  assertTrue(/natural paint sheen/i.test(zPrompt),
+    'Z-Image session prompt references the natural paint sheen closing anchor');
+
+  const photoSession = { ...baseSession, preset_id: 'preset_photorealistic' };
+  const photoPrompt = buildChatSystemPrompt(photoSession);
+  assertTrue(!photoPrompt.includes('Z-IMAGE CONTRACT'),
+    'photorealistic session does NOT include the Z-Image contract');
+  assertTrue(photoPrompt.includes('EDIT, DO NOT REGENERATE'),
+    'photorealistic session retains the ADR 0012 anchor-preservation contract');
+});
+
+test('Issue #13: countStage2Words + classifyStage2Length honor the 150-300 sweet spot', () => {
+  const {
+    countStage2Words,
+    isWithinStage2SweetSpot,
+    classifyStage2Length,
+    STAGE2_SWEET_SPOT_MIN,
+    STAGE2_SWEET_SPOT_MAX,
+    STAGE2_HARD_MAX_WORDS
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(STAGE2_SWEET_SPOT_MIN, 150, 'sweet spot floor = 150 (guide §3)');
+  assertEqual(STAGE2_SWEET_SPOT_MAX, 300, 'sweet spot ceiling = 300 (guide §3)');
+  assertEqual(STAGE2_HARD_MAX_WORDS, 750, 'hard ceiling = 750 / 1024 tokens');
+  // Empty + whitespace → 0
+  assertEqual(countStage2Words(''), 0, 'empty string is 0 words');
+  assertEqual(countStage2Words('   \n\n  '), 0, 'whitespace is 0 words');
+  assertEqual(countStage2Words('one'), 1, 'single word');
+  assertEqual(countStage2Words('one two three'), 3, 'three words');
+  assertEqual(countStage2Words('  one  two\tthree\nfour  '), 4, 'mixed whitespace');
+  // Classification
+  assertEqual(classifyStage2Length('a ' .repeat(149)), 'too_short',
+    '149 words = too_short');
+  assertEqual(classifyStage2Length('a ' .repeat(150)), 'sweet_spot',
+    '150 words = sweet_spot (lower edge)');
+  assertEqual(classifyStage2Length('a ' .repeat(250)), 'sweet_spot',
+    '250 words = sweet_spot (middle)');
+  assertEqual(classifyStage2Length('a ' .repeat(300)), 'sweet_spot',
+    '300 words = sweet_spot (upper edge)');
+  assertEqual(classifyStage2Length('a ' .repeat(301)), 'too_long',
+    '301 words = too_long');
+  assertEqual(classifyStage2Length('a ' .repeat(750)), 'too_long',
+    '750 words = too_long (hard ceiling inclusive)');
+  assertEqual(classifyStage2Length('a ' .repeat(751)), 'way_too_long',
+    '751 words = way_too_long');
+  assertEqual(isWithinStage2SweetSpot('a ' .repeat(200)), true,
+    '200 words is inside sweet spot');
+  assertEqual(isWithinStage2SweetSpot('a ' .repeat(149)), false,
+    '149 words is outside');
+});
+
+test('Issue #8/#9: buildStage2Envelope threads opts into buildColorBudgetBlock', () => {
+  const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    name: 'pastel-focal',
+    strength: 'moderate',
+    colors: [
+      { hex: '#ff0000', name: 'Cadmium-coral' }
+    ]
+  };
+  const envFlux = buildStage2Envelope({ subject: 'x' }, '', palette);
+  const envZ = buildStage2Envelope({ subject: 'x' }, '', palette, { isZImage: true });
+  assertTrue(envFlux.color_budget.includes('#ff0000'),
+    'envelope with default opts keeps hex');
+  assertTrue(!envZ.color_budget.includes('#ff0000'),
+    'envelope with isZImage:true drops hex');
+});
+
 test('ADR 0017: measureColorDistribution — empty prompt returns zeros', () => {
   const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
   const m = measureColorDistribution('', { colors: [{ hex: '#d97706', name: 'a' }] });
@@ -2363,23 +2527,56 @@ test('ADR 0015: getEffectiveStage2Prompt substitutes ZIMAGE_STAGE2_SENTINEL with
   }
 });
 
-test('ADR 0015: DEFAULT_ZIMAGE_STAGE2_PROMPT mentions style anchor and two-section output', () => {
+test('ADR 0019: DEFAULT_ZIMAGE_STAGE2_PROMPT is single-prose pastel-focal-glow contract (was two-section gestural in ADR 0015)', () => {
   const { DEFAULT_ZIMAGE_STAGE2_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // Style anchor (verbatim quote must appear in the prompt)
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('Heavy impasto with vigorous scraped, dragged, and smeared paint'),
-    'prompt must include the verbatim style anchor opening');
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('gestural streaks of energy radiate outward from the figure'),
-    'prompt must include gestural streaks phrasing');
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('alla prima freshness throughout'),
-    'prompt must include alla prima freshness phrasing');
-  // Two-section output contract
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('SECTION A'),
-    'prompt must reference Section A');
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('SECTION B'),
-    'prompt must reference Section B');
-  // Accent override semantics
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('REPLACE'),
-    'prompt must make accent replacement explicit');
+  // Style & Technique block — pastel-palette / palette-knife / alla prima anchors
+  assertTrue(/oil painting on canvas/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must name oil painting on canvas as the medium');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('palette knife'),
+    'prompt must name palette knife as the application');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.toLowerCase().includes('alla prima'),
+    'prompt must name alla prima as the technique');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.toLowerCase().includes('pastel palette'),
+    'prompt must anchor on pastel palette');
+  // Pigment vocabulary from guide §5.3 — at least one saturated focal example
+  // and at least one muted-surround example must appear
+  assertTrue(/cadmium-coral/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must cite a saturated focal pigment (cadmium-coral)');
+  assertTrue(/pale sage/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must cite a muted-surround pigment (pale sage)');
+  // Lighting-as-Color (§8.1 glow-by-contrast module)
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('achieved through color contrast, not depicted illumination'),
+    'prompt must include the §8.1 lighting-as-color rule verbatim');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('no depicted light source'),
+    'prompt must include the no-depicted-light-source rule');
+  // Framing default (§8.3 Option A)
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('painting fills the frame'),
+    'prompt must include painting-fills-the-frame framing default');
+  // Length window
+  assertTrue(/150-300 words/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must cite the 150-300 word sweet spot');
+  assertTrue(/750 words/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must cite the 750-word hard ceiling');
+  // Closing directive — output only the prose, no labels
+  assertTrue(/Output only the prompt text/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must end with the output-only directive');
+  // Positive-anchor closing line (guide §17.1)
+  assertTrue(/natural paint sheen/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must include the natural paint sheen closing anchor');
+  // ADR 0019 — gestural-anchor and section-marker directives must NOT appear
+  assertTrue(!DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('gestural streaks of energy radiate outward from the figure'),
+    'ADR 0015 gestural-streak anchor must be removed');
+  assertTrue(!/Start your reply with these section headers/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'ADR 0015 "Start your reply with these section headers" directive must be removed');
+  assertTrue(!/de Kooning/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'gestural-school reference (de Kooning) must be removed');
+  assertTrue(!/Riopelle/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'gestural-school reference (Riopelle) must be removed');
+  // Negative-prompt tail must NOT appear as an instruction (CFG=0 ignores it).
+  // Quoting it as a forbidden example in the ANTI-PATTERNS section is correct;
+  // asserting it as positive instruction (`Use "no", "devoid of", "with no" phrasing`) would be wrong.
+  assertTrue(!/Use "no", "devoid of", "with no" phrasing/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'ADR 0015 "Use no/devoid of/with no phrasing" directive must be removed');
   // Hard size — must fit within MAX_STAGE2_PROMPT_LENGTH when sent as override
   assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.length <= 10000,
     `DEFAULT_ZIMAGE_STAGE2_PROMPT is ${DEFAULT_ZIMAGE_STAGE2_PROMPT.length} chars, must be ≤ 10000`);
@@ -6685,19 +6882,40 @@ test('ADR 0016: snapshotPalette falls back to moderate when strength is invalid'
   assertEqual(snap.strength, 'moderate', 'invalid strength → moderate');
 });
 
-test('ADR 0016: DEFAULT_ZIMAGE_STAGE2_PROMPT includes rules 11 + 12 (strength + placement)', () => {
-  const { DEFAULT_ZIMAGE_STAGE2_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(/STRENGTH MODIFIER/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt mentions STRENGTH MODIFIER');
-  assertTrue(/ACCENT PLACEMENT/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt mentions ACCENT PLACEMENT');
-  assertTrue(/subtle/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt names the subtle level');
-  assertTrue(/strict/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt names the strict level');
-  assertTrue(/placement region/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT) ||
-              /placement:/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt discusses placement regions');
+test('Issue #12: src/app.js exposes a section-marker stripper for the Copy-to-clipboard button', () => {
+  // After ADR 0019, the canonical Z-Image Stage 2 contract no longer emits
+  // `== SECTION A ==` / `== SECTION B ==` markers. Copy-to-clipboard still
+  // runs the prompt through a defensive strip function so that any
+  // future regression (or user-pasted Stage 2 override) can't leak
+  // audit metadata into InvokeAI's prompt field.
+  const fs = require('fs');
+  const appJs = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/const stripSectionMarkers = \(raw\)/.test(appJs),
+    'src/app.js defines stripSectionMarkers');
+  assertTrue(/window\.__imageToPromptCopyStrip\s*=\s*stripSectionMarkers/.test(appJs),
+    'stripSectionMarkers exposed on window for smoke tests');
+  assertTrue(/== SECTION A ==/.test(appJs),
+    'stripper looks for == SECTION A == header');
+  assertTrue(/== SECTION B ==/.test(appJs),
+    'stripper looks for == SECTION B == header');
+});
+
+test('ADR 0019: Z-Image canonical prompt is pastel-focal-glow (not FLUX/SDXL strength semantics)', () => {
+  // ADR 0016 added STRENGTH MODIFIER / ACCENT PLACEMENT rules to the Z-Image
+  // canonical prompt. ADR 0019 removes them from the Z-Image canonical
+  // prompt — these semantics are FLUX/SDXL-only and don't survive contact
+  // with Z-Image's CFG=0 + 1024-token chat-encoder. Strength + placement
+  // still live in `STRENGTH_PREAMBLES` + `buildColorBudgetBlock` for the
+  // non-Z-Image preset paths.
+  const { DEFAULT_ZIMAGE_STAGE2_PROMPT, STRENGTH_PREAMBLES } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(!/STRENGTH MODIFIER/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'ADR 0019 Z-Image prompt must NOT include STRENGTH MODIFIER (FLUX/SDXL-only)');
+  assertTrue(!/ACCENT PLACEMENT/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'ADR 0019 Z-Image prompt must NOT include ACCENT PLACEMENT (FLUX/SDXL-only)');
+  assertTrue(typeof STRENGTH_PREAMBLES === 'object' && STRENGTH_PREAMBLES.subtle,
+    'STRENGTH_PREAMBLES still exported for the non-Z-Image emission path');
+  assertTrue(STRENGTH_PREAMBLES.strict,
+    'STRENGTH_PREAMBLES.strict still present');
 });
 
 test('ADR 0017: HTTP integration — POST /api/palettes accepts strength + placement (weight rejected)', async () => {

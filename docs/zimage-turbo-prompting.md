@@ -6,10 +6,12 @@ generated images honor brand colors, strength modifiers, and accent
 placement.
 
 > **Scope:** This document is the reference for the
-> `DEFAULT_ZIMAGE_STAGE2_PROMPT` constant in `server.js` (ADR 0015) and
+> `DEFAULT_ZIMAGE_STAGE2_PROMPT` constant in `server.js` (ADR 0019) and
 > the `buildColorBudgetBlock` / `measureColorDistribution` helpers
-> (ADR 0014). It is a how-to for the prompt engineer; the decision
-> record lives in ADR 0015; the data shapes live in ADR 0014.
+> (ADRs 0014/0016/0017/0019). It is a how-to for the prompt engineer;
+> the decision record lives in ADR 0019; the data shapes live in
+> ADR 0014; ADR 0019 supersedes the gestural-school / two-section
+> contract that ADR 0015 originally locked.
 
 ---
 
@@ -62,102 +64,136 @@ placement.
 
 ## Part 2 — Prompt structure best practices
 
-### 2.1 Two-section contract
+### 2.1 Single-prose contract
 
-Our tool requires every final Stage 2 output to ship as two clearly
-labelled sections:
+ADR 0019 rewrote `DEFAULT_ZIMAGE_STAGE2_PROMPT` from a two-section
+output (Section A prose + Section B audit metadata) to a **single
+flowing-prose paragraph** of 150-300 words, optionally 2-3 short
+paragraphs if complex. The audit-trail shape that ADR 0015 locked
+into Section B has been replaced by a `length_check` descriptor in
+the response envelope (ADR 0019).
 
-| Section | Purpose | Length | Format |
-|---|---|---|---|
-| **Section A** | The image-generation prompt itself. | 80–200 words | Prose. No bullets, no lists, no YAML, no markup. |
-| **Section B** | Audit metadata. | Unbounded | Structured keys: `color_map`, `priority_order`, `accent_overrides`, `accent_regions`, `gestural_elements`, `style_confidence`, `composition_note`, `word_count_section_a`. |
+| Output shape | Length | Format |
+|---|---|---|
+| **Single prompt body** | 150–300 words target; hard ceiling 750 / 1024 tokens; minimum 80 | Prose. No bullets, no lists, no YAML, no markup, no labels, no `== SECTION A/B ==` markers. |
 
-Why two sections: Section A is what downstream tools will copy into
-the image generator. Section B is what a human reviewer (or our
-`measureColorDistribution` helper) can spot-check against the
-palette. Keeping them as labelled blocks makes copy/paste and audit
-both trivial.
+Why single-prose: the Stage 2 output is what gets pasted into
+InvokeAI's main prompt field verbatim. Z-Image Turbo interprets
+prose naturally (Qwen3-4B is a chat encoder); any markers, audit
+blocks, or labels leak into the model's conditioning as
+text-in-image glyphs.
 
 ### 2.2 Format order (strict)
 
-The canonical prompt locks 10 rules in priority order. They are
-re-stated here so prompt authors can write Section A by hand and get
-the same output as the LLM-driven path:
+The canonical prompt locks the response in six blocks woven into
+prose (close paraphrase of `docs/Z-IMAGE-TURBO-AGENT-PROMPT-GUIDE.md`
+§6). They are re-stated here so prompt authors can write a prompt by
+hand and get the same output as the LLM-driven path:
 
-1. **Subject + composition + spatial position** lead the prompt.
-   Never open with style, color, or technique. Always name the
-   subject and WHERE in the frame.
-2. **Color bound to region, in priority order.** Dominant first,
-   secondary next, accents last. Accent overrides are the **primary
-   tone** for their region (not a tint, not an overlay).
-3. **Paint handling (impasto description).** When the source has any
-   painterly texture, translate it into at least 3 of the named
-   sub-components (see §2.4).
-4. **Lighting and atmosphere.** Painterly terms. Link light to color
-   ("warm light catches the ridges of #cc8844 ochre").
-5. **Style declaration.** User-specified OR the verbatim style anchor
-   (see §2.4). Exactly one.
-6. **Compositional constraints.** "No text, no watermark, no logos."
-   If gestural: "no thin photographic detail — this is a painted
-   work." If minimal background: "background reduced to thin
-   scraped washes, no busy detail."
-7. Accent colors fully override the original region.
-8. User-unspecified style → impasto / alla prima / gestural verbatim.
-9. Gestural energy streaks radiate outward from the focal point when
-   an accent is in a gestural region.
-10. Section A = 80–200 words (count and report in Section B).
+1. **Subject** (40-80 words) — what the painting depicts. Specific
+   subjects ("a 34-year-old woman in a long charcoal wool coat, in
+   profile, looking left") — never generic ones ("a woman").
+2. **Scene / Ground** (15-40 words) — the contextual field around
+   the subject. Background colour and treatment. Floating, embedded,
+   emerging, isolated.
+3. **Composition** (20-40 words) — how the painting is framed. Shot
+   type, placement, foreground/background, breathing room, plus the
+   **canvas proportion** (square 1:1, portrait 4:5, landscape 16:9,
+   panoramic 21:9). Default framing: "the painting fills the frame
+   edge to edge, the painted surface itself the image, lit by even
+   diffused gallery light."
+4. **Lighting** (20-40 words) — the most important block. For this
+   style the radiance MUST come from color contrast against the
+   muted surround, never from a depicted lamp, sun, halo, backlight,
+   or rim light. Required phrases: "achieved through color contrast,
+   not depicted illumination" and "no depicted light source; the
+   glow emerges from chroma and temperature juxtaposition alone".
+5. **Style & Technique** (60-120 words) — the longest block. Oil
+   painting on canvas (or oil on raw linen when weave should read).
+   Palette-knife application. Pastel palette with named pigments
+   (chalky pale greens, dusty putty, soft creams, weathered bone,
+   muted lavender-grays) and **ONE highly saturated accent**
+   (cadmium-coral, cobalt blue, vermillion, etc.) anchored to a
+   specific subject element. Thick pasto / impasto ridges at the
+   focal; the surrounding field rendered in thinly scraped, dragged,
+   and smeared washes. Knife-edge marks visible, no brush hairs.
+   Alla prima, paint still pliable.
+6. **Constraints** (15-30 words, positive anchors at the end).
+   "A real oil painting, not a photograph, not a 3D render. Natural
+   paint sheen — matte in thick passages, slight gloss in scraped
+   areas — no plastic gloss, no digital airbrush finish, no CGI
+   look. Visible paint surface texture throughout."
 
-### 2.3 Vocabulary anchor (use verbatim)
+### 2.3 Style anchor (use verbatim)
 
-The painterly default style anchor — quoted from the canonical
-prompt so any author writing Section A manually can reproduce the
+The pastel-focal default style anchor — quoted from the canonical
+prompt so any author writing the prompt by hand can reproduce the
 contract:
 
-> "Heavy impasto with vigorous scraped, dragged, and smeared paint.
-> Palette-knife ridges and bold directional strokes follow the
-> form; gestural streaks of energy radiate outward from the figure,
-> fusing with thin, scraped background washes. Alla prima freshness
-> throughout, with strong variation between thickly loaded areas and
-> bare-canvas thin spots."
+> Oil painting on canvas, alla prima, applied with a palette knife.
+> The palette is pastel — chalky pale greens, dusty putty, soft
+> creams, weathered bone, muted lavender-grays — with a single
+> highly saturated accent of [SATURATED FOCAL COLOUR] in the
+> [FOCAL ELEMENT]. Thick pasto ridges in the focal area, paint
+> standing in relief with knife-edge marks. The surrounding field
+> is rendered in thinly scraped, dragged, and smeared washes, the
+> canvas weave visible in the thinner passages. Chromatic vibration
+> from juxtaposed warm and cool near-complementaries. The radiance
+> of the focal area emerges from color contrast alone, not from any
+> depicted light source. Loose, gestural, economical mark-making,
+> knife-edge marks visible, no brush hairs. The painting reads as
+> recently completed, paint still pliable.
 
 Use this as the style declaration whenever the user request is
-"artistic / painterly / expressive / abstract". For photographic or
-flat-vector requests, replace it with the user-specified style
-verbatim.
+"artistic / painterly / expressive / abstract" — gesturing at this
+artist's pastel-focal tradition. For photographic or flat-vector
+requests, the user-specified style wins.
+
+**Do not** use the gestural-school anchor ("heavy impasto with
+vigorous scraped, dragged, and smeared paint. … gestural streaks of
+energy radiate outward from the figure … reminiscent of the late
+paintings of de Kooning and the energetic scrape-and-drag technique
+of Riopelle"). That anchor was ADR 0015's default and now sits in
+the Z-Image chat-system prompt's STYLE-SCHOOL ANCHOR section under
+"do not introduce" — it points at a different focal logic.
 
 ### 2.4 Sub-component vocabulary (≥3 where relevant)
 
 - **THICK PAINT:** "impasto", "thickly loaded", "palette-knife
   ridges", "bold raised strokes".
 - **SCRAPED / DRAGGED:** "scraped, dragged, and smeared paint",
-  "drag marks visible in the medium".
-- **GESTURAL ENERGY:** "gestural strokes radiate outward",
-  "directional strokes follow the form".
+  "drag marks visible in the medium" — applied to the field; the
+  focal stays thick.
 - **THICK / THIN CONTRAST:** "thick areas contrast with thin
   bare-canvas washes", "loaded strokes over thin washes".
 - **ALLA PRIMA:** "alla prima freshness", "wet-in-wet",
-  "no overpainting", "direct brushwork".
-- **FORM-FOLLOWING:** "strokes follow the form of the subject",
-  "paint application describes the underlying shape".
+  "no overpainting", "direct brushwork", "paint still pliable".
+- **FOCAL ANCHOR:** "saturated [pigment] anchored to [subject
+  element]" — names which element of the subject the focal glow
+  clings to.
+- **GLOW MECHANISM:** "achieved through color contrast, not
+  depicted illumination"; "chroma and temperature juxtaposition".
 
 ### 2.5 Hard syntax rules
 
 - **Single style declaration.** Multiple styles ("oil and watercolor
   hybrid") confuse the model. Pick one and stick to it.
-- **No markup in Section A.** Markdown, bullets, YAML, and HTML all
-  end up rendered as visible text in the image (or as ignored noise).
-  Prose only.
+- **No markup in the prompt.** Markdown, bullets, YAML, HTML, JSON
+  all end up rendered as visible text in the image (or as ignored
+  noise). Prose only.
 - **No "and" lists of subjects.** "A dog and a cat and a horse"
   fragments spatial composition. One primary subject per prompt;
   mention others as background context only.
 - **Numbers spelled out.** "Three birds" not "3 birds". The model
   treats digits as text glyphs that bleed into the image.
-- **Hex codes appear with their color name.** "Crimson #cc3344",
-  not "#cc3344" alone. The model recovers the named color when the
-  exact hex is ambiguous.
-- **"No X" constraints at the end.** "no text, no watermark, no
-  logos" must be the last phrases of Section A. The model treats
-  trailing negative constraints as global exclusions.
+- **No hex codes in the prompt body.** The model approximates hex
+  values; use named pigments only (chalky, dusty, pale, etc.).
+  Hex codes live on the palette schema for storage and dashboard
+  use; they don't appear in the LLM-emitted prose.
+- **No "no X" constraints.** CFG=0 in Z-Image Turbo ignores
+  negative-prompt language ("no text", "no watermark", "no logos").
+  Use positive anchors instead — close the prompt with the §17.1
+  natural-paint-sheen line and the "a real oil painting" line.
 
 ---
 
@@ -202,20 +238,23 @@ returns a 400 message on rejection.
 synthesized to `"moderate"` on read (mirroring ADR 0014's
 `weight`/`accent` synthesis).
 
-### 3.3 Accent color placement (NEW)
+### 3.3 Accent color placement (FLUX/SDXL paths only)
 
 Accent colors now carry an optional `placement` field that names the
-region where the accent must appear. The placement is appended to
-the color budget block:
+region where the accent must appear. The placement is appended to the
+color budget block:
 
 ```
 - Crimson #cc3344 — ~25% — upper-left quadrant (ACCENT — mention at most 2 times, placement: upper-left quadrant)
 ```
 
-The canonical Stage 2 prompt is updated to interpret
-`placement: <region>` as a hard region-binding directive. The
-format-order rule is strengthened from "accent overrides are the
-primary tone for their region" to:
+**As of ADR 0019, `placement` is FLUX/SDXL-only.** Z-Image interprets
+prose naturally and the §6 Block 3 composition rule already covers
+spatial placement; an explicit `placement: <region>` binding would
+conflict with the prompt's compositional logic.
+
+For the FLUX/SDXL canonical Stage 2 prompt, `placement: <region>` is
+a hard region-binding directive:
 
 > **Accent overrides fully replace the original region's color, AND
 > must appear within the documented placement region. If the source
@@ -231,7 +270,7 @@ composition when no placement is specified.
 when supplied.
 **Default:** empty string (no placement; LLM infers from source).
 
-### 3.4 Strength + accent interaction
+### 3.4 Strength + accent interaction (FLUX/SDXL paths only)
 
 - `subtle + accent=true`: the accent is treated as a *tonal* accent.
   The prompt is told "use this as a secondary tint in the named
@@ -242,6 +281,30 @@ when supplied.
   unchanged.
 - `strong + accent=false`: the color is a hard requirement but
   doesn't override region semantics.
+
+### 3.4a Z-Image preset-aware emission (ADR 0019)
+
+`buildColorBudgetBlock(palette, opts)` now takes an `opts.isZImage`
+flag. When `true` (calling preset is one of the two Z-Image sentinel
+presets — `preset_alla_prima_oil` or `preset_968c0ccdf6fc6151`),
+the block drops:
+
+- the per-line `Name #hexcode` form (emits pigment name only — guide
+  §5.3 pigment vocabulary)
+- the strength preamble + per-line `[STRENGTH: <level>]` tag (strength
+  is FLUX/SDXL semantics; Z-Image interprets prose naturally)
+- the per-accent `placement: <region>` tag (placement region is
+  FLUX/SDXL semantics; conflicts with §6 Block 3)
+- the cumulative sum/cap notes
+
+Default `isZImage = false` preserves the existing FLUX/SDXL/Danbooru
+emission. The active preset is detected in `/api/generate-prompt` by
+comparing `getEffectiveStage2Prompt(preset)` against
+`DEFAULT_ZIMAGE_STAGE2_PROMPT`.
+
+`measureColorDistribution` is unchanged — it counts color names
+case-insensitively in the output prompt; absence of hex strings in
+the Z-Image prompt just means the dashboard's hex% bar reflects 0.
 
 ---
 
@@ -281,6 +344,8 @@ when supplied.
 - ADR 0006, 0013 — palette CRUD + editing.
 - ADR 0014 — weighted distribution + telemetry + dashboard.
 - ADR 0015 — canonical Z-Image Stage 2 prompt with two sections.
+  **Superseded for the Z-Image preset family by ADR 0019**; the
+  sentinel + per-preset override pattern (ADR 0007) remains valid.
 - ADR 0016 — palette strength + accent placement + `strict_pass`
   validation. The canonical Stage 2 prompt now interprets
   `palette.strength` (subtle / moderate / strong / strict) and
@@ -290,40 +355,73 @@ when supplied.
   appends `strict_pass` + `strict_violations` to the response envelope
   when the palette is `strict`. The result panel surfaces a non-
   blocking warning chip on `strict_pass === false`.
+- ADR 0017 — order-based color priority (replaces per-color `weight`).
+- ADR 0018 — focused re-analysis + curated preset chips for
+  `actions` / `mood` / `lighting`.
+- **ADR 0019** — pastel-focal-glow prompt contract, length-check
+  orchestrator, preset-aware palette emission, chat-layer Z-Image
+  constraints block, aspect-ratio picker, 1024-token reminder
+  banner, defensive Copy-to-clipboard stripper. See
+  `docs/adr/0019-zimage-pastel-focal-glow-contract.md`.
 
-### 5.2 To add (this work)
+### 5.2 Z-Image contract revisions (ADR 0019)
 
-*Resolved.* All ten items below were implemented in commit
-`f2c76d2` (ADR 0016). For the design rationale see
-`docs/adr/0016-zimage-strength-and-placement.md`; for the contract see
-§3.2–§3.4 above; for tests see `tests/run-all.js` lines ~5698–6140
-(ADR 0016 block).
+The following were resolved in ADR 0019 (this branch, commits
+`ebd65dd` through `2dfb131`):
 
-1. `palette.strength` field with four-level enum (default
-   `moderate`). Validation + legacy synthesis. ✅
-2. `color.placement` field (optional, ≤60 chars). Validation. ✅
-3. `buildColorBudgetBlock` extended to emit strength language and
-   placement tags. ✅
-4. `measureColorDistribution` extended with `strict_pass` flag when
-   `strength === "strict"`. ✅
-5. `DEFAULT_ZIMAGE_STAGE2_PROMPT` updated with two new rules:
-   - Strength modifier interpretation (subtle / moderate / strong /
-     strict). ✅
-   - Accent placement region interpretation. ✅
-6. Frontend: palette edit modal adds strength `<select>` (4 options). ✅
-7. Frontend: palette edit modal adds per-color `placement` text
-   input (visible only when `accent === true`). ✅
-8. Frontend: result panel surfaces `strict_pass` warning. ✅
-9. New tests in `tests/run-all.js` covering each change. ✅
-   (`260 passed, 0 failed` as of the ADR 0016 commit.)
-10. New ADR `0016-zimage-strength-and-placement.md` capturing the
-    decision rationale and consequences. ✅
+1. Rewrite `DEFAULT_ZIMAGE_STAGE2_PROMPT` to single-prose
+   pastel-focal-glow contract. Pastel palette anchor, palette knife,
+   alla prima, no gestural-school vocabulary. ✅
+2. Drop `de Kooning / Riopelle` reference. ✅
+3. Drop `== SECTION A ==` / `== SECTION B ==` markers; remove
+   Section B audit metadata block from the contract. ✅
+4. Drop "no X" trailing constraints (CFG=0 ignores them). Replace
+   with the §17.1 positive-anchor "natural paint sheen" closing
+   line. ✅
+5. Add §8.1 "glow by color contrast" module + forbid-list for
+   depicted-light vocabulary. ✅
+6. Length window 150-300 words, hard ceiling 750 / 1024 tokens. ✅
+7. Add Composition rule with aspect ratio + §8.3 painting-fills-
+   the-frame framing default. ✅
+8. `buildColorBudgetBlock` preset-aware: drop hex + `[STRENGTH]`
+   tag + `placement` + sum/cap notes for Z-Image presets. ✅
+9. Length-check orchestrator (server-side word counter, one retry
+   with reinforcement directive, response envelope carries
+   `length_check` descriptor). ✅
+10. Chat system prompt gets a Z-Image constraints block for
+    sessions anchored to Z-Image presets. ✅
+11. Aspect-ratio body field + frontend `<select>` (square / portrait /
+    landscape / panoramic). ✅
+12. 1024-token reminder banner in the chat panel. ✅
+13. Defensive Copy-to-clipboard strip (`stripSectionMarkers`) — load-
+    bearing safety net for any future regression. ✅
+14. `data/presets.json` — both Z-Image presets' `field_defaults` and
+    visible names updated to pastel-focal wording. ✅
+15. New ADR `0019-zimage-pastel-focal-glow-contract.md` capturing
+    the decision rationale, the new contracts, the preset-aware
+    emission split, and the out-of-scope locks. ✅
 
 ### 5.3 Out of scope (locked for follow-on)
 
-- Other presets adopting the new fields. (Photorealistic and Danbooru
-  presets don't use the Z-Image sentinel.)
-- Frontend collapsible Section B in result panel (ADR 0015 §4).
+- Other presets adopting the new contract. (Photorealistic and
+  Danbooru presets don't use the Z-Image sentinel; they keep their
+  existing FLUX/SDXL Stage 2 prompts and palette emission
+  semantics. Migrating them would be a separate decision.)
+- Frontend collapsible Section B in result panel — **resolved**
+  implicitly by ADR 0019's Section B removal; no separate work
+  needed. The defensive Copy-to-clipboard strip
+  (`#12` above) is the user-facing safety net.
+- Real InvokeAI resolution push-through (the artist still has to set
+  the resolution in InvokeAI's panel to match the chosen aspect
+  ratio). The aspect-ratio body field tells the prompt what to
+  *describe*, not what to render at.
+- Bilingual text-in-image support (Qwen3-4B's bilingual strength —
+  separate feature, irrelevant to the painterly tradition).
+- Chat-layer integration of palette strength (refinement requests
+  currently ignore palette strength on Z-Image presets because
+  strength is FLUX/SDXL-only; out of scope).
+- Output validation beyond length (colorimetric ΔE from a palette
+  would need a downstream image-render step).
 - Bilingual text-in-image support (Qwen3-4B's strength — separate
   feature).
 - Chat-layer integration of strength (refinement requests currently

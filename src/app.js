@@ -45,7 +45,25 @@
     editingDirectiveId: null,   // ADR 0009 — id of the directive being edited (null when closed)
     chatSessions: [],           // ADR 0011 — all chat sessions, newest first
     chatSessionId: null,        // ADR 0011 — id of the session anchored to the current generated prompt
-    chatIsSending: false        // ADR 0011 — true while waiting on /api/chat/sessions/:id/messages
+    chatIsSending: false,       // ADR 0011 — true while waiting on /api/chat/sessions/:id/messages
+    selectedAspectRatio: ''     // ADR 0019 Issue #15 — '' means "auto / no preference"
+  };
+
+  // ADR 0019 Issue #15 — count words in the current prompt and toggle the
+  // 1024-token reminder banner. Mirrors the server-side
+  // STAGE2_HARD_MAX_WORDS = 750 (guide §3). Pure / no side effects.
+  const TOKEN_REMINDER_THRESHOLD = 750;
+  const updateTokenReminderBanner = () => {
+    if (!dom.tokenReminderBanner) return;
+    const prompt = state.finalPrompt || '';
+    const words = prompt.trim().split(/\s+/).filter((w) => w.length > 0).length;
+    if (words >= TOKEN_REMINDER_THRESHOLD) {
+      dom.tokenReminderBanner.textContent =
+        `Current prompt is ${words} words — at or past the 1024-token / 750-word ceiling. Z-Image will silently truncate above that; consider trimming adjectives in chat before generating.`;
+      dom.tokenReminderBanner.hidden = false;
+    } else {
+      dom.tokenReminderBanner.hidden = true;
+    }
   };
 
   // ─── DOM cache ─────────────────────────────────────────────────────────
@@ -74,11 +92,13 @@
     reAnalyzeBtn: $('re-analyze-btn'),
     editStage2PromptBtn: $('edit-stage2-prompt-btn'),
     generatePromptBtn: $('generate-prompt-btn'),
+    aspectRatioSelect: $('aspect-ratio-select'),
 
     resultSection: $('step-result'),
     resultPrompt: $('result-prompt'),
     resultMetaInfo: $('result-meta-info'),
     resultStrictWarn: $('result-strict-warn'),
+    tokenReminderBanner: $('token-reminder-banner'),
     copyBtn: $('copy-btn'),
     regenerateBtn: $('regenerate-btn'),
 
@@ -1575,7 +1595,12 @@
           // the Stage 2 user message and surface distribution_metrics
           // in the response envelope. When no palette is selected,
           // omit the field (server treats missing as "no weighting").
-          paletteId: state.selectedPaletteId || undefined
+          paletteId: state.selectedPaletteId || undefined,
+          // ADR 0019 Issue #15 — aspect-ratio picker. When the user
+          // has chosen one (square / portrait / landscape / panoramic),
+          // forward it to the server so the Stage 2 LLM anchors Block
+          // 3 on the chosen canvas proportion.
+          aspectRatio: state.selectedAspectRatio || undefined
         })
       });
       state.finalPrompt = data.prompt;
@@ -1586,6 +1611,7 @@
       // palette after a weighted run).
       state.lastDistributionMetrics = data.distribution_metrics || null;
       state.lastPaletteId = data.palette_id || null;
+      state.lastLengthCheck = data.length_check || null;
       displayResult(data);
       hideError();
     } catch (e) {
@@ -1599,8 +1625,17 @@
 
   const displayResult = (data) => {
     dom.resultPrompt.textContent = data.prompt;
+    // ADR 0019 Issue #15 — re-evaluate the 1024-token reminder banner
+    // whenever the displayed prompt changes. Cheap, runs on every
+    // display update + every chat Apply.
+    updateTokenReminderBanner();
     const preset = state.presets.find((p) => p.id === data.preset_id);
     const meta = [`Preset: ${data.preset_name || preset?.name || data.preset_id}`, `Model: ${data.model}`];
+    if (data.length_check && data.length_check.classification === 'sweet_spot') {
+      meta.push(`${data.length_check.wordCount} words (sweet spot)`);
+    } else if (data.length_check) {
+      meta.push(`${data.length_check.wordCount} words (outside sweet spot)`);
+    }
     dom.resultMetaInfo.textContent = meta.join(' • ');
     // ADR 0016 — surface strict-palette validation result. When a
     // strict palette was used and the validation failed, show a
@@ -1621,6 +1656,12 @@
         dom.resultStrictWarn.removeAttribute('data-tone');
       }
     }
+    // ADR 0019 Issue #13 — surface length-check result on the result
+    // meta line (above). For Z-Image presets, the server returns
+    // `data.length_check` when the orchestrator ran. Non-Z-Image
+    // presets never receive the field so this branch is skipped
+    // silently for them. We don't add a second warning chip — the
+    // word-count badge on the meta line is enough.
     dom.resultSection.hidden = false;
     dom.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
@@ -1648,6 +1689,15 @@
   dom.generatePromptBtn.addEventListener('click', runGeneratePrompt);
   dom.regenerateBtn.addEventListener('click', runGeneratePrompt);
 
+  // ADR 0019 Issue #15 — aspect-ratio picker on the Generate-prompt
+  // row. Persists its value on state.selectedAspectRatio so the
+  // pick survives across runs without the user having to re-pick.
+  if (dom.aspectRatioSelect) {
+    dom.aspectRatioSelect.addEventListener('change', () => {
+      state.selectedAspectRatio = dom.aspectRatioSelect.value || '';
+    });
+  }
+
   // Directives counter
   dom.directivesInput.addEventListener('input', () => {
     dom.directivesCount.textContent = `${dom.directivesInput.value.length} / 1000`;
@@ -1655,9 +1705,34 @@
 
   // ─── Copy to clipboard ─────────────────────────────────────────────────
 
+  // ADR 0019 / Issue #12 — when the canonical Z-Image Stage 2 contract is
+  // active, the LLM response is a single flowing-paragraph of 150-300
+  // words. As a safety net against any future regression (or against a
+  // user-pasted Stage 2 override that still emits section markers),
+  // strip any leading `== SECTION A ==` header and any trailing
+  // `== SECTION B ==` block before copying. The artist pastes this into
+  // InvokeAI's prompt field — only the prose paragraph is conditioning;
+  // section markers, audit metadata, and labels would be silently fed
+  // to the Z-Image encoder as text-in-image glyphs.
+  const stripSectionMarkers = (raw) => {
+    if (typeof raw !== 'string') return '';
+    let text = raw.trim();
+    if (!text) return text;
+    const sectionA = text.indexOf('== SECTION A ==');
+    const sectionB = text.indexOf('== SECTION B ==');
+    if (sectionA !== -1) {
+      text = text.slice(sectionA + '== SECTION A =='.length);
+    }
+    if (sectionB !== -1) {
+      text = text.slice(0, sectionB);
+    }
+    return text.trim();
+  };
+
   dom.copyBtn.addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText(dom.resultPrompt.textContent);
+      const cleaned = stripSectionMarkers(dom.resultPrompt.textContent);
+      await navigator.clipboard.writeText(cleaned);
       const original = dom.copyBtn.textContent;
       dom.copyBtn.textContent = 'Copied!';
       setTimeout(() => { dom.copyBtn.textContent = original; }, 2000);
@@ -1665,6 +1740,10 @@
       showError('Failed to copy to clipboard.');
     }
   });
+
+  // Expose the stripper on `window` so smoke tests in tests/*.js can reach
+  // it without tearing apart the IIFE closure that wraps this file.
+  if (typeof window !== 'undefined') window.__imageToPromptCopyStrip = stripSectionMarkers;
 
   // ─── Error dismissal ───────────────────────────────────────────────────
 
@@ -4428,7 +4507,12 @@
       // "working prompt" — Step 4's <p id="result-prompt">. Apply
       // doesn't regenerate through Stage 2; the chat revision IS the
       // new prompt the user wants to copy.
+      state.finalPrompt = updated.current_prompt;
       dom.resultPrompt.textContent = updated.current_prompt;
+      // ADR 0019 Issue #15 — re-evaluate the 1024-token reminder
+      // banner after a chat Apply. Apply edits can grow the prompt
+      // past the ceiling; the banner is the user's only signal.
+      updateTokenReminderBanner();
       // Splice the updated session into local state.
       const idx = state.chatSessions.findIndex((s) => s.id === updated.id);
       if (idx !== -1) state.chatSessions[idx] = updated;

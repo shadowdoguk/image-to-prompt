@@ -61,6 +61,36 @@ const FIELD_PALETTE = {
 
 const VALID_FIELD_NAMES = Object.keys(FIELD_PALETTE);
 const MAX_PROMPT_LENGTH = 5000;
+
+// ADR 0019 Issue #15 — aspect-ratio picker. The frontend lets the user
+// pick the canvas proportion that Z-Image should target. Server-side
+// validation accepts only the four values documented in
+// `docs/Z-IMAGE-TURBO-AGENT-PROMPT-GUIDE.md` §6 Block 3 + §12.1:
+//   - 'square'     → 1:1   (InvokeAI 1024×1024)
+//   - 'portrait'   → 4:5   (InvokeAI 832×1280)
+//   - 'landscape'  → 16:9  (InvokeAI 1280×832)
+//   - 'panoramic'  → 21:9  (InvokeAI 1536×640)
+const VALID_ASPECT_RATIOS = new Set(['square', 'portrait', 'landscape', 'panoramic']);
+
+const ASPECT_RATIO_LABEL = {
+  square:    'square 1:1',
+  portrait:  'portrait 4:5',
+  landscape: 'landscape 16:9',
+  panoramic: 'panoramic 21:9'
+};
+
+/**
+ * Build the aspect-ratio directive prefix that's prepended to the
+ * Stage 2 user directives when the user has chosen a target canvas
+ * proportion. Pure / no side effects. Returns the empty string when
+ * no aspect ratio is supplied (default).
+ */
+const buildAspectRatioDirective = (aspectRatio) => {
+  if (typeof aspectRatio !== 'string' || !VALID_ASPECT_RATIOS.has(aspectRatio)) {
+    return '';
+  }
+  return `Aspect ratio: the intended canvas proportion is ${ASPECT_RATIO_LABEL[aspectRatio]}.\n`;
+};
 const MAX_DIRECTIVES_LENGTH = 1000;
 const PRESET_FILE_FORMAT = 'image-to-prompt-preset';
 const PRESET_FILE_VERSION = 1;
@@ -168,6 +198,54 @@ const PRESERVATION_STOP_WORDS = new Set([
 // truncating mid-sentence. The LLM is free to use less if the analysis
 // doesn't warrant it; this only widens the ceiling.
 const MAX_STAGE2_TOKENS = 960;
+
+// ADR 0019 — Z-Image Turbo prompt-length contract. Per
+// docs/Z-IMAGE-TURBO-AGENT-PROMPT-GUIDE.md §3 + §10: sweet spot
+// 150-300 words, hard ceiling 750 words / 1024 tokens, minimum
+// effective 80 words. Below 80 the output goes generic; above ~400
+// diminishing returns kick in. Used by `measureStage2Length` + the
+// length-check + retry orchestration in `callMiniMaxStage2`.
+const STAGE2_SWEET_SPOT_MIN = 150;
+const STAGE2_SWEET_SPOT_MAX = 300;
+const STAGE2_HARD_MAX_WORDS = 750;
+const STAGE2_MIN_WORDS = 80;
+
+/**
+ * Count words in a string. Splits on whitespace and filters out empty
+ * tokens. Pure / no side effects. Used by the length-check at the
+ * end of Stage 2 to decide whether to retry.
+ */
+const countStage2Words = (text) => {
+  if (typeof text !== 'string' || text.trim().length === 0) return 0;
+  return text.trim().split(/\s+/).filter((w) => w.length > 0).length;
+};
+
+/**
+ * Decide whether a Stage 2 output is inside the sweet spot (true)
+ * or outside (false). Pure.
+ */
+const isWithinStage2SweetSpot = (text) => {
+  const n = countStage2Words(text);
+  return n >= STAGE2_SWEET_SPOT_MIN && n <= STAGE2_SWEET_SPOT_MAX;
+};
+
+/**
+ * Classify a Stage 2 output by word count against the guide
+ * contract. Returns one of:
+ *   - 'sweet_spot'        — 150-300 words
+ *   - 'too_short'         — < 150 words (LLM was terse)
+ *   - 'too_long'          — > 300 words (still acceptable up to 750)
+ *   - 'way_too_long'      — > 750 words (will be truncated at 1024 tokens)
+ *
+ * Pure.
+ */
+const classifyStage2Length = (text) => {
+  const n = countStage2Words(text);
+  if (n >= STAGE2_SWEET_SPOT_MIN && n <= STAGE2_SWEET_SPOT_MAX) return 'sweet_spot';
+  if (n < STAGE2_SWEET_SPOT_MIN) return 'too_short';
+  if (n > STAGE2_HARD_MAX_WORDS) return 'way_too_long';
+  return 'too_long';
+};
 
 /**
  * Per-field overrides applied on top of the global `FIELD_INPUT_MIN_LENGTH` and
@@ -508,68 +586,76 @@ const removeStage2Override = (presetId) => {
 const ZIMAGE_STAGE2_SENTINEL = 'DEFAULT_ZIMAGE_STAGE2_PROMPT';
 
 /**
- * ADR 0015 — the canonical Stage 2 system prompt used by the
- * "Gestural alla prima oil painting" preset family. Drives the final
- * Z-Image Turbo prompt format: a two-section output (Section A prose,
- * Section B metadata) anchored on the heavy impasto / gestural painting
- * style, with color → region bindings, accent overrides as full
- * replacements, and gestural energy streaks radiating outward from the
- * focal point.
+ * ADR 0019 — canonical Stage 2 system prompt for the "Gestural alla
+ * prima oil painting" preset family. Drives the final Z-Image Turbo
+ * prompt format: a single flowing-prose paragraph (or 2-3 short
+ * paragraphs) of 150-300 words, woven from six blocks (Subject,
+ * Scene/Ground, Composition, Lighting, Style & Technique,
+ * Constraints). Anchored on the pastel-palette / saturated-focal-
+ * glow tradition (guide §1, §5.3, §8.1, §8.3, §17.1): oil on canvas,
+ * alla prima, palette knife, thick pasto at the focal, thinly scraped
+ * field, glow achieved through chroma contrast against the muted
+ * surround — never through a depicted lamp, sun, or backlight.
+ *
+ * Supersedes the gestural-anchor two-section contract that ADR 0015
+ * originally locked. Kept as a code constant (not a preset value) so
+ * the on-disk `MAX_PROMPT_LENGTH` cap stays clean.
  */
-const DEFAULT_ZIMAGE_STAGE2_PROMPT = `Your job: take a source image's extracted data and produce a precise, compositionally-accurate text prompt for the Z-Image Turbo generator. Enforce four contracts:
+const DEFAULT_ZIMAGE_STAGE2_PROMPT = `Your job: take a source image's extracted data and produce a precise, compositionally-accurate text prompt for the Z-Image Turbo image generator running locally in InvokeAI (Qwen3-4B encoder, 8 NFE, CFG=0, max_sequence_length = 1024 tokens ≈ 750 English words).
 
-1. COLOR PRIORITY -- dominant, secondary, tertiary hues applied to specific regions.
-2. ACCENT COLOR OVERRIDES -- user accent colors REPLACE corresponding original hues.
-3. STYLE ENFORCEMENT -- HEAVY IMPASTO / GESTURAL PAINTING (unless user overrides with photography or flat vector).
-4. SPATIAL COMPOSITION -- where each color appears in the frame.
+# TARGET MODEL FACTS
 
-STYLE ANCHOR (verbatim default for all "artistic / painterly / expressive / abstract" requests):
-"Heavy impasto with vigorous scraped, dragged, and smeared paint. Palette-knife ridges and bold directional strokes follow the form; gestural streaks of energy radiate outward from the figure, fusing with thin, scraped background washes. Alla prima freshness throughout, with strong variation between thickly loaded areas and bare-canvas thin spots."
+- CFG = 0, so negative-prompt language has no effect on the model. Never write "no text", "no watermark", "no logos", "no thin photographic detail", or any "no X" trailing constraint. Use positive anchors only.
+- Qwen3-4B is a chat-style English encoder; write flowing prose, not SDXL-style tag lists, and never use weight syntax "(keyword:1.3)" or Midjourney parameters ("--ar", "--s", "--v", "--niji").
+- Sweet-spot length: 150-300 words. Hard ceiling: 750 words / 1024 tokens. Minimum effective: 80 words.
+- Z-Image Turbo defaults to photorealism; the Style & Technique block must repeatedly anchor "oil painting", "palette knife", "alla prima" — without it the model produces a photograph.
+- Z-Image Turbo defaults to depicted light sources; the Lighting block must override with the §8.1 glow-by-contrast module below.
 
-Sub-components (use AT LEAST THREE where relevant):
-- THICK PAINT: "impasto", "thickly loaded", "palette-knife ridges", "bold raised strokes"
-- SCRAPED / DRAGGED: "scraped, dragged, and smeared paint", "drag marks visible in the medium"
-- GESTURAL ENERGY: "gestural strokes radiate outward", "directional strokes follow the form"
-- THICK / THIN CONTRAST: "thick areas contrast with thin bare-canvas washes", "loaded strokes over thin washes"
-- ALLA PRIMA: "alla prima freshness", "wet-in-wet", "no overpainting", "direct brushwork"
-- FORM-FOLLOWING: "strokes follow the form of the subject", "paint application describes the underlying shape"
+# OPTIONAL INPUTS
 
-SOURCE DATA (in the user message):
-- Dominant palette: hex colors, ranked most to least dominant
-- Named hues (e.g. "deep forest green", "burnt sienna")
-- User color priority overrides: colors with priority rank (1=highest)
-- User accent colors: REPLACE original hues
-- Accent application regions: WHERE each accent is applied (e.g. "foreground", "upper-left quadrant", "gestural energy streaks radiating from figure")
-- Source image subject description
-- User-specified style: "user_unspecified" if not provided
+You may receive:
+- analysis: structured fields (subject, scene, lighting, style, composition, etc.) — use them as authority on what is in the painting.
+- directives: free-form user instructions; may be empty.
+- color_budget: an ordered list of pigment names (e.g. "pale sage", "cadmium-coral", "weathered bone"). Pigment names only; never invent hex codes and never translate a pigment to a color not on the palette.
 
-SECTION A: a single paragraph (or 2-3 if complex) of 80-200 words. Pure prose -- no bullets, lists, YAML, or markup. Write as if describing a painting to a skilled painter.
+# OUTPUT CONTRACT
 
-FORMAT ORDER (strict):
+Write ONLY the prompt text. No preamble, no explanation, no labels, no headings, no markdown, no commentary, no "Here's the prompt:" lead-in, no section markers of any kind.
 
-1. SUBJECT + COMPOSITION + SPATIAL POSITION: Lead with the main subject AND its spatial position (left third, center, lower half, etc.). NEVER open with color, style, or technique.
+The output is one flowing prose paragraph (or 2-3 short paragraphs if complex), 150-300 words, woven from these SIX blocks in this order:
 
-2. COLOR BOUND TO REGION, IN PRIORITY ORDER: For EACH distinct color region, write ONE phrase: COLOR -> OBJECT/REGION -> PRIORITY. Dominant first, secondary next, accents last. For ACCENT OVERRIDES: state the accent as the primary tone for its region (NOT a tint or overlay). Never write a color in isolation. Always anchor: "the [region] is [color]" or "[color] fills the [region]". Priority language: "dominant", "secondary", "faint traces of", "loaded streaks of", "thin washes of", "scraped reserves of". Write gestural streaks explicitly when an accent is in a gestural region: "gestural streaks of [color] radiate outward from the figure".
+1. SUBJECT (40-80 words) — what the painting depicts. Figures: age, pose, expression, clothing, gesture, gaze, action. Landscapes: terrain, time of day, weather, season, scale. Still life: each object, material, arrangement, the surface it sits on. Abstract: dominant shapes, rhythm, central motif. Be specific — "a 34-year-old woman in a long charcoal wool coat, in profile, looking left", never "a woman".
 
-3. PAINT HANDLING (IMPASTO DESCRIPTION): Translate texture/technique into impasto language. Include AT LEAST 3 of: "heavy impasto with thick loaded paint", "palette-knife ridges and bold directional strokes follow the form", "scraped, dragged, and smeared paint", "gestural streaks of energy radiate outward from the figure", "fused with thin, scraped background washes", "alla prima freshness throughout", "strong variation between thickly loaded areas and bare-canvas thin spots", "bold directional strokes".
+2. SCENE / GROUND (15-40 words) — the contextual field around the subject. Background colour and treatment. Whether the ground is gestural, flat, atmospheric, or constructed. Relationship of subject to ground: floating, embedded, emerging, isolated.
 
-4. LIGHTING AND ATMOSPHERE: Describe light direction and quality in painterly terms. Link light to color. Avoid photography-only terms.
+3. COMPOSITION (20-40 words) — how the painting is framed. Shot type: full-figure, three-quarter, close-up, panoramic, square. Subject placement: rule of thirds, centred, asymmetric, off-axis. Foreground/background relationship. Negative space and breathing room. Include the intended canvas proportions: square 1:1, portrait 4:5, landscape 16:9, or panoramic 21:9. Default framing: "the painting fills the frame edge to edge, the painted surface itself the image, lit by even diffused gallery light that reveals the impasto surface".
 
-5. STYLE DECLARATION: User-specified style: state it clearly ("flat vector illustration style", "realistic photography"). User-unspecified OR "artistic / painterly / expressive": state EXACTLY "heavy impasto gestural painting, alla prima oil technique, bold palette-knife and brushwork". Optionally add: "reminiscent of the late paintings of de Kooning and the energetic scrape-and-drag technique of Riopelle".
+4. LIGHTING (20-40 words) — the most important block. For this style the radiance MUST come from color contrast against the muted surround, never from a depicted lamp, sun, halo, backlight, or rim light. Concretely: name the muted surround (e.g. pale sage and bone-grey) and the saturated focal (e.g. saturated cadmium-coral). Required phrasing: "the radiant focal area is achieved through color contrast, not depicted illumination" and "no depicted light source; the glow emerges from chroma and temperature juxtaposition alone". Forbid these phrases anywhere in the prompt: "soft light from the left", "illuminated by", "backlit", "rim light", "glowing with hidden light", "halo of light", "rays of light".
 
-6. COMPOSITIONAL CONSTRAINTS (always at the end): Use "no", "devoid of", "with no" phrasing. Always include: no text, no watermark, no logos. If gestural: "no thin photographic detail -- this is a painted work". If minimal background: "background reduced to thin scraped washes, no busy detail".
+5. STYLE & TECHNIQUE (60-120 words) — the longest block. Oil painting on canvas (or oil on raw linen when the weave should read). Palette-knife application. Pastel palette: chalky, low-chroma dominant tones (chalky pale greens, dusty putty, soft creams, weathered bone, muted lavender-grays, bone, dove grey) with ONE highly saturated accent — cadmium-coral, cobalt blue, vermillion, cadmium yellow, viridian, fuchsia-magenta — anchored to a specific element of the subject (the woman's cheek, the central pear, the horizon band, the scarf). The saturated accent is the complement or near-complement of the dominant muted field; that chroma pair is what makes the focal read as glowing. Thick pasto / impasto ridges in the focal area, paint standing a millimeter proud of the canvas, peaks catching the light. The surrounding field is rendered in thinly scraped, dragged, and smeared washes where the canvas (or linen) weave shows through. Chromatic vibration from juxtaposed warm and cool near-complementaries. Loose, painterly, gestural, economical mark-making, knife-edge marks visible, no brush hairs. Alla prima — wet-on-wet, single session, paint still pliable, soft wet-into-wet blending at the edges of strokes. Some passages show the ghost of the knife edge — a thin ridge of paint dragged across the surface. Visible canvas weave in the thinly painted passages.
 
-SECTION B: PROMPT METADATA -- color_map: { "region_name": ["#hex1", "#hex2"] }; priority_order: ["#dominant", "#secondary", "#accent"]; accent_overrides: { "original_region": "#replacement_hex" }; accent_regions: { "#accent_hex": "region_description" }; gestural_elements: ["list of which gestural phrases were used"]; style_confidence: "high" / "medium" / "low"; composition_note: one sentence on spatial clarity; word_count_section_a: N (integer).
+6. CONSTRAINTS (15-30 words, inlined as positive anchors at the end of the prose). A real oil painting, not a photograph, not a 3D render. Natural paint sheen — matte in thick passages, slight gloss in scraped areas — no plastic gloss, no digital airbrush finish, no CGI look. Visible paint surface texture throughout. Even diffused gallery lighting revealing the impasto paint surface, no harsh shadows.
 
-RULES (priority order): lead with subject + spatial position; bind every color to a region; accent colors fully override the original region; user-unspecified style -> impasto/alla prima/gestural language verbatim; gestural energy streaks radiate outward from the focal point when an accent is in a gestural region; mention thick/thin contrast when the source has significant texture; "no X" constraints go at the end of Section A; no bullets/lists/YAML in Section A; Section A = 80-200 words (count and report); one style declaration; (ADR 0016) STRENGTH MODIFIER (when palette supplied): interpret palette.strength per the four-level contract — subtle (gentle reference, complementary tones allowed), moderate (close adherence, natural-shadow deviations only), strong (every named color appears at least once, no off-palette introductions), strict (per-color mention count is derived from palette order — priority 1 (top of the list) expects ≥2 mentions, all others ≥1 — and is validated post-hoc); (ADR 0016, ADR 0017) ACCENT PLACEMENT (when an accent has a placement): accent overrides fully replace the original region's color AND must appear within the documented placement region. The highest-priority accent (top of the palette list) leads the visual hierarchy; lower-priority accents fill secondary regions. If the source image's accent region contradicts the user-supplied placement, user placement wins.
+# WHEN THE USER SPECIFIES A FOCAL AREA
 
-Start your reply with these section headers exactly:
+Anchor the saturated accent to a specific subject element in three places: Subject block, Lighting block, Style block. The focal element is the only place where paint is applied thick and chroma is high; everything else exists to make this core vibrate.
 
-== SECTION A ==
-[prose here]
+# WHEN THE PALETTE INCLUDES A PIGMENT NAME
 
-== SECTION B ==
-[metadata here]`;
+Treat the pigment name as authority: write "the [region] is [pigment name]". Never invent hex codes, never translate a pigment to a color not on the palette, never quote "#rrggbb" inside the prompt body.
+
+# ANTI-PATTERNS (rejected silently)
+
+- Negative-prompt tail ("no text, no watermark, no logos" — ignored by CFG=0)
+- "masterpiece, 8K, ultra detailed, best quality, award winning" tag-list suffix
+- SDXL / FLUX-style tag lists ("1girl, solo, long hair, bokeh, …")
+- Weight syntax "(keyword:1.3)"
+- Midjourney parameters ("--ar 4:5", "--s 250", "--v 6", "--niji")
+- Hex codes ("#cc3344") inside the prompt body
+- Depicted-light vocabulary ("soft light from the left", "illuminated by", "backlit", "rim light", "glowing with hidden light", "halo of light", "rays of light")
+- Any section markers ("== SECTION A ==", "== SECTION B =="), labels, bullets, lists, YAML, JSON, or markup in the output
+
+Output only the prompt text.`;
 
 /**
  * Resolve the effective Stage 2 system prompt for a preset: override if
@@ -1390,8 +1476,19 @@ const prioritiesFromOrder = (colors) => {
  * get the explicit "(ACCENT — mention at most N times total; place
  * where it adds focus)" clause. Per-accent placement text is
  * rendered as ", placement: <region>" only when accent + non-empty.
+ *
+ * ADR 0019 — preset-aware emission. When `opts.isZImage === true`
+ * (the calling preset is one of the Z-Image sentinel presets), drop:
+ *   - the per-line hex emission (Z-Image interprets hex strings as
+ *     text glyphs; the guide specifies pigment names only)
+ *   - the strength preamble + per-line [STRENGTH: <level>] tag
+ *     (strength/placement are FLUX/SDXL semantics; Z-Image interprets
+ *     prose naturally)
+ * When isZImage is false (default), the original behaviour is
+ * preserved unchanged for the FLUX/SDXL/photorealistic/Danbooru paths.
  */
-const buildColorBudgetBlock = (palette) => {
+const buildColorBudgetBlock = (palette, opts = {}) => {
+  const isZImage = opts.isZImage === true;
   if (!palette || !Array.isArray(palette.colors) || palette.colors.length === 0) return '';
 
   const norm = prioritiesFromOrder(palette.colors);
@@ -1401,11 +1498,12 @@ const buildColorBudgetBlock = (palette) => {
   const accentCount = palette.colors.filter((c) => c.accent === true).length;
   // ADR 0016 — strength preamble + per-line tag. Strength defaults to
   // 'moderate' (mirrors the synthesis path in readPalettes).
+  // ADR 0019 — strength is FLUX/SDXL-only; skipped when isZImage.
   const strength = (typeof palette.strength === 'string' &&
     PALETTE_STRENGTH_LEVELS.includes(palette.strength))
     ? palette.strength
     : DEFAULT_PALETTE_STRENGTH;
-  const strengthPreamble = STRENGTH_PREAMBLES[strength];
+  const strengthPreamble = !isZImage ? STRENGTH_PREAMBLES[strength] : null;
 
   const lines = [];
   if (strengthPreamble) lines.push(strengthPreamble);
@@ -1420,16 +1518,26 @@ const buildColorBudgetBlock = (palette) => {
     // ADR 0016 — accent placement region binding. Emitted only when the
     // color is an accent AND has a non-empty placement string. Keeps
     // the budget block terse for palettes that don't use placement.
+    // ADR 0019 — placement region is FLUX/SDXL-only; skipped when isZImage
+    // because Z-Image interprets prose naturally and per-region binding
+    // conflicts with the §6 Block 3 composition rules.
     const placementRaw = (c && typeof c.placement === 'string') ? c.placement.trim() : '';
-    const placementTag = (c.accent === true && placementRaw.length > 0)
+    const placementTag = (!isZImage && c.accent === true && placementRaw.length > 0)
       ? `, placement: ${placementRaw}`
       : '';
-    lines.push(`  - ${c.name} ${c.hex}: priority ${priority} (~${pct}% share)${accentTag}${placementTag} [STRENGTH: ${strength}]`);
+    // ADR 0019 — Z-Image emitters get pigment name only; FLUX/SDXL emitters
+    // keep the original `Name #hexcode` form.
+    const label = isZImage ? `${c.name}` : `${c.name} ${c.hex}`;
+    // ADR 0019 — strength tag is FLUX/SDXL-only.
+    const strengthTag = isZImage ? '' : ` [STRENGTH: ${strength}]`;
+    lines.push(`  - ${label}: priority ${priority} (~${pct}% share)${accentTag}${placementTag}${strengthTag}`);
   }
   const sum = norm.displayPct.reduce((s, p) => s + p, 0);
   const sumNote = sum === 100 ? 'Sum: 100%' : `Sum: ${sum}% (rounded)`;
   const capNote = accentCount > 0 ? ` (accent cap: ${accentMax} mention${accentMax === 1 ? '' : 's'})` : '';
-  lines.push(`${sumNote}${capNote}`);
+  // ADR 0019 — sum/cap notes are FLUX/SDXL telemetry; Z-Image reads the
+  // priority order itself, no need to spell out cumulative share.
+  if (!isZImage) lines.push(`${sumNote}${capNote}`);
   return lines.join('\n');
 };
 
@@ -3292,20 +3400,28 @@ const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
  * "no user-customized weighting", because the act of saving it IS
  * the customization signal.
  *
+ * ADR 0019 — preset-aware emission. Pass `opts.isZImage: true` when
+ * the calling preset is one of the Z-Image sentinel presets; the
+ * budget block then drops hex codes + strength semantics + placement
+ * region tags (Z-Image interprets prose naturally and uses pigment
+ * names; the guide §5.3 says use named pigments only).
+ *
  * @param {object} analysis - the Stage 1 analysis (palette colors live in analysis.colors)
  * @param {string} directives - free-form user directives (Stage 2 input)
  * @param {object|null} palette - applied palette (ADR 0017)
+ * @param {object} opts - optional flags; { isZImage: boolean }
  * @returns {object} the envelope object (callMiniMaxStage2 JSON-stringifies it)
  */
-const buildStage2Envelope = (analysis, directives, palette = null) => {
+const buildStage2Envelope = (analysis, directives, palette = null, opts = {}) => {
   const envelope = { analysis, directives: directives || '' };
   // ADR 0017 — when a palette is in play, append a deterministic
   // color-budget block so the LLM has explicit priorities +
   // uniform-share labels + an accent cap to follow. The block lives
   // inside the envelope JSON so it's part of the structured user
   // message and travels through chat-refinement / re-runs unchanged.
+  // ADR 0019 — preset-aware emission threads `opts` into the block.
   if (palette) {
-    const block = buildColorBudgetBlock(palette);
+    const block = buildColorBudgetBlock(palette, opts);
     if (block) {
       envelope.color_budget = block;
     }
@@ -3313,12 +3429,12 @@ const buildStage2Envelope = (analysis, directives, palette = null) => {
   return envelope;
 };
 
-const callMiniMaxStage2 = async (analysis, directives, stage2SystemPrompt, palette = null) => {
+const callMiniMaxStage2 = async (analysis, directives, stage2SystemPrompt, palette = null, opts = {}) => {
   if (!minimaxConfigured) {
     throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
   }
 
-  const envelope = buildStage2Envelope(analysis, directives, palette);
+  const envelope = buildStage2Envelope(analysis, directives, palette, opts);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
@@ -3365,6 +3481,66 @@ ${JSON.stringify(envelope, null, 2)}`
     if (error.name === 'AbortError') throw new Error('Stage 2 request timed out after 60 seconds.');
     throw error;
   }
+};
+
+/**
+ * ADR 0019 — Stage 2 orchestrator with retry-and-warn for length.
+ *
+ * Wraps `callMiniMaxStage2` with the guide §3 + §10 length contract:
+ *   - sweet spot 150-300 words
+ *   - hard ceiling 750 words (1024 tokens at the encoder)
+ *   - minimum effective 80 words
+ *
+ * On the first miss (output outside the sweet spot) the orchestrator
+ * retries once with a reinforcement directive appended. If the second
+ * attempt also misses, the result still ships but carries a
+ * `length_check` descriptor in the response so the frontend can show
+ * a non-blocking warning chip.
+ *
+ * The retry is opt-in (default OFF) because retrying adds another 60s
+ * Stage 2 call to the critical path. The /api/generate-prompt route
+ * opts in for Z-Image presets only — the FLUX/SDXL/Danbooru/photo
+ * presets are not bound to the guide's word-count contract.
+ *
+ * @returns { prompt: string, length_check: { wordCount, classification, retried, secondClassification? } }
+ */
+const generateStage2WithLengthCheck = async (analysis, directives, stage2SystemPrompt, palette = null, opts = {}) => {
+  const enableLengthRetry = opts.enableLengthRetry === true;
+  const first = await callMiniMaxStage2(analysis, directives, stage2SystemPrompt, palette, opts);
+  const firstWordCount = countStage2Words(first);
+  const firstClass = classifyStage2Length(first);
+  if (!enableLengthRetry || firstClass === 'sweet_spot') {
+    return {
+      prompt: first,
+      length_check: { wordCount: firstWordCount, classification: firstClass, retried: false }
+    };
+  }
+
+  // First miss — try once with a reinforcement directive.
+  const reinforcementSuffix = (() => {
+    if (firstClass === 'too_short') {
+      return 'Your previous reply was ' + firstWordCount + ' words. The Z-Image model performs best at 150-300 words. Please rewrite your reply to that target — richer detail on the subject, the palette, and the focal element — without adding labels or markers.';
+    }
+    if (firstClass === 'too_long') {
+      return 'Your previous reply was ' + firstWordCount + ' words — over the 300-word sweet spot. Please rewrite, trimming redundant adjectives while keeping all six blocks intact. Target 150-300 words.';
+    }
+    return 'Your previous reply was ' + firstWordCount + ' words — over the 750-word hard ceiling (1024 tokens at the encoder). Please rewrite, condensing to 150-300 words while keeping all six blocks intact.';
+  })();
+  const retryDirectives = (directives ? directives + '\n\n' : '') + reinforcementSuffix;
+  const second = await callMiniMaxStage2(analysis, retryDirectives, stage2SystemPrompt, palette, opts);
+  const secondWordCount = countStage2Words(second);
+  const secondClass = classifyStage2Length(second);
+  return {
+    prompt: second,
+    length_check: {
+      wordCount: secondWordCount,
+      classification: secondClass,
+      retried: true,
+      firstWordCount,
+      firstClassification: firstClass,
+      secondWordCount
+    }
+  };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4107,7 +4283,7 @@ app.delete('/api/stage2-prompt', (req, res) => {
 app.post('/api/generate-prompt', async (req, res) => {
   try {
     const body = req.body || {};
-    const { presetId, analysis, directives } = body;
+    const { presetId, analysis, directives, aspectRatio } = body;
 
     if (!presetId) return res.status(400).json({ success: false, error: 'presetId is required.' });
     if (!analysis || typeof analysis !== 'object') {
@@ -4118,6 +4294,21 @@ app.post('/api/generate-prompt', async (req, res) => {
         success: false,
         error: `directives must be a string up to ${MAX_DIRECTIVES_LENGTH} characters.`
       });
+    }
+    // ADR 0019 Issue #15 — optional aspect-ratio body field. When present,
+    // server prepends a structured directive instructing the LLM to
+    // include the canvas proportion in Block 3 of the Stage 2 output.
+    // When absent, no directive is prepended (the LLM picks one or
+    // follows the prompt's existing Block-3 instruction).
+    let aspectRatioDirective = '';
+    if (aspectRatio !== undefined && aspectRatio !== null && aspectRatio !== '') {
+      if (typeof aspectRatio !== 'string' || !VALID_ASPECT_RATIOS.has(aspectRatio)) {
+        return res.status(400).json({
+          success: false,
+          error: `aspectRatio must be one of: ${Array.from(VALID_ASPECT_RATIOS).join(', ')} (got ${JSON.stringify(aspectRatio)}).`
+        });
+      }
+      aspectRatioDirective = buildAspectRatioDirective(aspectRatio);
     }
 
     // ADR 0014 — optional paletteId in the request body. When provided,
@@ -4150,7 +4341,33 @@ app.post('/api/generate-prompt', async (req, res) => {
       return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
     }
 
-    const finalPrompt = await callMiniMaxStage2(analysis, directives || '', getEffectiveStage2Prompt(preset), appliedPalette);
+    // ADR 0019 — preset-aware palette emission + length-check retry.
+    // When the active preset's effective Stage 2 prompt is the canonical
+    // Z-Image contract, drop hex codes + strength/placement semantics
+    // from the color-budget block (Z-Image interprets prose naturally
+    // and uses pigment names; guide §5.3). For FLUX/SDXL/photorealistic
+    // /Danbooru presets the original behaviour is preserved.
+    //
+    // The Z-Image path additionally opts into the length-check
+    // orchestrator (one retry with a reinforcement directive if the
+    // first response lands outside the 150-300 word sweet spot) so
+    // generated prompts stay inside the guide's contract range.
+    const effectivePrompt = getEffectiveStage2Prompt(preset);
+    const isZImagePreset = effectivePrompt === DEFAULT_ZIMAGE_STAGE2_PROMPT;
+    // ADR 0019 Issue #15 — prepend the aspect-ratio directive so the
+    // Stage 2 LLM anchors Block 3 on the user's chosen canvas
+    // proportion. The user-typed directives remain authoritative; we
+    // prepend only when aspectRatio is set.
+    const composedDirectives = aspectRatioDirective + (directives || '');
+    const stage2Result = await generateStage2WithLengthCheck(
+      analysis,
+      composedDirectives,
+      effectivePrompt,
+      appliedPalette,
+      { isZImagePreset, enableLengthRetry: isZImagePreset }
+    );
+    const finalPrompt = stage2Result.prompt;
+    const lengthCheck = stage2Result.length_check;
 
     // ADR 0014 — compute distribution metrics against the applied
     // palette. Pure function, fast (single pass over the prompt), and
@@ -4185,6 +4402,15 @@ app.post('/api/generate-prompt', async (req, res) => {
       } catch (e) {
         console.error('Failed to append palette run telemetry:', e.message);
       }
+    }
+
+    // ADR 0019 Issue #13 — surface the length-check descriptor to the
+    // frontend. Only present when the orchestrator ran (Z-Image presets
+    // only; FLUX/SDXL/Danbooru/photo presets skip the retry entirely).
+    // `outside_sweet_spot: true` is the signal the result panel uses to
+    // render a non-blocking warning chip (mirror of `result-strict-warn`).
+    if (isZImagePreset && lengthCheck) {
+      responseData.length_check = lengthCheck;
     }
 
     res.json({ success: true, data: responseData });
@@ -5537,6 +5763,113 @@ const callMiniMaxChatOnce = async (openaiMessages) => {
  * Interpolation of the three context blocks (original prompt, current
  * prompt, analysis snapshot) happens here so the constant
  * `DEFAULT_CHAT_SYSTEM_PROMPT` stays free of per-session data.
+ *
+ * ADR 0019 — when the session is anchored to one of the Z-Image
+ * sentinel presets (`preset_alla_prima_oil` or
+ * `preset_968c0ccdf6fc6151`), append the Z-Image constraints block
+ * so the chat assistant refuses to introduce depicted-light
+ * vocabulary, hex codes in the prompt body, or section markers,
+ * and preserves the pastel-palette / saturated-accent focal
+ * contract if Style or Lighting is touched. The chat assistant
+ * stays a strict editor (ADR 0011/0012); this block layers the
+ * domain model vocabulary on top.
+ */
+const ZIMAGE_PRESET_IDS = new Set(['preset_alla_prima_oil', 'preset_968c0ccdf6fc6151']);
+
+/**
+ * The Z-Image-aware constraints block layered onto the chat system
+ * prompt for sessions anchored to Z-Image presets. Pure string —
+ * composed into the prompt by `buildChatSystemPrompt` when the
+ * session.preset_id is in ZIMAGE_PRESET_IDS.
+ */
+const ZIMAGE_CHAT_CONSTRAINTS_BLOCK = `
+
+# Z-IMAGE CONTRACT — DOMAIN CONSTRAINTS (PIGMENT-NAMES ONLY, COLOR-CONTRAST GLOW)
+
+The current working prompt is destined for Z-Image Turbo (Qwen3-4B
+encoder, 8 NFE, CFG=0, max_sequence_length = 1024 tokens). The
+following constraints are non-negotiable on every revision. Anchor-
+preservation rules above still apply — these add domain-model
+constraints on top.
+
+## FORBIDDEN VOCABULARY (will degrade Z-Image output)
+
+You must NEVER introduce any of the following into the revised prompt:
+
+- Negative-prompt tail: "no text", "no watermark", "no logos",
+  "no thin photographic detail", "no CGI", "no plastic gloss", or
+  any "no X" trailing constraint. CFG=0 ignores these phrases —
+  they're dead tokens.
+- Depicted-light vocabulary: "soft light from the left",
+  "illuminated by", "backlit", "rim light", "glowing with hidden
+  light", "halo of light", "rays of light", "highlight from". The
+  radiance in this style comes from color contrast against the
+  muted surround, not from a depicted lamp.
+- Quality-tag suffix: "masterpiece", "8K", "ultra detailed",
+  "best quality", "award winning", "highly detailed".
+- SDXL / FLUX tag-list vocabulary: "1girl", "solo", "long_hair",
+  "bokeh", "score_9", etc. Z-Image interprets prose naturally;
+  tag lists dilute focus.
+- Weight syntax "(keyword:1.3)" or Midjourney parameters ("--ar",
+  "--s", "--v", "--niji").
+- Hex codes inside the prompt body: "#cc3344", "#1f2a44", etc. Use
+  pigment names only.
+- Section markers: "== SECTION A ==", "== SECTION B ==",
+  labels, bullets, lists, YAML, JSON, or any markup.
+
+## REQUIRED VOCABULARY (anchors if user mentions these)
+
+If the user's revision touches Style, Lighting, Color, or Subject,
+preserve or strengthen the following vocabulary in the revised
+prompt:
+
+- Medium: "oil painting on canvas" (or "oil on raw linen" if weave
+  should read).
+- Application: "palette knife" — never "brushwork" or "brush hairs".
+- Technique: "alla prima" — wet-in-wet, single session, paint
+  still pliable.
+- Palette: pastel / low-chroma dominant tones — chalky pale
+  greens, dusty putty, soft creams, weathered bone, muted
+  lavender-grays. ONE highly saturated accent (cadmium-coral,
+  vermillion, cobalt blue, cadmium yellow, viridian, fuchsia-
+  magenta) anchored to a specific element of the subject.
+- Glow mechanism: "achieved through color contrast, not depicted
+  illumination" — when the user asks for the focal to "pop" or
+  "glow", translate that into chroma contrast against the muted
+  surround.
+- Closing anchor: "natural paint sheen — matte in thick passages,
+  slight gloss in scraped areas — no plastic gloss, no digital
+  airbrush finish, no CGI look. Visible paint surface texture
+  throughout."
+
+## LENGTH
+
+The revised prompt must stay inside 150-300 words (sweet spot).
+Hard ceiling: 750 words / 1024 tokens. Below 80 words = generic
+output. If the user's revision would push the prompt above 300
+words, trim adjectives without dropping the six blocks (Subject,
+Scene/Ground, Composition, Lighting, Style & Technique,
+Constraints).
+
+## STYLE-SCHOOL ANCHOR
+
+This is the pastel-palette-with-saturated-focal tradition. Do NOT
+introduce gestural-expressionist vocabulary on revisions
+("gestural streaks of energy radiate outward from the figure",
+"de Kooning", "Riopelle", "vigorous scraped, dragged, and smeared
+paint" as a focal feature rather than as field treatment). The
+energy in this style is optical — saturated colour against muted
+surround — not kinetic.`;
+
+/**
+ * Build the chat system prompt for a given session at a given turn.
+ * Interpolation of the three context blocks (original prompt, current
+ * prompt, analysis snapshot) happens here so the constant
+ * `DEFAULT_CHAT_SYSTEM_PROMPT` stays free of per-session data.
+ *
+ * ADR 0019 — when the session is anchored to a Z-Image preset, the
+ * Z-Image constraints block is appended after the SESSION CONTEXT
+ * block. The plain anchor-preservation contract is unaffected.
  */
 const buildChatSystemPrompt = (session) => {
   const original = typeof session.original_prompt === 'string' ? session.original_prompt : '';
@@ -5544,6 +5877,9 @@ const buildChatSystemPrompt = (session) => {
   const analysis = session.analysis_snapshot && typeof session.analysis_snapshot === 'object'
     ? JSON.stringify(session.analysis_snapshot, null, 2)
     : '(no analysis snapshot was captured for this session)';
+
+  const isZImageSession = session && typeof session.preset_id === 'string'
+    && ZIMAGE_PRESET_IDS.has(session.preset_id);
 
   return `${DEFAULT_CHAT_SYSTEM_PROMPT}
 
@@ -5564,7 +5900,7 @@ ${current}
 ${analysis}
 \`\`\`
 
-Treat the CURRENT WORKING PROMPT as the authoritative text the user is iterating on. When you propose a revision, base it on the CURRENT WORKING PROMPT — not the ORIGINAL — so subsequent revisions are additive.`;
+Treat the CURRENT WORKING PROMPT as the authoritative text the user is iterating on. When you propose a revision, base it on the CURRENT WORKING PROMPT — not the ORIGINAL — so subsequent revisions are additive.${isZImageSession ? ZIMAGE_CHAT_CONSTRAINTS_BLOCK : ''}`;
 };
 
 // ─── Routes ───────────────────────────────────────────────────────
@@ -5852,6 +6188,10 @@ if (require.main === module) {
 
 module.exports = {
   app,
+  // ADR 0019 Issue #15 — aspect-ratio picker
+  VALID_ASPECT_RATIOS,
+  ASPECT_RATIO_LABEL,
+  buildAspectRatioDirective,
   FIELD_PALETTE,
   VALID_FIELD_NAMES,
   FIELD_INPUT_MIN_LENGTH,
@@ -5927,6 +6267,15 @@ module.exports = {
   MAX_STAGE2_PROMPT_LENGTH,
   ZIMAGE_STAGE2_SENTINEL,
   DEFAULT_ZIMAGE_STAGE2_PROMPT,
+  // ADR 0019 — length-check + retry orchestrator
+  STAGE2_SWEET_SPOT_MIN,
+  STAGE2_SWEET_SPOT_MAX,
+  STAGE2_HARD_MAX_WORDS,
+  STAGE2_MIN_WORDS,
+  countStage2Words,
+  isWithinStage2SweetSpot,
+  classifyStage2Length,
+  generateStage2WithLengthCheck,
   // Saved directives (ADR 0009)
   MAX_DIRECTIVE_NAME_LENGTH,
   MAX_DIRECTIVE_CONTENT_LENGTH,
@@ -5946,6 +6295,8 @@ module.exports = {
   applyDirectiveUpdate,
   // Chat sessions (ADR 0011)
   MAX_FINAL_PROMPT_LENGTH,
+  ZIMAGE_PRESET_IDS,
+  ZIMAGE_CHAT_CONSTRAINTS_BLOCK,
   MAX_CHAT_MESSAGE_LENGTH,
   MAX_CHAT_MESSAGES_PER_SESSION,
   MAX_CHAT_SESSIONS_TOTAL,
