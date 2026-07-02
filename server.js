@@ -169,6 +169,54 @@ const PRESERVATION_STOP_WORDS = new Set([
 // doesn't warrant it; this only widens the ceiling.
 const MAX_STAGE2_TOKENS = 960;
 
+// ADR 0019 — Z-Image Turbo prompt-length contract. Per
+// docs/Z-IMAGE-TURBO-AGENT-PROMPT-GUIDE.md §3 + §10: sweet spot
+// 150-300 words, hard ceiling 750 words / 1024 tokens, minimum
+// effective 80 words. Below 80 the output goes generic; above ~400
+// diminishing returns kick in. Used by `measureStage2Length` + the
+// length-check + retry orchestration in `callMiniMaxStage2`.
+const STAGE2_SWEET_SPOT_MIN = 150;
+const STAGE2_SWEET_SPOT_MAX = 300;
+const STAGE2_HARD_MAX_WORDS = 750;
+const STAGE2_MIN_WORDS = 80;
+
+/**
+ * Count words in a string. Splits on whitespace and filters out empty
+ * tokens. Pure / no side effects. Used by the length-check at the
+ * end of Stage 2 to decide whether to retry.
+ */
+const countStage2Words = (text) => {
+  if (typeof text !== 'string' || text.trim().length === 0) return 0;
+  return text.trim().split(/\s+/).filter((w) => w.length > 0).length;
+};
+
+/**
+ * Decide whether a Stage 2 output is inside the sweet spot (true)
+ * or outside (false). Pure.
+ */
+const isWithinStage2SweetSpot = (text) => {
+  const n = countStage2Words(text);
+  return n >= STAGE2_SWEET_SPOT_MIN && n <= STAGE2_SWEET_SPOT_MAX;
+};
+
+/**
+ * Classify a Stage 2 output by word count against the guide
+ * contract. Returns one of:
+ *   - 'sweet_spot'        — 150-300 words
+ *   - 'too_short'         — < 150 words (LLM was terse)
+ *   - 'too_long'          — > 300 words (still acceptable up to 750)
+ *   - 'way_too_long'      — > 750 words (will be truncated at 1024 tokens)
+ *
+ * Pure.
+ */
+const classifyStage2Length = (text) => {
+  const n = countStage2Words(text);
+  if (n >= STAGE2_SWEET_SPOT_MIN && n <= STAGE2_SWEET_SPOT_MAX) return 'sweet_spot';
+  if (n < STAGE2_SWEET_SPOT_MIN) return 'too_short';
+  if (n > STAGE2_HARD_MAX_WORDS) return 'way_too_long';
+  return 'too_long';
+};
+
 /**
  * Per-field overrides applied on top of the global `FIELD_INPUT_MIN_LENGTH` and
  * the JSON Schema. Keys must be valid `FIELD_PALETTE` names. Each hint may set:
@@ -3405,6 +3453,66 @@ ${JSON.stringify(envelope, null, 2)}`
   }
 };
 
+/**
+ * ADR 0019 — Stage 2 orchestrator with retry-and-warn for length.
+ *
+ * Wraps `callMiniMaxStage2` with the guide §3 + §10 length contract:
+ *   - sweet spot 150-300 words
+ *   - hard ceiling 750 words (1024 tokens at the encoder)
+ *   - minimum effective 80 words
+ *
+ * On the first miss (output outside the sweet spot) the orchestrator
+ * retries once with a reinforcement directive appended. If the second
+ * attempt also misses, the result still ships but carries a
+ * `length_check` descriptor in the response so the frontend can show
+ * a non-blocking warning chip.
+ *
+ * The retry is opt-in (default OFF) because retrying adds another 60s
+ * Stage 2 call to the critical path. The /api/generate-prompt route
+ * opts in for Z-Image presets only — the FLUX/SDXL/Danbooru/photo
+ * presets are not bound to the guide's word-count contract.
+ *
+ * @returns { prompt: string, length_check: { wordCount, classification, retried, secondClassification? } }
+ */
+const generateStage2WithLengthCheck = async (analysis, directives, stage2SystemPrompt, palette = null, opts = {}) => {
+  const enableLengthRetry = opts.enableLengthRetry === true;
+  const first = await callMiniMaxStage2(analysis, directives, stage2SystemPrompt, palette, opts);
+  const firstWordCount = countStage2Words(first);
+  const firstClass = classifyStage2Length(first);
+  if (!enableLengthRetry || firstClass === 'sweet_spot') {
+    return {
+      prompt: first,
+      length_check: { wordCount: firstWordCount, classification: firstClass, retried: false }
+    };
+  }
+
+  // First miss — try once with a reinforcement directive.
+  const reinforcementSuffix = (() => {
+    if (firstClass === 'too_short') {
+      return 'Your previous reply was ' + firstWordCount + ' words. The Z-Image model performs best at 150-300 words. Please rewrite your reply to that target — richer detail on the subject, the palette, and the focal element — without adding labels or markers.';
+    }
+    if (firstClass === 'too_long') {
+      return 'Your previous reply was ' + firstWordCount + ' words — over the 300-word sweet spot. Please rewrite, trimming redundant adjectives while keeping all six blocks intact. Target 150-300 words.';
+    }
+    return 'Your previous reply was ' + firstWordCount + ' words — over the 750-word hard ceiling (1024 tokens at the encoder). Please rewrite, condensing to 150-300 words while keeping all six blocks intact.';
+  })();
+  const retryDirectives = (directives ? directives + '\n\n' : '') + reinforcementSuffix;
+  const second = await callMiniMaxStage2(analysis, retryDirectives, stage2SystemPrompt, palette, opts);
+  const secondWordCount = countStage2Words(second);
+  const secondClass = classifyStage2Length(second);
+  return {
+    prompt: second,
+    length_check: {
+      wordCount: secondWordCount,
+      classification: secondClass,
+      retried: true,
+      firstWordCount,
+      firstClassification: firstClass,
+      secondWordCount
+    }
+  };
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Routes — Health + Field palette
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4188,21 +4296,28 @@ app.post('/api/generate-prompt', async (req, res) => {
       return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
     }
 
-    // ADR 0019 — preset-aware palette emission. When the active preset's
-    // effective Stage 2 prompt is the canonical Z-Image contract, drop
-    // hex codes + strength/placement semantics from the color-budget
-    // block (Z-Image interprets prose naturally and uses pigment names;
-    // guide §5.3). For FLUX/SDXL/photorealistic/Danbooru presets the
-    // original behaviour is preserved.
+    // ADR 0019 — preset-aware palette emission + length-check retry.
+    // When the active preset's effective Stage 2 prompt is the canonical
+    // Z-Image contract, drop hex codes + strength/placement semantics
+    // from the color-budget block (Z-Image interprets prose naturally
+    // and uses pigment names; guide §5.3). For FLUX/SDXL/photorealistic
+    // /Danbooru presets the original behaviour is preserved.
+    //
+    // The Z-Image path additionally opts into the length-check
+    // orchestrator (one retry with a reinforcement directive if the
+    // first response lands outside the 150-300 word sweet spot) so
+    // generated prompts stay inside the guide's contract range.
     const effectivePrompt = getEffectiveStage2Prompt(preset);
     const isZImagePreset = effectivePrompt === DEFAULT_ZIMAGE_STAGE2_PROMPT;
-    const finalPrompt = await callMiniMaxStage2(
+    const stage2Result = await generateStage2WithLengthCheck(
       analysis,
       directives || '',
       effectivePrompt,
       appliedPalette,
-      { isZImagePreset }
+      { isZImagePreset, enableLengthRetry: isZImagePreset }
     );
+    const finalPrompt = stage2Result.prompt;
+    const lengthCheck = stage2Result.length_check;
 
     // ADR 0014 — compute distribution metrics against the applied
     // palette. Pure function, fast (single pass over the prompt), and
@@ -4237,6 +4352,15 @@ app.post('/api/generate-prompt', async (req, res) => {
       } catch (e) {
         console.error('Failed to append palette run telemetry:', e.message);
       }
+    }
+
+    // ADR 0019 Issue #13 — surface the length-check descriptor to the
+    // frontend. Only present when the orchestrator ran (Z-Image presets
+    // only; FLUX/SDXL/Danbooru/photo presets skip the retry entirely).
+    // `outside_sweet_spot: true` is the signal the result panel uses to
+    // render a non-blocking warning chip (mirror of `result-strict-warn`).
+    if (isZImagePreset && lengthCheck) {
+      responseData.length_check = lengthCheck;
     }
 
     res.json({ success: true, data: responseData });
@@ -5979,6 +6103,15 @@ module.exports = {
   MAX_STAGE2_PROMPT_LENGTH,
   ZIMAGE_STAGE2_SENTINEL,
   DEFAULT_ZIMAGE_STAGE2_PROMPT,
+  // ADR 0019 — length-check + retry orchestrator
+  STAGE2_SWEET_SPOT_MIN,
+  STAGE2_SWEET_SPOT_MAX,
+  STAGE2_HARD_MAX_WORDS,
+  STAGE2_MIN_WORDS,
+  countStage2Words,
+  isWithinStage2SweetSpot,
+  classifyStage2Length,
+  generateStage2WithLengthCheck,
   // Saved directives (ADR 0009)
   MAX_DIRECTIVE_NAME_LENGTH,
   MAX_DIRECTIVE_CONTENT_LENGTH,

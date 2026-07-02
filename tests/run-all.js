@@ -1692,6 +1692,45 @@ test('Issue #8: buildColorBudgetBlock drops hex codes when isZImage (Issue #9 dr
     'Z-Image block still names the muted surround');
 });
 
+test('Issue #13: countStage2Words + classifyStage2Length honor the 150-300 sweet spot', () => {
+  const {
+    countStage2Words,
+    isWithinStage2SweetSpot,
+    classifyStage2Length,
+    STAGE2_SWEET_SPOT_MIN,
+    STAGE2_SWEET_SPOT_MAX,
+    STAGE2_HARD_MAX_WORDS
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(STAGE2_SWEET_SPOT_MIN, 150, 'sweet spot floor = 150 (guide §3)');
+  assertEqual(STAGE2_SWEET_SPOT_MAX, 300, 'sweet spot ceiling = 300 (guide §3)');
+  assertEqual(STAGE2_HARD_MAX_WORDS, 750, 'hard ceiling = 750 / 1024 tokens');
+  // Empty + whitespace → 0
+  assertEqual(countStage2Words(''), 0, 'empty string is 0 words');
+  assertEqual(countStage2Words('   \n\n  '), 0, 'whitespace is 0 words');
+  assertEqual(countStage2Words('one'), 1, 'single word');
+  assertEqual(countStage2Words('one two three'), 3, 'three words');
+  assertEqual(countStage2Words('  one  two\tthree\nfour  '), 4, 'mixed whitespace');
+  // Classification
+  assertEqual(classifyStage2Length('a ' .repeat(149)), 'too_short',
+    '149 words = too_short');
+  assertEqual(classifyStage2Length('a ' .repeat(150)), 'sweet_spot',
+    '150 words = sweet_spot (lower edge)');
+  assertEqual(classifyStage2Length('a ' .repeat(250)), 'sweet_spot',
+    '250 words = sweet_spot (middle)');
+  assertEqual(classifyStage2Length('a ' .repeat(300)), 'sweet_spot',
+    '300 words = sweet_spot (upper edge)');
+  assertEqual(classifyStage2Length('a ' .repeat(301)), 'too_long',
+    '301 words = too_long');
+  assertEqual(classifyStage2Length('a ' .repeat(750)), 'too_long',
+    '750 words = too_long (hard ceiling inclusive)');
+  assertEqual(classifyStage2Length('a ' .repeat(751)), 'way_too_long',
+    '751 words = way_too_long');
+  assertEqual(isWithinStage2SweetSpot('a ' .repeat(200)), true,
+    '200 words is inside sweet spot');
+  assertEqual(isWithinStage2SweetSpot('a ' .repeat(149)), false,
+    '149 words is outside');
+});
+
 test('Issue #8/#9: buildStage2Envelope threads opts into buildColorBudgetBlock', () => {
   const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
   const palette = {

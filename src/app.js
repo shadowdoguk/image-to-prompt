@@ -1586,6 +1586,7 @@
       // palette after a weighted run).
       state.lastDistributionMetrics = data.distribution_metrics || null;
       state.lastPaletteId = data.palette_id || null;
+      state.lastLengthCheck = data.length_check || null;
       displayResult(data);
       hideError();
     } catch (e) {
@@ -1601,6 +1602,11 @@
     dom.resultPrompt.textContent = data.prompt;
     const preset = state.presets.find((p) => p.id === data.preset_id);
     const meta = [`Preset: ${data.preset_name || preset?.name || data.preset_id}`, `Model: ${data.model}`];
+    if (data.length_check && data.length_check.classification === 'sweet_spot') {
+      meta.push(`${data.length_check.wordCount} words (sweet spot)`);
+    } else if (data.length_check) {
+      meta.push(`${data.length_check.wordCount} words (outside sweet spot)`);
+    }
     dom.resultMetaInfo.textContent = meta.join(' • ');
     // ADR 0016 — surface strict-palette validation result. When a
     // strict palette was used and the validation failed, show a
@@ -1621,6 +1627,12 @@
         dom.resultStrictWarn.removeAttribute('data-tone');
       }
     }
+    // ADR 0019 Issue #13 — surface length-check result on the result
+    // meta line (above). For Z-Image presets, the server returns
+    // `data.length_check` when the orchestrator ran. Non-Z-Image
+    // presets never receive the field so this branch is skipped
+    // silently for them. We don't add a second warning chip — the
+    // word-count badge on the meta line is enough.
     dom.resultSection.hidden = false;
     dom.resultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
