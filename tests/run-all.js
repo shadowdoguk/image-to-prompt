@@ -1657,6 +1657,58 @@ test('ADR 0017: buildColorBudgetBlock — singular vs plural in accent phrasing'
 
 // measureColorDistribution — same logic as before (priority-aware strict
 // checks in computeStrictPass; counts/measurement unchanged)
+test('Issue #8: buildColorBudgetBlock drops hex codes when isZImage (Issue #9 drops strength semantics)', () => {
+  // ADR 0019 — preset-aware palette emission. Z-Image interprets hex
+  // strings as text glyphs (Qwen3-4B is bilingual; Z-Image has
+  // text-in-image as a documented strength) and the guide §5.3 says
+  // use pigment names only. The FLUX/SDXL default path is preserved
+  // — passes opts.isZImage: true to swap to the Z-Image emission.
+  const { buildColorBudgetBlock } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    name: 'pastel-focal',
+    strength: 'strong',
+    colors: [
+      { hex: '#ff0000', name: 'Cadmium-coral', accent: true, placement: 'upper-left quadrant' },
+      { hex: '#cdeac0', name: 'Pale sage' }
+    ]
+  };
+  const fluxBlock = buildColorBudgetBlock(palette);
+  const zimageBlock = buildColorBudgetBlock(palette, { isZImage: true });
+  assertTrue(fluxBlock.includes('#ff0000'),
+    'FLUX/SDXL default path keeps hex codes');
+  assertTrue(fluxBlock.includes('[STRENGTH: strong]'),
+    'FLUX/SDXL default path keeps STRENGTH tag');
+  assertTrue(fluxBlock.includes('placement: upper-left quadrant'),
+    'FLUX/SDXL default path keeps per-accent placement region');
+  assertTrue(!zimageBlock.includes('#ff0000'),
+    'Z-Image path drops hex codes (Issue #8)');
+  assertTrue(!zimageBlock.includes('[STRENGTH: strong]'),
+    'Z-Image path drops STRENGTH tag (Issue #9)');
+  assertTrue(!zimageBlock.includes('placement: upper-left quadrant'),
+    'Z-Image path drops placement region binding');
+  assertTrue(zimageBlock.includes('Cadmium-coral'),
+    'Z-Image block still names the pigment');
+  assertTrue(zimageBlock.includes('Pale sage'),
+    'Z-Image block still names the muted surround');
+});
+
+test('Issue #8/#9: buildStage2Envelope threads opts into buildColorBudgetBlock', () => {
+  const { buildStage2Envelope } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const palette = {
+    name: 'pastel-focal',
+    strength: 'moderate',
+    colors: [
+      { hex: '#ff0000', name: 'Cadmium-coral' }
+    ]
+  };
+  const envFlux = buildStage2Envelope({ subject: 'x' }, '', palette);
+  const envZ = buildStage2Envelope({ subject: 'x' }, '', palette, { isZImage: true });
+  assertTrue(envFlux.color_budget.includes('#ff0000'),
+    'envelope with default opts keeps hex');
+  assertTrue(!envZ.color_budget.includes('#ff0000'),
+    'envelope with isZImage:true drops hex');
+});
+
 test('ADR 0017: measureColorDistribution — empty prompt returns zeros', () => {
   const { measureColorDistribution } = require(path.join(PROJECT_ROOT, 'server.js'));
   const m = measureColorDistribution('', { colors: [{ hex: '#d97706', name: 'a' }] });

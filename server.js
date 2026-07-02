@@ -1398,8 +1398,19 @@ const prioritiesFromOrder = (colors) => {
  * get the explicit "(ACCENT — mention at most N times total; place
  * where it adds focus)" clause. Per-accent placement text is
  * rendered as ", placement: <region>" only when accent + non-empty.
+ *
+ * ADR 0019 — preset-aware emission. When `opts.isZImage === true`
+ * (the calling preset is one of the Z-Image sentinel presets), drop:
+ *   - the per-line hex emission (Z-Image interprets hex strings as
+ *     text glyphs; the guide specifies pigment names only)
+ *   - the strength preamble + per-line [STRENGTH: <level>] tag
+ *     (strength/placement are FLUX/SDXL semantics; Z-Image interprets
+ *     prose naturally)
+ * When isZImage is false (default), the original behaviour is
+ * preserved unchanged for the FLUX/SDXL/photorealistic/Danbooru paths.
  */
-const buildColorBudgetBlock = (palette) => {
+const buildColorBudgetBlock = (palette, opts = {}) => {
+  const isZImage = opts.isZImage === true;
   if (!palette || !Array.isArray(palette.colors) || palette.colors.length === 0) return '';
 
   const norm = prioritiesFromOrder(palette.colors);
@@ -1409,11 +1420,12 @@ const buildColorBudgetBlock = (palette) => {
   const accentCount = palette.colors.filter((c) => c.accent === true).length;
   // ADR 0016 — strength preamble + per-line tag. Strength defaults to
   // 'moderate' (mirrors the synthesis path in readPalettes).
+  // ADR 0019 — strength is FLUX/SDXL-only; skipped when isZImage.
   const strength = (typeof palette.strength === 'string' &&
     PALETTE_STRENGTH_LEVELS.includes(palette.strength))
     ? palette.strength
     : DEFAULT_PALETTE_STRENGTH;
-  const strengthPreamble = STRENGTH_PREAMBLES[strength];
+  const strengthPreamble = !isZImage ? STRENGTH_PREAMBLES[strength] : null;
 
   const lines = [];
   if (strengthPreamble) lines.push(strengthPreamble);
@@ -1428,16 +1440,26 @@ const buildColorBudgetBlock = (palette) => {
     // ADR 0016 — accent placement region binding. Emitted only when the
     // color is an accent AND has a non-empty placement string. Keeps
     // the budget block terse for palettes that don't use placement.
+    // ADR 0019 — placement region is FLUX/SDXL-only; skipped when isZImage
+    // because Z-Image interprets prose naturally and per-region binding
+    // conflicts with the §6 Block 3 composition rules.
     const placementRaw = (c && typeof c.placement === 'string') ? c.placement.trim() : '';
-    const placementTag = (c.accent === true && placementRaw.length > 0)
+    const placementTag = (!isZImage && c.accent === true && placementRaw.length > 0)
       ? `, placement: ${placementRaw}`
       : '';
-    lines.push(`  - ${c.name} ${c.hex}: priority ${priority} (~${pct}% share)${accentTag}${placementTag} [STRENGTH: ${strength}]`);
+    // ADR 0019 — Z-Image emitters get pigment name only; FLUX/SDXL emitters
+    // keep the original `Name #hexcode` form.
+    const label = isZImage ? `${c.name}` : `${c.name} ${c.hex}`;
+    // ADR 0019 — strength tag is FLUX/SDXL-only.
+    const strengthTag = isZImage ? '' : ` [STRENGTH: ${strength}]`;
+    lines.push(`  - ${label}: priority ${priority} (~${pct}% share)${accentTag}${placementTag}${strengthTag}`);
   }
   const sum = norm.displayPct.reduce((s, p) => s + p, 0);
   const sumNote = sum === 100 ? 'Sum: 100%' : `Sum: ${sum}% (rounded)`;
   const capNote = accentCount > 0 ? ` (accent cap: ${accentMax} mention${accentMax === 1 ? '' : 's'})` : '';
-  lines.push(`${sumNote}${capNote}`);
+  // ADR 0019 — sum/cap notes are FLUX/SDXL telemetry; Z-Image reads the
+  // priority order itself, no need to spell out cumulative share.
+  if (!isZImage) lines.push(`${sumNote}${capNote}`);
   return lines.join('\n');
 };
 
@@ -3300,20 +3322,28 @@ const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
  * "no user-customized weighting", because the act of saving it IS
  * the customization signal.
  *
+ * ADR 0019 — preset-aware emission. Pass `opts.isZImage: true` when
+ * the calling preset is one of the Z-Image sentinel presets; the
+ * budget block then drops hex codes + strength semantics + placement
+ * region tags (Z-Image interprets prose naturally and uses pigment
+ * names; the guide §5.3 says use named pigments only).
+ *
  * @param {object} analysis - the Stage 1 analysis (palette colors live in analysis.colors)
  * @param {string} directives - free-form user directives (Stage 2 input)
  * @param {object|null} palette - applied palette (ADR 0017)
+ * @param {object} opts - optional flags; { isZImage: boolean }
  * @returns {object} the envelope object (callMiniMaxStage2 JSON-stringifies it)
  */
-const buildStage2Envelope = (analysis, directives, palette = null) => {
+const buildStage2Envelope = (analysis, directives, palette = null, opts = {}) => {
   const envelope = { analysis, directives: directives || '' };
   // ADR 0017 — when a palette is in play, append a deterministic
   // color-budget block so the LLM has explicit priorities +
   // uniform-share labels + an accent cap to follow. The block lives
   // inside the envelope JSON so it's part of the structured user
   // message and travels through chat-refinement / re-runs unchanged.
+  // ADR 0019 — preset-aware emission threads `opts` into the block.
   if (palette) {
-    const block = buildColorBudgetBlock(palette);
+    const block = buildColorBudgetBlock(palette, opts);
     if (block) {
       envelope.color_budget = block;
     }
@@ -3321,12 +3351,12 @@ const buildStage2Envelope = (analysis, directives, palette = null) => {
   return envelope;
 };
 
-const callMiniMaxStage2 = async (analysis, directives, stage2SystemPrompt, palette = null) => {
+const callMiniMaxStage2 = async (analysis, directives, stage2SystemPrompt, palette = null, opts = {}) => {
   if (!minimaxConfigured) {
     throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
   }
 
-  const envelope = buildStage2Envelope(analysis, directives, palette);
+  const envelope = buildStage2Envelope(analysis, directives, palette, opts);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
@@ -4158,7 +4188,21 @@ app.post('/api/generate-prompt', async (req, res) => {
       return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
     }
 
-    const finalPrompt = await callMiniMaxStage2(analysis, directives || '', getEffectiveStage2Prompt(preset), appliedPalette);
+    // ADR 0019 — preset-aware palette emission. When the active preset's
+    // effective Stage 2 prompt is the canonical Z-Image contract, drop
+    // hex codes + strength/placement semantics from the color-budget
+    // block (Z-Image interprets prose naturally and uses pigment names;
+    // guide §5.3). For FLUX/SDXL/photorealistic/Danbooru presets the
+    // original behaviour is preserved.
+    const effectivePrompt = getEffectiveStage2Prompt(preset);
+    const isZImagePreset = effectivePrompt === DEFAULT_ZIMAGE_STAGE2_PROMPT;
+    const finalPrompt = await callMiniMaxStage2(
+      analysis,
+      directives || '',
+      effectivePrompt,
+      appliedPalette,
+      { isZImagePreset }
+    );
 
     // ADR 0014 — compute distribution metrics against the applied
     // palette. Pure function, fast (single pass over the prompt), and
