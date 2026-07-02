@@ -2363,23 +2363,56 @@ test('ADR 0015: getEffectiveStage2Prompt substitutes ZIMAGE_STAGE2_SENTINEL with
   }
 });
 
-test('ADR 0015: DEFAULT_ZIMAGE_STAGE2_PROMPT mentions style anchor and two-section output', () => {
+test('ADR 0019: DEFAULT_ZIMAGE_STAGE2_PROMPT is single-prose pastel-focal-glow contract (was two-section gestural in ADR 0015)', () => {
   const { DEFAULT_ZIMAGE_STAGE2_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
-  // Style anchor (verbatim quote must appear in the prompt)
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('Heavy impasto with vigorous scraped, dragged, and smeared paint'),
-    'prompt must include the verbatim style anchor opening');
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('gestural streaks of energy radiate outward from the figure'),
-    'prompt must include gestural streaks phrasing');
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('alla prima freshness throughout'),
-    'prompt must include alla prima freshness phrasing');
-  // Two-section output contract
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('SECTION A'),
-    'prompt must reference Section A');
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('SECTION B'),
-    'prompt must reference Section B');
-  // Accent override semantics
-  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('REPLACE'),
-    'prompt must make accent replacement explicit');
+  // Style & Technique block — pastel-palette / palette-knife / alla prima anchors
+  assertTrue(/oil painting on canvas/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must name oil painting on canvas as the medium');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('palette knife'),
+    'prompt must name palette knife as the application');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.toLowerCase().includes('alla prima'),
+    'prompt must name alla prima as the technique');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.toLowerCase().includes('pastel palette'),
+    'prompt must anchor on pastel palette');
+  // Pigment vocabulary from guide §5.3 — at least one saturated focal example
+  // and at least one muted-surround example must appear
+  assertTrue(/cadmium-coral/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must cite a saturated focal pigment (cadmium-coral)');
+  assertTrue(/pale sage/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must cite a muted-surround pigment (pale sage)');
+  // Lighting-as-Color (§8.1 glow-by-contrast module)
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('achieved through color contrast, not depicted illumination'),
+    'prompt must include the §8.1 lighting-as-color rule verbatim');
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('no depicted light source'),
+    'prompt must include the no-depicted-light-source rule');
+  // Framing default (§8.3 Option A)
+  assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('painting fills the frame'),
+    'prompt must include painting-fills-the-frame framing default');
+  // Length window
+  assertTrue(/150-300 words/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must cite the 150-300 word sweet spot');
+  assertTrue(/750 words/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must cite the 750-word hard ceiling');
+  // Closing directive — output only the prose, no labels
+  assertTrue(/Output only the prompt text/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must end with the output-only directive');
+  // Positive-anchor closing line (guide §17.1)
+  assertTrue(/natural paint sheen/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'prompt must include the natural paint sheen closing anchor');
+  // ADR 0019 — gestural-anchor and section-marker directives must NOT appear
+  assertTrue(!DEFAULT_ZIMAGE_STAGE2_PROMPT.includes('gestural streaks of energy radiate outward from the figure'),
+    'ADR 0015 gestural-streak anchor must be removed');
+  assertTrue(!/Start your reply with these section headers/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'ADR 0015 "Start your reply with these section headers" directive must be removed');
+  assertTrue(!/de Kooning/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'gestural-school reference (de Kooning) must be removed');
+  assertTrue(!/Riopelle/.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'gestural-school reference (Riopelle) must be removed');
+  // Negative-prompt tail must NOT appear as an instruction (CFG=0 ignores it).
+  // Quoting it as a forbidden example in the ANTI-PATTERNS section is correct;
+  // asserting it as positive instruction (`Use "no", "devoid of", "with no" phrasing`) would be wrong.
+  assertTrue(!/Use "no", "devoid of", "with no" phrasing/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'ADR 0015 "Use no/devoid of/with no phrasing" directive must be removed');
   // Hard size — must fit within MAX_STAGE2_PROMPT_LENGTH when sent as override
   assertTrue(DEFAULT_ZIMAGE_STAGE2_PROMPT.length <= 10000,
     `DEFAULT_ZIMAGE_STAGE2_PROMPT is ${DEFAULT_ZIMAGE_STAGE2_PROMPT.length} chars, must be ≤ 10000`);
@@ -6685,19 +6718,22 @@ test('ADR 0016: snapshotPalette falls back to moderate when strength is invalid'
   assertEqual(snap.strength, 'moderate', 'invalid strength → moderate');
 });
 
-test('ADR 0016: DEFAULT_ZIMAGE_STAGE2_PROMPT includes rules 11 + 12 (strength + placement)', () => {
-  const { DEFAULT_ZIMAGE_STAGE2_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(/STRENGTH MODIFIER/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt mentions STRENGTH MODIFIER');
-  assertTrue(/ACCENT PLACEMENT/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt mentions ACCENT PLACEMENT');
-  assertTrue(/subtle/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt names the subtle level');
-  assertTrue(/strict/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt names the strict level');
-  assertTrue(/placement region/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT) ||
-              /placement:/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
-    'canonical prompt discusses placement regions');
+test('ADR 0019: Z-Image canonical prompt is pastel-focal-glow (not FLUX/SDXL strength semantics)', () => {
+  // ADR 0016 added STRENGTH MODIFIER / ACCENT PLACEMENT rules to the Z-Image
+  // canonical prompt. ADR 0019 removes them from the Z-Image canonical
+  // prompt — these semantics are FLUX/SDXL-only and don't survive contact
+  // with Z-Image's CFG=0 + 1024-token chat-encoder. Strength + placement
+  // still live in `STRENGTH_PREAMBLES` + `buildColorBudgetBlock` for the
+  // non-Z-Image preset paths.
+  const { DEFAULT_ZIMAGE_STAGE2_PROMPT, STRENGTH_PREAMBLES } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(!/STRENGTH MODIFIER/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'ADR 0019 Z-Image prompt must NOT include STRENGTH MODIFIER (FLUX/SDXL-only)');
+  assertTrue(!/ACCENT PLACEMENT/i.test(DEFAULT_ZIMAGE_STAGE2_PROMPT),
+    'ADR 0019 Z-Image prompt must NOT include ACCENT PLACEMENT (FLUX/SDXL-only)');
+  assertTrue(typeof STRENGTH_PREAMBLES === 'object' && STRENGTH_PREAMBLES.subtle,
+    'STRENGTH_PREAMBLES still exported for the non-Z-Image emission path');
+  assertTrue(STRENGTH_PREAMBLES.strict,
+    'STRENGTH_PREAMBLES.strict still present');
 });
 
 test('ADR 0017: HTTP integration — POST /api/palettes accepts strength + placement (weight rejected)', async () => {

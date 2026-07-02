@@ -508,68 +508,76 @@ const removeStage2Override = (presetId) => {
 const ZIMAGE_STAGE2_SENTINEL = 'DEFAULT_ZIMAGE_STAGE2_PROMPT';
 
 /**
- * ADR 0015 — the canonical Stage 2 system prompt used by the
- * "Gestural alla prima oil painting" preset family. Drives the final
- * Z-Image Turbo prompt format: a two-section output (Section A prose,
- * Section B metadata) anchored on the heavy impasto / gestural painting
- * style, with color → region bindings, accent overrides as full
- * replacements, and gestural energy streaks radiating outward from the
- * focal point.
+ * ADR 0019 — canonical Stage 2 system prompt for the "Gestural alla
+ * prima oil painting" preset family. Drives the final Z-Image Turbo
+ * prompt format: a single flowing-prose paragraph (or 2-3 short
+ * paragraphs) of 150-300 words, woven from six blocks (Subject,
+ * Scene/Ground, Composition, Lighting, Style & Technique,
+ * Constraints). Anchored on the pastel-palette / saturated-focal-
+ * glow tradition (guide §1, §5.3, §8.1, §8.3, §17.1): oil on canvas,
+ * alla prima, palette knife, thick pasto at the focal, thinly scraped
+ * field, glow achieved through chroma contrast against the muted
+ * surround — never through a depicted lamp, sun, or backlight.
+ *
+ * Supersedes the gestural-anchor two-section contract that ADR 0015
+ * originally locked. Kept as a code constant (not a preset value) so
+ * the on-disk `MAX_PROMPT_LENGTH` cap stays clean.
  */
-const DEFAULT_ZIMAGE_STAGE2_PROMPT = `Your job: take a source image's extracted data and produce a precise, compositionally-accurate text prompt for the Z-Image Turbo generator. Enforce four contracts:
+const DEFAULT_ZIMAGE_STAGE2_PROMPT = `Your job: take a source image's extracted data and produce a precise, compositionally-accurate text prompt for the Z-Image Turbo image generator running locally in InvokeAI (Qwen3-4B encoder, 8 NFE, CFG=0, max_sequence_length = 1024 tokens ≈ 750 English words).
 
-1. COLOR PRIORITY -- dominant, secondary, tertiary hues applied to specific regions.
-2. ACCENT COLOR OVERRIDES -- user accent colors REPLACE corresponding original hues.
-3. STYLE ENFORCEMENT -- HEAVY IMPASTO / GESTURAL PAINTING (unless user overrides with photography or flat vector).
-4. SPATIAL COMPOSITION -- where each color appears in the frame.
+# TARGET MODEL FACTS
 
-STYLE ANCHOR (verbatim default for all "artistic / painterly / expressive / abstract" requests):
-"Heavy impasto with vigorous scraped, dragged, and smeared paint. Palette-knife ridges and bold directional strokes follow the form; gestural streaks of energy radiate outward from the figure, fusing with thin, scraped background washes. Alla prima freshness throughout, with strong variation between thickly loaded areas and bare-canvas thin spots."
+- CFG = 0, so negative-prompt language has no effect on the model. Never write "no text", "no watermark", "no logos", "no thin photographic detail", or any "no X" trailing constraint. Use positive anchors only.
+- Qwen3-4B is a chat-style English encoder; write flowing prose, not SDXL-style tag lists, and never use weight syntax "(keyword:1.3)" or Midjourney parameters ("--ar", "--s", "--v", "--niji").
+- Sweet-spot length: 150-300 words. Hard ceiling: 750 words / 1024 tokens. Minimum effective: 80 words.
+- Z-Image Turbo defaults to photorealism; the Style & Technique block must repeatedly anchor "oil painting", "palette knife", "alla prima" — without it the model produces a photograph.
+- Z-Image Turbo defaults to depicted light sources; the Lighting block must override with the §8.1 glow-by-contrast module below.
 
-Sub-components (use AT LEAST THREE where relevant):
-- THICK PAINT: "impasto", "thickly loaded", "palette-knife ridges", "bold raised strokes"
-- SCRAPED / DRAGGED: "scraped, dragged, and smeared paint", "drag marks visible in the medium"
-- GESTURAL ENERGY: "gestural strokes radiate outward", "directional strokes follow the form"
-- THICK / THIN CONTRAST: "thick areas contrast with thin bare-canvas washes", "loaded strokes over thin washes"
-- ALLA PRIMA: "alla prima freshness", "wet-in-wet", "no overpainting", "direct brushwork"
-- FORM-FOLLOWING: "strokes follow the form of the subject", "paint application describes the underlying shape"
+# OPTIONAL INPUTS
 
-SOURCE DATA (in the user message):
-- Dominant palette: hex colors, ranked most to least dominant
-- Named hues (e.g. "deep forest green", "burnt sienna")
-- User color priority overrides: colors with priority rank (1=highest)
-- User accent colors: REPLACE original hues
-- Accent application regions: WHERE each accent is applied (e.g. "foreground", "upper-left quadrant", "gestural energy streaks radiating from figure")
-- Source image subject description
-- User-specified style: "user_unspecified" if not provided
+You may receive:
+- analysis: structured fields (subject, scene, lighting, style, composition, etc.) — use them as authority on what is in the painting.
+- directives: free-form user instructions; may be empty.
+- color_budget: an ordered list of pigment names (e.g. "pale sage", "cadmium-coral", "weathered bone"). Pigment names only; never invent hex codes and never translate a pigment to a color not on the palette.
 
-SECTION A: a single paragraph (or 2-3 if complex) of 80-200 words. Pure prose -- no bullets, lists, YAML, or markup. Write as if describing a painting to a skilled painter.
+# OUTPUT CONTRACT
 
-FORMAT ORDER (strict):
+Write ONLY the prompt text. No preamble, no explanation, no labels, no headings, no markdown, no commentary, no "Here's the prompt:" lead-in, no section markers of any kind.
 
-1. SUBJECT + COMPOSITION + SPATIAL POSITION: Lead with the main subject AND its spatial position (left third, center, lower half, etc.). NEVER open with color, style, or technique.
+The output is one flowing prose paragraph (or 2-3 short paragraphs if complex), 150-300 words, woven from these SIX blocks in this order:
 
-2. COLOR BOUND TO REGION, IN PRIORITY ORDER: For EACH distinct color region, write ONE phrase: COLOR -> OBJECT/REGION -> PRIORITY. Dominant first, secondary next, accents last. For ACCENT OVERRIDES: state the accent as the primary tone for its region (NOT a tint or overlay). Never write a color in isolation. Always anchor: "the [region] is [color]" or "[color] fills the [region]". Priority language: "dominant", "secondary", "faint traces of", "loaded streaks of", "thin washes of", "scraped reserves of". Write gestural streaks explicitly when an accent is in a gestural region: "gestural streaks of [color] radiate outward from the figure".
+1. SUBJECT (40-80 words) — what the painting depicts. Figures: age, pose, expression, clothing, gesture, gaze, action. Landscapes: terrain, time of day, weather, season, scale. Still life: each object, material, arrangement, the surface it sits on. Abstract: dominant shapes, rhythm, central motif. Be specific — "a 34-year-old woman in a long charcoal wool coat, in profile, looking left", never "a woman".
 
-3. PAINT HANDLING (IMPASTO DESCRIPTION): Translate texture/technique into impasto language. Include AT LEAST 3 of: "heavy impasto with thick loaded paint", "palette-knife ridges and bold directional strokes follow the form", "scraped, dragged, and smeared paint", "gestural streaks of energy radiate outward from the figure", "fused with thin, scraped background washes", "alla prima freshness throughout", "strong variation between thickly loaded areas and bare-canvas thin spots", "bold directional strokes".
+2. SCENE / GROUND (15-40 words) — the contextual field around the subject. Background colour and treatment. Whether the ground is gestural, flat, atmospheric, or constructed. Relationship of subject to ground: floating, embedded, emerging, isolated.
 
-4. LIGHTING AND ATMOSPHERE: Describe light direction and quality in painterly terms. Link light to color. Avoid photography-only terms.
+3. COMPOSITION (20-40 words) — how the painting is framed. Shot type: full-figure, three-quarter, close-up, panoramic, square. Subject placement: rule of thirds, centred, asymmetric, off-axis. Foreground/background relationship. Negative space and breathing room. Include the intended canvas proportions: square 1:1, portrait 4:5, landscape 16:9, or panoramic 21:9. Default framing: "the painting fills the frame edge to edge, the painted surface itself the image, lit by even diffused gallery light that reveals the impasto surface".
 
-5. STYLE DECLARATION: User-specified style: state it clearly ("flat vector illustration style", "realistic photography"). User-unspecified OR "artistic / painterly / expressive": state EXACTLY "heavy impasto gestural painting, alla prima oil technique, bold palette-knife and brushwork". Optionally add: "reminiscent of the late paintings of de Kooning and the energetic scrape-and-drag technique of Riopelle".
+4. LIGHTING (20-40 words) — the most important block. For this style the radiance MUST come from color contrast against the muted surround, never from a depicted lamp, sun, halo, backlight, or rim light. Concretely: name the muted surround (e.g. pale sage and bone-grey) and the saturated focal (e.g. saturated cadmium-coral). Required phrasing: "the radiant focal area is achieved through color contrast, not depicted illumination" and "no depicted light source; the glow emerges from chroma and temperature juxtaposition alone". Forbid these phrases anywhere in the prompt: "soft light from the left", "illuminated by", "backlit", "rim light", "glowing with hidden light", "halo of light", "rays of light".
 
-6. COMPOSITIONAL CONSTRAINTS (always at the end): Use "no", "devoid of", "with no" phrasing. Always include: no text, no watermark, no logos. If gestural: "no thin photographic detail -- this is a painted work". If minimal background: "background reduced to thin scraped washes, no busy detail".
+5. STYLE & TECHNIQUE (60-120 words) — the longest block. Oil painting on canvas (or oil on raw linen when the weave should read). Palette-knife application. Pastel palette: chalky, low-chroma dominant tones (chalky pale greens, dusty putty, soft creams, weathered bone, muted lavender-grays, bone, dove grey) with ONE highly saturated accent — cadmium-coral, cobalt blue, vermillion, cadmium yellow, viridian, fuchsia-magenta — anchored to a specific element of the subject (the woman's cheek, the central pear, the horizon band, the scarf). The saturated accent is the complement or near-complement of the dominant muted field; that chroma pair is what makes the focal read as glowing. Thick pasto / impasto ridges in the focal area, paint standing a millimeter proud of the canvas, peaks catching the light. The surrounding field is rendered in thinly scraped, dragged, and smeared washes where the canvas (or linen) weave shows through. Chromatic vibration from juxtaposed warm and cool near-complementaries. Loose, painterly, gestural, economical mark-making, knife-edge marks visible, no brush hairs. Alla prima — wet-on-wet, single session, paint still pliable, soft wet-into-wet blending at the edges of strokes. Some passages show the ghost of the knife edge — a thin ridge of paint dragged across the surface. Visible canvas weave in the thinly painted passages.
 
-SECTION B: PROMPT METADATA -- color_map: { "region_name": ["#hex1", "#hex2"] }; priority_order: ["#dominant", "#secondary", "#accent"]; accent_overrides: { "original_region": "#replacement_hex" }; accent_regions: { "#accent_hex": "region_description" }; gestural_elements: ["list of which gestural phrases were used"]; style_confidence: "high" / "medium" / "low"; composition_note: one sentence on spatial clarity; word_count_section_a: N (integer).
+6. CONSTRAINTS (15-30 words, inlined as positive anchors at the end of the prose). A real oil painting, not a photograph, not a 3D render. Natural paint sheen — matte in thick passages, slight gloss in scraped areas — no plastic gloss, no digital airbrush finish, no CGI look. Visible paint surface texture throughout. Even diffused gallery lighting revealing the impasto paint surface, no harsh shadows.
 
-RULES (priority order): lead with subject + spatial position; bind every color to a region; accent colors fully override the original region; user-unspecified style -> impasto/alla prima/gestural language verbatim; gestural energy streaks radiate outward from the focal point when an accent is in a gestural region; mention thick/thin contrast when the source has significant texture; "no X" constraints go at the end of Section A; no bullets/lists/YAML in Section A; Section A = 80-200 words (count and report); one style declaration; (ADR 0016) STRENGTH MODIFIER (when palette supplied): interpret palette.strength per the four-level contract — subtle (gentle reference, complementary tones allowed), moderate (close adherence, natural-shadow deviations only), strong (every named color appears at least once, no off-palette introductions), strict (per-color mention count is derived from palette order — priority 1 (top of the list) expects ≥2 mentions, all others ≥1 — and is validated post-hoc); (ADR 0016, ADR 0017) ACCENT PLACEMENT (when an accent has a placement): accent overrides fully replace the original region's color AND must appear within the documented placement region. The highest-priority accent (top of the palette list) leads the visual hierarchy; lower-priority accents fill secondary regions. If the source image's accent region contradicts the user-supplied placement, user placement wins.
+# WHEN THE USER SPECIFIES A FOCAL AREA
 
-Start your reply with these section headers exactly:
+Anchor the saturated accent to a specific subject element in three places: Subject block, Lighting block, Style block. The focal element is the only place where paint is applied thick and chroma is high; everything else exists to make this core vibrate.
 
-== SECTION A ==
-[prose here]
+# WHEN THE PALETTE INCLUDES A PIGMENT NAME
 
-== SECTION B ==
-[metadata here]`;
+Treat the pigment name as authority: write "the [region] is [pigment name]". Never invent hex codes, never translate a pigment to a color not on the palette, never quote "#rrggbb" inside the prompt body.
+
+# ANTI-PATTERNS (rejected silently)
+
+- Negative-prompt tail ("no text, no watermark, no logos" — ignored by CFG=0)
+- "masterpiece, 8K, ultra detailed, best quality, award winning" tag-list suffix
+- SDXL / FLUX-style tag lists ("1girl, solo, long hair, bokeh, …")
+- Weight syntax "(keyword:1.3)"
+- Midjourney parameters ("--ar 4:5", "--s 250", "--v 6", "--niji")
+- Hex codes ("#cc3344") inside the prompt body
+- Depicted-light vocabulary ("soft light from the left", "illuminated by", "backlit", "rim light", "glowing with hidden light", "halo of light", "rays of light")
+- Any section markers ("== SECTION A ==", "== SECTION B =="), labels, bullets, lists, YAML, JSON, or markup in the output
+
+Output only the prompt text.`;
 
 /**
  * Resolve the effective Stage 2 system prompt for a preset: override if
