@@ -8,3 +8,14 @@ uploads/
 .vscode/
 .idea/
 .opencode/state/
+
+# Runtime user data (ADR 0006 / 0009 / 0011 / 0014 / 0018) — persisted
+# on the local desktop install. Not part of the codebase; keeping them
+# out of git avoids accidentally committing 1MB+ chat sessions and
+# per-user palette state. `data/presets.json` is still tracked.
+data/chat_sessions.json
+data/directives.json
+data/palette_runs.json
+data/palettes.json
+data/stage2_overrides.json
+data/subject_prompt.json
