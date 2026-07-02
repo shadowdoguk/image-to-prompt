@@ -1692,6 +1692,47 @@ test('Issue #8: buildColorBudgetBlock drops hex codes when isZImage (Issue #9 dr
     'Z-Image block still names the muted surround');
 });
 
+test('Issue #14: buildChatSystemPrompt appends the Z-Image constraints block for Z-Image sessions', () => {
+  const {
+    buildChatSystemPrompt,
+    ZIMAGE_PRESET_IDS,
+    ZIMAGE_CHAT_CONSTRAINTS_BLOCK
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof ZIMAGE_CHAT_CONSTRAINTS_BLOCK === 'string' && ZIMAGE_CHAT_CONSTRAINTS_BLOCK.length > 0,
+    'ZIMAGE_CHAT_CONSTRAINTS_BLOCK is a non-empty string');
+  assertTrue(ZIMAGE_PRESET_IDS.has('preset_alla_prima_oil'),
+    'ZIMAGE_PRESET_IDS includes the original sentinel preset');
+  assertTrue(ZIMAGE_PRESET_IDS.has('preset_968c0ccdf6fc6151'),
+    'ZIMAGE_PRESET_IDS includes the imported sentinel preset');
+  assertTrue(!ZIMAGE_PRESET_IDS.has('preset_photorealistic'),
+    'photorealistic preset is NOT in ZIMAGE_PRESET_IDS');
+  assertTrue(!ZIMAGE_PRESET_IDS.has('preset_sd_danbooru'),
+    'Danbooru preset is NOT in ZIMAGE_PRESET_IDS');
+
+  const baseSession = {
+    preset_id: 'preset_alla_prima_oil',
+    original_prompt: 'Oil painting on canvas, alla prima, palette knife.',
+    current_prompt: 'Oil painting on canvas, alla prima, palette knife.',
+    analysis_snapshot: { subject: 'x' }
+  };
+  const zPrompt = buildChatSystemPrompt(baseSession);
+  assertTrue(zPrompt.includes('Z-IMAGE CONTRACT'),
+    'Z-Image session prompt includes the Z-Image contract header');
+  assertTrue(zPrompt.includes('FORBIDDEN VOCABULARY'),
+    'Z-Image session prompt includes the forbidden-vocabulary list');
+  assertTrue(/color contrast/i.test(zPrompt),
+    'Z-Image session prompt references color-contrast glow mechanism');
+  assertTrue(/natural paint sheen/i.test(zPrompt),
+    'Z-Image session prompt references the natural paint sheen closing anchor');
+
+  const photoSession = { ...baseSession, preset_id: 'preset_photorealistic' };
+  const photoPrompt = buildChatSystemPrompt(photoSession);
+  assertTrue(!photoPrompt.includes('Z-IMAGE CONTRACT'),
+    'photorealistic session does NOT include the Z-Image contract');
+  assertTrue(photoPrompt.includes('EDIT, DO NOT REGENERATE'),
+    'photorealistic session retains the ADR 0012 anchor-preservation contract');
+});
+
 test('Issue #13: countStage2Words + classifyStage2Length honor the 150-300 sweet spot', () => {
   const {
     countStage2Words,

@@ -5713,6 +5713,113 @@ const callMiniMaxChatOnce = async (openaiMessages) => {
  * Interpolation of the three context blocks (original prompt, current
  * prompt, analysis snapshot) happens here so the constant
  * `DEFAULT_CHAT_SYSTEM_PROMPT` stays free of per-session data.
+ *
+ * ADR 0019 — when the session is anchored to one of the Z-Image
+ * sentinel presets (`preset_alla_prima_oil` or
+ * `preset_968c0ccdf6fc6151`), append the Z-Image constraints block
+ * so the chat assistant refuses to introduce depicted-light
+ * vocabulary, hex codes in the prompt body, or section markers,
+ * and preserves the pastel-palette / saturated-accent focal
+ * contract if Style or Lighting is touched. The chat assistant
+ * stays a strict editor (ADR 0011/0012); this block layers the
+ * domain model vocabulary on top.
+ */
+const ZIMAGE_PRESET_IDS = new Set(['preset_alla_prima_oil', 'preset_968c0ccdf6fc6151']);
+
+/**
+ * The Z-Image-aware constraints block layered onto the chat system
+ * prompt for sessions anchored to Z-Image presets. Pure string —
+ * composed into the prompt by `buildChatSystemPrompt` when the
+ * session.preset_id is in ZIMAGE_PRESET_IDS.
+ */
+const ZIMAGE_CHAT_CONSTRAINTS_BLOCK = `
+
+# Z-IMAGE CONTRACT — DOMAIN CONSTRAINTS (PIGMENT-NAMES ONLY, COLOR-CONTRAST GLOW)
+
+The current working prompt is destined for Z-Image Turbo (Qwen3-4B
+encoder, 8 NFE, CFG=0, max_sequence_length = 1024 tokens). The
+following constraints are non-negotiable on every revision. Anchor-
+preservation rules above still apply — these add domain-model
+constraints on top.
+
+## FORBIDDEN VOCABULARY (will degrade Z-Image output)
+
+You must NEVER introduce any of the following into the revised prompt:
+
+- Negative-prompt tail: "no text", "no watermark", "no logos",
+  "no thin photographic detail", "no CGI", "no plastic gloss", or
+  any "no X" trailing constraint. CFG=0 ignores these phrases —
+  they're dead tokens.
+- Depicted-light vocabulary: "soft light from the left",
+  "illuminated by", "backlit", "rim light", "glowing with hidden
+  light", "halo of light", "rays of light", "highlight from". The
+  radiance in this style comes from color contrast against the
+  muted surround, not from a depicted lamp.
+- Quality-tag suffix: "masterpiece", "8K", "ultra detailed",
+  "best quality", "award winning", "highly detailed".
+- SDXL / FLUX tag-list vocabulary: "1girl", "solo", "long_hair",
+  "bokeh", "score_9", etc. Z-Image interprets prose naturally;
+  tag lists dilute focus.
+- Weight syntax "(keyword:1.3)" or Midjourney parameters ("--ar",
+  "--s", "--v", "--niji").
+- Hex codes inside the prompt body: "#cc3344", "#1f2a44", etc. Use
+  pigment names only.
+- Section markers: "== SECTION A ==", "== SECTION B ==",
+  labels, bullets, lists, YAML, JSON, or any markup.
+
+## REQUIRED VOCABULARY (anchors if user mentions these)
+
+If the user's revision touches Style, Lighting, Color, or Subject,
+preserve or strengthen the following vocabulary in the revised
+prompt:
+
+- Medium: "oil painting on canvas" (or "oil on raw linen" if weave
+  should read).
+- Application: "palette knife" — never "brushwork" or "brush hairs".
+- Technique: "alla prima" — wet-in-wet, single session, paint
+  still pliable.
+- Palette: pastel / low-chroma dominant tones — chalky pale
+  greens, dusty putty, soft creams, weathered bone, muted
+  lavender-grays. ONE highly saturated accent (cadmium-coral,
+  vermillion, cobalt blue, cadmium yellow, viridian, fuchsia-
+  magenta) anchored to a specific element of the subject.
+- Glow mechanism: "achieved through color contrast, not depicted
+  illumination" — when the user asks for the focal to "pop" or
+  "glow", translate that into chroma contrast against the muted
+  surround.
+- Closing anchor: "natural paint sheen — matte in thick passages,
+  slight gloss in scraped areas — no plastic gloss, no digital
+  airbrush finish, no CGI look. Visible paint surface texture
+  throughout."
+
+## LENGTH
+
+The revised prompt must stay inside 150-300 words (sweet spot).
+Hard ceiling: 750 words / 1024 tokens. Below 80 words = generic
+output. If the user's revision would push the prompt above 300
+words, trim adjectives without dropping the six blocks (Subject,
+Scene/Ground, Composition, Lighting, Style & Technique,
+Constraints).
+
+## STYLE-SCHOOL ANCHOR
+
+This is the pastel-palette-with-saturated-focal tradition. Do NOT
+introduce gestural-expressionist vocabulary on revisions
+("gestural streaks of energy radiate outward from the figure",
+"de Kooning", "Riopelle", "vigorous scraped, dragged, and smeared
+paint" as a focal feature rather than as field treatment). The
+energy in this style is optical — saturated colour against muted
+surround — not kinetic.`;
+
+/**
+ * Build the chat system prompt for a given session at a given turn.
+ * Interpolation of the three context blocks (original prompt, current
+ * prompt, analysis snapshot) happens here so the constant
+ * `DEFAULT_CHAT_SYSTEM_PROMPT` stays free of per-session data.
+ *
+ * ADR 0019 — when the session is anchored to a Z-Image preset, the
+ * Z-Image constraints block is appended after the SESSION CONTEXT
+ * block. The plain anchor-preservation contract is unaffected.
  */
 const buildChatSystemPrompt = (session) => {
   const original = typeof session.original_prompt === 'string' ? session.original_prompt : '';
@@ -5720,6 +5827,9 @@ const buildChatSystemPrompt = (session) => {
   const analysis = session.analysis_snapshot && typeof session.analysis_snapshot === 'object'
     ? JSON.stringify(session.analysis_snapshot, null, 2)
     : '(no analysis snapshot was captured for this session)';
+
+  const isZImageSession = session && typeof session.preset_id === 'string'
+    && ZIMAGE_PRESET_IDS.has(session.preset_id);
 
   return `${DEFAULT_CHAT_SYSTEM_PROMPT}
 
@@ -5740,7 +5850,7 @@ ${current}
 ${analysis}
 \`\`\`
 
-Treat the CURRENT WORKING PROMPT as the authoritative text the user is iterating on. When you propose a revision, base it on the CURRENT WORKING PROMPT — not the ORIGINAL — so subsequent revisions are additive.`;
+Treat the CURRENT WORKING PROMPT as the authoritative text the user is iterating on. When you propose a revision, base it on the CURRENT WORKING PROMPT — not the ORIGINAL — so subsequent revisions are additive.${isZImageSession ? ZIMAGE_CHAT_CONSTRAINTS_BLOCK : ''}`;
 };
 
 // ─── Routes ───────────────────────────────────────────────────────
@@ -6131,6 +6241,8 @@ module.exports = {
   applyDirectiveUpdate,
   // Chat sessions (ADR 0011)
   MAX_FINAL_PROMPT_LENGTH,
+  ZIMAGE_PRESET_IDS,
+  ZIMAGE_CHAT_CONSTRAINTS_BLOCK,
   MAX_CHAT_MESSAGE_LENGTH,
   MAX_CHAT_MESSAGES_PER_SESSION,
   MAX_CHAT_SESSIONS_TOTAL,
