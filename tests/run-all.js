@@ -6718,6 +6718,24 @@ test('ADR 0016: snapshotPalette falls back to moderate when strength is invalid'
   assertEqual(snap.strength, 'moderate', 'invalid strength → moderate');
 });
 
+test('Issue #12: src/app.js exposes a section-marker stripper for the Copy-to-clipboard button', () => {
+  // After ADR 0019, the canonical Z-Image Stage 2 contract no longer emits
+  // `== SECTION A ==` / `== SECTION B ==` markers. Copy-to-clipboard still
+  // runs the prompt through a defensive strip function so that any
+  // future regression (or user-pasted Stage 2 override) can't leak
+  // audit metadata into InvokeAI's prompt field.
+  const fs = require('fs');
+  const appJs = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/const stripSectionMarkers = \(raw\)/.test(appJs),
+    'src/app.js defines stripSectionMarkers');
+  assertTrue(/window\.__imageToPromptCopyStrip\s*=\s*stripSectionMarkers/.test(appJs),
+    'stripSectionMarkers exposed on window for smoke tests');
+  assertTrue(/== SECTION A ==/.test(appJs),
+    'stripper looks for == SECTION A == header');
+  assertTrue(/== SECTION B ==/.test(appJs),
+    'stripper looks for == SECTION B == header');
+});
+
 test('ADR 0019: Z-Image canonical prompt is pastel-focal-glow (not FLUX/SDXL strength semantics)', () => {
   // ADR 0016 added STRENGTH MODIFIER / ACCENT PLACEMENT rules to the Z-Image
   // canonical prompt. ADR 0019 removes them from the Z-Image canonical

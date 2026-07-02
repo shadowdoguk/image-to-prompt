@@ -1655,9 +1655,34 @@
 
   // ─── Copy to clipboard ─────────────────────────────────────────────────
 
+  // ADR 0019 / Issue #12 — when the canonical Z-Image Stage 2 contract is
+  // active, the LLM response is a single flowing-paragraph of 150-300
+  // words. As a safety net against any future regression (or against a
+  // user-pasted Stage 2 override that still emits section markers),
+  // strip any leading `== SECTION A ==` header and any trailing
+  // `== SECTION B ==` block before copying. The artist pastes this into
+  // InvokeAI's prompt field — only the prose paragraph is conditioning;
+  // section markers, audit metadata, and labels would be silently fed
+  // to the Z-Image encoder as text-in-image glyphs.
+  const stripSectionMarkers = (raw) => {
+    if (typeof raw !== 'string') return '';
+    let text = raw.trim();
+    if (!text) return text;
+    const sectionA = text.indexOf('== SECTION A ==');
+    const sectionB = text.indexOf('== SECTION B ==');
+    if (sectionA !== -1) {
+      text = text.slice(sectionA + '== SECTION A =='.length);
+    }
+    if (sectionB !== -1) {
+      text = text.slice(0, sectionB);
+    }
+    return text.trim();
+  };
+
   dom.copyBtn.addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText(dom.resultPrompt.textContent);
+      const cleaned = stripSectionMarkers(dom.resultPrompt.textContent);
+      await navigator.clipboard.writeText(cleaned);
       const original = dom.copyBtn.textContent;
       dom.copyBtn.textContent = 'Copied!';
       setTimeout(() => { dom.copyBtn.textContent = original; }, 2000);
@@ -1665,6 +1690,10 @@
       showError('Failed to copy to clipboard.');
     }
   });
+
+  // Expose the stripper on `window` so smoke tests in tests/*.js can reach
+  // it without tearing apart the IIFE closure that wraps this file.
+  if (typeof window !== 'undefined') window.__imageToPromptCopyStrip = stripSectionMarkers;
 
   // ─── Error dismissal ───────────────────────────────────────────────────
 
