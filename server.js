@@ -61,6 +61,36 @@ const FIELD_PALETTE = {
 
 const VALID_FIELD_NAMES = Object.keys(FIELD_PALETTE);
 const MAX_PROMPT_LENGTH = 5000;
+
+// ADR 0019 Issue #15 — aspect-ratio picker. The frontend lets the user
+// pick the canvas proportion that Z-Image should target. Server-side
+// validation accepts only the four values documented in
+// `docs/Z-IMAGE-TURBO-AGENT-PROMPT-GUIDE.md` §6 Block 3 + §12.1:
+//   - 'square'     → 1:1   (InvokeAI 1024×1024)
+//   - 'portrait'   → 4:5   (InvokeAI 832×1280)
+//   - 'landscape'  → 16:9  (InvokeAI 1280×832)
+//   - 'panoramic'  → 21:9  (InvokeAI 1536×640)
+const VALID_ASPECT_RATIOS = new Set(['square', 'portrait', 'landscape', 'panoramic']);
+
+const ASPECT_RATIO_LABEL = {
+  square:    'square 1:1',
+  portrait:  'portrait 4:5',
+  landscape: 'landscape 16:9',
+  panoramic: 'panoramic 21:9'
+};
+
+/**
+ * Build the aspect-ratio directive prefix that's prepended to the
+ * Stage 2 user directives when the user has chosen a target canvas
+ * proportion. Pure / no side effects. Returns the empty string when
+ * no aspect ratio is supplied (default).
+ */
+const buildAspectRatioDirective = (aspectRatio) => {
+  if (typeof aspectRatio !== 'string' || !VALID_ASPECT_RATIOS.has(aspectRatio)) {
+    return '';
+  }
+  return `Aspect ratio: the intended canvas proportion is ${ASPECT_RATIO_LABEL[aspectRatio]}.\n`;
+};
 const MAX_DIRECTIVES_LENGTH = 1000;
 const PRESET_FILE_FORMAT = 'image-to-prompt-preset';
 const PRESET_FILE_VERSION = 1;
@@ -4253,7 +4283,7 @@ app.delete('/api/stage2-prompt', (req, res) => {
 app.post('/api/generate-prompt', async (req, res) => {
   try {
     const body = req.body || {};
-    const { presetId, analysis, directives } = body;
+    const { presetId, analysis, directives, aspectRatio } = body;
 
     if (!presetId) return res.status(400).json({ success: false, error: 'presetId is required.' });
     if (!analysis || typeof analysis !== 'object') {
@@ -4264,6 +4294,21 @@ app.post('/api/generate-prompt', async (req, res) => {
         success: false,
         error: `directives must be a string up to ${MAX_DIRECTIVES_LENGTH} characters.`
       });
+    }
+    // ADR 0019 Issue #15 — optional aspect-ratio body field. When present,
+    // server prepends a structured directive instructing the LLM to
+    // include the canvas proportion in Block 3 of the Stage 2 output.
+    // When absent, no directive is prepended (the LLM picks one or
+    // follows the prompt's existing Block-3 instruction).
+    let aspectRatioDirective = '';
+    if (aspectRatio !== undefined && aspectRatio !== null && aspectRatio !== '') {
+      if (typeof aspectRatio !== 'string' || !VALID_ASPECT_RATIOS.has(aspectRatio)) {
+        return res.status(400).json({
+          success: false,
+          error: `aspectRatio must be one of: ${Array.from(VALID_ASPECT_RATIOS).join(', ')} (got ${JSON.stringify(aspectRatio)}).`
+        });
+      }
+      aspectRatioDirective = buildAspectRatioDirective(aspectRatio);
     }
 
     // ADR 0014 — optional paletteId in the request body. When provided,
@@ -4309,9 +4354,14 @@ app.post('/api/generate-prompt', async (req, res) => {
     // generated prompts stay inside the guide's contract range.
     const effectivePrompt = getEffectiveStage2Prompt(preset);
     const isZImagePreset = effectivePrompt === DEFAULT_ZIMAGE_STAGE2_PROMPT;
+    // ADR 0019 Issue #15 — prepend the aspect-ratio directive so the
+    // Stage 2 LLM anchors Block 3 on the user's chosen canvas
+    // proportion. The user-typed directives remain authoritative; we
+    // prepend only when aspectRatio is set.
+    const composedDirectives = aspectRatioDirective + (directives || '');
     const stage2Result = await generateStage2WithLengthCheck(
       analysis,
-      directives || '',
+      composedDirectives,
       effectivePrompt,
       appliedPalette,
       { isZImagePreset, enableLengthRetry: isZImagePreset }
@@ -6138,6 +6188,10 @@ if (require.main === module) {
 
 module.exports = {
   app,
+  // ADR 0019 Issue #15 — aspect-ratio picker
+  VALID_ASPECT_RATIOS,
+  ASPECT_RATIO_LABEL,
+  buildAspectRatioDirective,
   FIELD_PALETTE,
   VALID_FIELD_NAMES,
   FIELD_INPUT_MIN_LENGTH,

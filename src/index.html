@@ -125,6 +125,17 @@
           </div>
 
           <div class="step-actions">
+            <label for="aspect-ratio-select" class="label aspect-ratio-label">
+              Aspect ratio
+              <span class="label-hint">— targets the InvokeAI resolution the prompt should describe</span>
+            </label>
+            <select id="aspect-ratio-select" class="select aspect-ratio-select" aria-label="Aspect ratio for the generated prompt">
+              <option value="" selected>— Auto —</option>
+              <option value="square">Square 1:1 (1024×1024)</option>
+              <option value="portrait">Portrait 4:5 (832×1280)</option>
+              <option value="landscape">Landscape 16:9 (1280×832)</option>
+              <option value="panoramic">Panoramic 21:9 (1536×640)</option>
+            </select>
             <button type="button" id="re-analyze-btn" class="btn-secondary">Re-analyze</button>
             <button type="button" id="edit-stage2-prompt-btn" class="btn-secondary" disabled>Edit prompt</button>
             <button type="button" id="generate-prompt-btn" class="btn-primary">
@@ -169,6 +180,15 @@
           section of the generated prompt. The AI replies in context
           with the full analysis snapshot. Click <strong>Apply</strong>
           on any revision to promote it into the prompt above.
+        </p>
+        <p
+          id="token-reminder-banner"
+          class="token-reminder-banner"
+          role="status"
+          aria-live="polite"
+          hidden
+        >
+          Current prompt is approaching or past the 1024-token / 750-word ceiling. Z-Image will silently truncate above that; consider trimming adjectives in the chat before generating.
         </p>
 
         <div class="chat-session-bar">

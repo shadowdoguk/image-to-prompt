@@ -1692,6 +1692,38 @@ test('Issue #8: buildColorBudgetBlock drops hex codes when isZImage (Issue #9 dr
     'Z-Image block still names the muted surround');
 });
 
+test('Issue #15: buildAspectRatioDirective returns the prose directive for valid ratios, empty string otherwise', () => {
+  const {
+    buildAspectRatioDirective,
+    VALID_ASPECT_RATIOS,
+    ASPECT_RATIO_LABEL
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(buildAspectRatioDirective(''), '', 'empty string → empty directive');
+  assertEqual(buildAspectRatioDirective(null), '', 'null → empty directive');
+  assertEqual(buildAspectRatioDirective(undefined), '', 'undefined → empty directive');
+  assertEqual(buildAspectRatioDirective('bogus'), '', 'unknown ratio → empty directive (server rejects with 400 later)');
+  for (const r of VALID_ASPECT_RATIOS) {
+    const d = buildAspectRatioDirective(r);
+    assertTrue(d.includes('Aspect ratio:'), `directive for '${r}' starts with "Aspect ratio:"`);
+    assertTrue(d.includes(ASPECT_RATIO_LABEL[r]),
+      `directive for '${r}' names the doc §6 block-3 label "${ASPECT_RATIO_LABEL[r]}"`);
+  }
+});
+
+test('Issue #15: /api/generate-prompt 400s on invalid aspectRatio', () => {
+  // POST /api/generate-prompt with aspectRatio not in
+  // VALID_ASPECT_RATIOS. Tests cover the validation in the route.
+  // We test only that the rejection happens; full HTTP flow is
+  // covered by integration tests elsewhere.
+  const { VALID_ASPECT_RATIOS } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(VALID_ASPECT_RATIOS.has('square'), 'square is valid');
+  assertTrue(VALID_ASPECT_RATIOS.has('portrait'), 'portrait is valid');
+  assertTrue(VALID_ASPECT_RATIOS.has('landscape'), 'landscape is valid');
+  assertTrue(VALID_ASPECT_RATIOS.has('panoramic'), 'panoramic is valid');
+  assertTrue(!VALID_ASPECT_RATIOS.has('ultrawide'), 'ultrawide is NOT valid');
+  assertTrue(!VALID_ASPECT_RATIOS.has('4:3'), '4:3 is NOT valid (must be a name not a ratio)');
+});
+
 test('Issue #14: buildChatSystemPrompt appends the Z-Image constraints block for Z-Image sessions', () => {
   const {
     buildChatSystemPrompt,

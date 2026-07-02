@@ -1397,6 +1397,47 @@ body {
 .result-strict-warn[data-tone="ok"] {
   background: rgba(60, 170, 90, 0.12);
   border-color: rgba(60, 170, 90, 0.5);
+  color: rgb(40, 120, 70);
+}
+
+/* ADR 0019 Issue #15 — aspect-ratio picker in the Generate-prompt
+   row. The label + select fit alongside the action buttons on the
+   same .step-actions row; the select sits between the label and the
+   buttons so the visual flow is: [label] [select] [Re-analyze]
+   [Edit prompt] [Generate]. Width is fixed to keep the row from
+   wrapping at common viewport widths. */
+.aspect-ratio-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+.aspect-ratio-label .label-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.aspect-ratio-select {
+  width: auto;
+  min-width: 220px;
+}
+
+/* ADR 0019 Issue #15 — 1024-token reminder banner in the chat panel.
+   Hidden by default; surfaced when the current prompt hits
+   STAGE2_HARD_MAX_WORDS (750 words). Yellow-tinted to mirror the
+   strict-palette warning styling so the user associates it with a
+   "check before you copy / re-generate" affordance. */
+.token-reminder-banner {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.85rem;
+  border-radius: 0.4rem;
+  background: rgba(220, 170, 50, 0.10);
+  border: 1px solid rgba(220, 170, 50, 0.45);
+  color: rgb(120, 90, 20);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
   color: var(--color-success, #2c8a4f);
 }
 
