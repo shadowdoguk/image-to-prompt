@@ -20,6 +20,7 @@
   --color-accent: #f59e0b;
   --color-accent-soft: rgba(245, 158, 11, 0.18);
   --success: #10b981;
+  --warning: #f59e0b;
   --error: #ef4444;
   --error-bg: #2d1a1a;
   --danger: #dc2626;
@@ -2207,6 +2208,79 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-top: 0.35rem;
+}
+
+/* Issue #1 — declined-revision preview. Rendered when the validator
+   (ADR 0012) declined the model's revision after retries: the user
+   sees what would have been applied (greyed out) plus a list of the
+   anchor terms that were lost, and a "Try as rewrite" affordance. */
+.chat-message__declined {
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--warning);
+  border-radius: var(--radius);
+  opacity: 0.92;
+}
+
+.chat-message__declined-label {
+  font-size: 0.72rem;
+  color: var(--warning);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.chat-message__declined-preview {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.7rem;
+  margin-top: 0.35rem;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  max-height: 140px;
+  overflow-y: auto;
+  text-decoration: line-through;
+  text-decoration-color: var(--text-muted);
+  text-decoration-thickness: 1px;
+}
+
+.chat-message__declined-terms {
+  margin-top: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: baseline;
+}
+
+.chat-message__declined-terms-label {
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-right: 0.25rem;
+}
+
+.chat-message__declined-terms-list {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.76rem;
+  color: var(--warning);
+}
+
+.chat-message__declined-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.chat-message__try-rewrite {
+  font-size: 0.8rem;
+  padding: 0.35rem 0.7rem;
 }
 
 .chat-empty {

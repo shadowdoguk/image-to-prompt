@@ -6276,6 +6276,98 @@ test('ADR 0012: PRESERVATION_FAILED_REPLY_NOTE is friendlier than the raw error'
     'note uses plain English, no implementation details');
 });
 
+test('Issue #1: buildPreservationDeclineNote exports + includes dropped terms', () => {
+  // Issue #1 — when the validator declines a revision, the user
+  // currently gets a generic "I'd proposed a revision but..." note
+  // with no information about WHICH anchor terms blocked the apply.
+  // The fix: buildPreservationDeclineNote(report) returns a string that
+  // names the top dropped terms (capped) so the user can see why.
+  const { buildPreservationDeclineNote } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof buildPreservationDeclineNote === 'function',
+    'buildPreservationDeclineNote is exported as a function');
+
+  const noteWithTerms = buildPreservationDeclineNote({
+    nonTargetedMissing: ['impasto', '#ff0000', '#ffff00', 'de Kooning']
+  });
+  assertTrue(/impasto/.test(noteWithTerms), 'note names "impasto"');
+  assertTrue(/#ff0000/.test(noteWithTerms), 'note names the dropped hex "#ff0000"');
+  assertTrue(/try a more specific request/i.test(noteWithTerms),
+    'note still guides the user to a more specific request');
+  assertTrue(!/validator|threshold|nonTargetedRatio/.test(noteWithTerms),
+    'note uses plain English, no implementation details');
+
+  const noteNoTerms = buildPreservationDeclineNote({ nonTargetedMissing: [] });
+  assertTrue(/too much of the original context/i.test(noteNoTerms),
+    'fallback note still explains why without a terms list');
+  assertTrue(!/Terms dropped/.test(noteNoTerms),
+    'empty missing list -> no "Terms dropped:" prefix');
+});
+
+test('Issue #1: callMiniMaxChat returns declined_suggested_prompt + missing_terms on preservation_failed', () => {
+  // Issue #1 — when the validator declines the revision after retries,
+  // the callMiniMaxChat return shape now carries the declined text and
+  // the list of dropped anchor terms so the frontend can render them.
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // Anchor on the unique decline-log line + the return block that
+  // immediately follows it (the preservation_failed return shape).
+  const logIdx = serverText.indexOf('declining revision (nonTargeted=');
+  assertTrue(logIdx !== -1, 'preservation_failed log line found');
+  const slice = serverText.slice(logIdx, logIdx + 1200);
+  assertTrue(/declined_suggested_prompt/.test(slice),
+    'preservation_failed return shape declares declined_suggested_prompt');
+  assertTrue(/declined_missing_terms/.test(slice),
+    'preservation_failed return shape declares declined_missing_terms');
+  // suggested_prompt must STILL be null (the gate contract).
+  assertTrue(/suggested_prompt:\s*null/.test(slice),
+    'preservation_failed return shape keeps suggested_prompt: null (gate contract preserved)');
+});
+
+test('Issue #1: route handler persists declined_suggested_prompt + declined_missing_terms on assistant message', () => {
+  // Issue #1 — the /api/chat/sessions/:id/messages route must persist
+  // the declined revision text and dropped-terms list on the assistant
+  // message when the validator declined. Frontend reads from disk to
+  // render the declined preview.
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const idx = serverText.indexOf('const assistantMessage = {');
+  assertTrue(idx !== -1, 'assistantMessage construction present');
+  // Pull a window that covers the construction + the post-construction
+  // "if (parsedReply.declined_suggested_prompt ...) ..." block that
+  // attaches the new fields.
+  const block = serverText.slice(idx, idx + 1400);
+  assertTrue(/declined_suggested_prompt/.test(block),
+    'route handler writes declined_suggested_prompt to disk');
+  assertTrue(/declined_missing_terms/.test(block),
+    'route handler writes declined_missing_terms to disk');
+  assertTrue(/session\.messages\.push\(assistantMessage\)/.test(block),
+    'route handler still pushes the assistant message (regression guard)');
+});
+
+test('Issue #1: frontend renders declined preview when suggested_prompt is null but declined_suggested_prompt is set', () => {
+  // Issue #1 — when the assistant message carries a declined
+  // suggested_prompt, the chat UI must show the declined text (greyed
+  // out) and a "Try as rewrite" affordance so the user can recover.
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/declined_suggested_prompt/.test(js),
+    'app.js references declined_suggested_prompt');
+  assertTrue(/declined_missing_terms/.test(js),
+    'app.js references declined_missing_terms');
+  // The declined preview branch should be SEPARATE from the Apply branch
+  // (suggested_prompt non-null). Both must exist.
+  const declinedBranch = js.match(/chat-message__declined[\s\S]{0,800}/);
+  assertTrue(declinedBranch, 'declined-preview modifier class referenced');
+  assertTrue(/Try as rewrite|try-as-rewrite|tryAsRewrite|REWRITE FROM SCRATCH/i.test(js),
+    'Try as rewrite affordance is wired');
+});
+
+test('Issue #1: CSS has declined-preview styles', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'styles.css'), 'utf8');
+  assertTrue(/\.chat-message__declined/.test(css), '.chat-message__declined rule defined');
+  assertTrue(/\.chat-message__declined-preview/.test(css),
+    '.chat-message__declined-preview rule defined');
+  assertTrue(/\.chat-message__declined-terms/.test(css),
+    '.chat-message__declined-terms rule defined');
+});
+
 // ─── ADR 0016 — Z-Image Turbo palette strength + accent placement ─────
 
 test('ADR 0016: server exports strength constants + validator + preambles + computeStrictPass', () => {

@@ -4057,6 +4057,63 @@
       node.appendChild(actions);
     }
 
+    // Issue #1 — when the validator declined the model's revision
+    // (after retries) the server persists the declined text and the
+    // list of dropped anchor terms on the assistant message. Render a
+    // greyed-out preview so the user can see what would have been
+    // applied, plus a "Try as rewrite" affordance that re-sends their
+    // last message reframed as a wholesale rewrite (the chat system
+    // prompt treats "REWRITE FROM SCRATCH — anchor set is empty" as
+    // the wholesale-rewrite trigger from ADR 0012).
+    if (
+      m.role === 'assistant' &&
+      (m.suggested_prompt == null || m.suggested_prompt === '') &&
+      typeof m.declined_suggested_prompt === 'string' &&
+      m.declined_suggested_prompt.length > 0
+    ) {
+      const declined = document.createElement('div');
+      declined.className = 'chat-message__declined';
+
+      const declinedLabel = document.createElement('div');
+      declinedLabel.className = 'chat-message__declined-label';
+      declinedLabel.textContent = 'Revision declined — too much of the original context would have been lost.';
+      declined.appendChild(declinedLabel);
+
+      const declinedPreview = document.createElement('pre');
+      declinedPreview.className = 'chat-message__declined-preview';
+      declinedPreview.textContent = m.declined_suggested_prompt;
+      declined.appendChild(declinedPreview);
+
+      if (Array.isArray(m.declined_missing_terms) && m.declined_missing_terms.length > 0) {
+        const terms = document.createElement('div');
+        terms.className = 'chat-message__declined-terms';
+        const termsLabel = document.createElement('span');
+        termsLabel.className = 'chat-message__declined-terms-label';
+        termsLabel.textContent = 'Terms dropped:';
+        terms.appendChild(termsLabel);
+        const termsList = document.createElement('span');
+        termsList.className = 'chat-message__declined-terms-list';
+        termsList.textContent = m.declined_missing_terms.join(', ');
+        terms.appendChild(termsList);
+        declined.appendChild(terms);
+      }
+
+      const declinedActions = document.createElement('div');
+      declinedActions.className = 'chat-message__declined-actions';
+
+      const tryRewrite = document.createElement('button');
+      tryRewrite.type = 'button';
+      tryRewrite.className = 'chat-message__try-rewrite btn-secondary';
+      tryRewrite.textContent = 'Try as rewrite';
+      tryRewrite.setAttribute('aria-label', 'Resend the last request framed as a wholesale rewrite');
+      tryRewrite.dataset.messageId = m.id || '';
+      tryRewrite.addEventListener('click', () => tryChatRewrite(m.id));
+      declinedActions.appendChild(tryRewrite);
+
+      declined.appendChild(declinedActions);
+      node.appendChild(declined);
+    }
+
     return node;
   };
 
@@ -4381,6 +4438,51 @@
     } catch (err) {
       setChatFormStatus(err.message || 'Apply failed.', true);
     }
+  };
+
+  /**
+   * Issue #1 — "Try as rewrite" handler. Looks up the user message
+   * that immediately preceded the declined assistant message, prepends
+   * a wholesale-rewrite marker that the chat system prompt recognises
+   * (ADR 0012 wholesale-rewrite path: anchor set is empty by user's
+   * request), and re-submits via the existing send pipeline.
+   *
+   * The user's original text is preserved on disk; we only mutate the
+   * outgoing text. The chat history still shows what the user typed
+   * before; the rewritten version is the next assistant turn.
+   */
+  const tryChatRewrite = (declinedMessageId) => {
+    if (!state.chatSessionId || !declinedMessageId) return;
+    const session = state.chatSessions.find((s) => s.id === state.chatSessionId);
+    if (!session || !Array.isArray(session.messages)) return;
+    const idx = session.messages.findIndex((m) => m.id === declinedMessageId);
+    if (idx === -1) return;
+    // Find the user message immediately before this assistant turn.
+    let userText = null;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (session.messages[i].role === 'user' && typeof session.messages[i].content === 'string') {
+        userText = session.messages[i].content;
+        break;
+      }
+    }
+    if (!userText) {
+      setChatFormStatus('Could not find your original request to rewrite.', true);
+      return;
+    }
+    // Prepend the wholesale-rewrite marker. The model treats this as
+    // "anchor set is empty by user's request" per ADR 0012.
+    const rewritten = `REWRITE FROM SCRATCH — anchor set is empty: ${userText}`;
+    if (typeof rewritten !== 'string' || rewritten.length > 2000) {
+      setChatFormStatus('Original request is too long to rewrite as a wholesale edit.', true);
+      return;
+    }
+    if (dom.chatInput) {
+      dom.chatInput.value = rewritten;
+      updateChatInputCount();
+      updateChatSendButton();
+    }
+    setChatFormStatus('Resending as a wholesale rewrite…', false);
+    submitChatMessage();
   };
 
   /**

@@ -102,6 +102,47 @@ const PRESERVATION_BIGRAM_THRESHOLD_SHORT = 0.20;
 const PRESERVATION_FAILED_REPLY_NOTE =
   " (Note: I'd proposed a revision but it would have dropped too much of the original context — paint application, the original values, and the production requirements. Try a more specific request, e.g. \"only change the colors to navy, gold, white; keep everything else exactly as is.\")";
 
+/**
+ * Cap on how many dropped anchor terms we surface to the user in the
+ * decline note and on the assistant message. Keeps the chat bubble
+ * readable; the full list is still on disk via `declined_missing_terms`.
+ */
+const PRESERVATION_DECLINE_TERMS_DISPLAY_LIMIT = 8;
+
+/**
+ * Build the user-facing decline note for a preservation-failed
+ * revision. The note names up to N dropped anchor terms so the user
+ * understands WHICH constraints blocked the apply (e.g. "Terms dropped:
+ * #ff0000, #ffff00, impasto, de Kooning"), and always closes with the
+ * same hint as the static `PRESERVATION_FAILED_REPLY_NOTE`.
+ *
+ * Pure: input is a validator report, output is a string starting with
+ * " (Note: ..." so callers can concatenate onto the model's reply.
+ *
+ * Issue #1 — the original constant note didn't tell the user anything
+ * actionable. Surfacing the top-N dropped terms turns a silent fail
+ * into a readable one.
+ *
+ * @param {{nonTargetedMissing?: string[]}} report — validator report
+ * @returns {string}
+ */
+const buildPreservationDeclineNote = (report) => {
+  const missing = Array.isArray(report && report.nonTargetedMissing)
+    ? report.nonTargetedMissing
+    : [];
+  const display = missing.slice(0, PRESERVATION_DECLINE_TERMS_DISPLAY_LIMIT);
+  const termsClause = display.length > 0
+    ? ` Terms dropped: ${display.join(', ')}.`
+    : '';
+  return (
+    " (Note: I'd proposed a revision but it would have dropped too much " +
+    "of the original context." +
+    termsClause +
+    " Try a more specific request, e.g. \"only change the colors to " +
+    "navy, gold, white; keep everything else exactly as is.\")"
+  );
+};
+
 // Common English stop words plus chat noise ("hi", "ok", "thanks"). The
 // validator works on content words only; including these would inflate
 // both sides and mask the real signal.
@@ -5369,16 +5410,25 @@ const callMiniMaxChat = async (systemPrompt, messages, options = {}) => {
             continue;
           }
           // Out of retries — decline the revision. Surface a friendly
-          // note so the user knows why no Apply button appears.
+          // note so the user knows why no Apply button appears. Issue
+          // #1: ALSO persist the declined revision text and the list of
+          // dropped anchor terms so the frontend can show the user what
+          // would have been applied (greyed-out preview + a "Try as
+          // rewrite" affordance) instead of silently dropping the
+          // revision.
           console.warn(
             `Chat preservation failed after ${CHAT_MAX_RETRIES + 1} attempts; ` +
             `declining revision (nonTargeted=${report.nonTargetedRatio}, ` +
             `bigram=${report.bigramRatio})`
           );
           return {
-            reply: (result.value.reply || '') + PRESERVATION_FAILED_REPLY_NOTE,
+            reply: (result.value.reply || '') + buildPreservationDeclineNote(report),
             suggested_prompt: null,
-            fallback_reason: 'preservation_failed'
+            fallback_reason: 'preservation_failed',
+            declined_suggested_prompt: suggested,
+            declined_missing_terms: Array.isArray(report.nonTargetedMissing)
+              ? report.nonTargetedMissing.slice(0, PRESERVATION_DECLINE_TERMS_DISPLAY_LIMIT)
+              : []
           };
         }
       }
@@ -5676,6 +5726,19 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       suggested_prompt: parsedReply.suggested_prompt,
       timestamp: new Date().toISOString()
     };
+    // Issue #1: when the validator declined a revision, persist the
+    // declined text and dropped anchor terms on the assistant message
+    // so the frontend can render the declined preview + "Try as
+    // rewrite" affordance. Both fields are absent on every other
+    // assistant message (success / parse-fallback / question-only),
+    // so existing sessions are unaffected.
+    if (typeof parsedReply.declined_suggested_prompt === 'string'
+        && parsedReply.declined_suggested_prompt.length > 0) {
+      assistantMessage.declined_suggested_prompt = parsedReply.declined_suggested_prompt;
+      if (Array.isArray(parsedReply.declined_missing_terms)) {
+        assistantMessage.declined_missing_terms = parsedReply.declined_missing_terms;
+      }
+    }
     session.messages.push(assistantMessage);
     session.updated_at = assistantMessage.timestamp;
     writeChatSessions(sessions);
@@ -5907,6 +5970,8 @@ module.exports = {
   PRESERVATION_BIGRAM_THRESHOLD_LONG,
   PRESERVATION_BIGRAM_THRESHOLD_SHORT,
   PRESERVATION_FAILED_REPLY_NOTE,
+  PRESERVATION_DECLINE_TERMS_DISPLAY_LIMIT,
+  buildPreservationDeclineNote,
   PRESERVATION_STOP_WORDS,
   tokenizeForPreservation,
   extractPreservationBigrams,
