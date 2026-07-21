@@ -6216,6 +6216,18 @@ test('Frontend chat: submitChatMessage never calls showError() (uses chat-form-s
     'submitChatMessage uses chat-form-status');
 });
 
+test('Frontend chat: submitChatMessage text-apply path syncs Step 4 result and token reminder', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  const block = js.match(/const submitChatMessage = async[\s\S]*?\n  \};/);
+  assertTrue(block, 'submitChatMessage defined');
+  assertTrue(/state\.finalPrompt\s*=\s*updated\.current_prompt/.test(block[0]),
+    'submitChatMessage text-apply path must update state.finalPrompt');
+  assertTrue(/dom\.resultPrompt\.textContent\s*=\s*updated\.current_prompt/.test(block[0]),
+    'submitChatMessage text-apply path must update dom.resultPrompt.textContent');
+  assertTrue(/updateTokenReminderBanner\(\s*\)/.test(block[0]),
+    'submitChatMessage text-apply path must re-run updateTokenReminderBanner');
+});
+
 test('Frontend chat: pending proposal state is rendered and described as unapplied', () => {
   const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');

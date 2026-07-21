@@ -4457,6 +4457,19 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text })
       });
+      const prevSession = state.chatSessions.find((s) => s.id === updated.id);
+      const lastMsg = Array.isArray(updated.messages) && updated.messages.length > 0
+        ? updated.messages[updated.messages.length - 1]
+        : null;
+      const isTextApply = lastMsg &&
+        lastMsg.role === 'assistant' &&
+        lastMsg.content === 'Applied the latest proposal to the working prompt.' &&
+        (!prevSession || prevSession.current_prompt !== updated.current_prompt);
+      if (isTextApply) {
+        state.finalPrompt = updated.current_prompt;
+        dom.resultPrompt.textContent = updated.current_prompt;
+        updateTokenReminderBanner();
+      }
       // Splice the updated session into state.chatSessions in place so
       // the conversation selector reflects the new updated_at.
       const idx = state.chatSessions.findIndex((s) => s.id === updated.id);
