@@ -5883,46 +5883,119 @@ const buildBoundedChatHistory = (messages, maxChars = CHAT_HISTORY_CHAR_BUDGET) 
 };
 
 const CHAT_CURRENT_PROMPT_TRIM_LENGTH = 2000;
+const CHAT_PROMPT_TRUNCATION_MARKER = ' [truncated after first 2000 characters]';
 
-const buildChatSystemPrompt = (session) => {
-  const sessionObj = session || {};
-  const original = typeof sessionObj.original_prompt === 'string' ? sessionObj.original_prompt : '';
-  const currentFull = typeof sessionObj.current_prompt === 'string' ? sessionObj.current_prompt : original;
-  const hasPending = typeof sessionObj.pending_prompt === 'string'
-    && sessionObj.pending_prompt.trim().length > 0;
-  const pending = hasPending ? sessionObj.pending_prompt : '';
-  const current = hasPending && currentFull.length > CHAT_CURRENT_PROMPT_TRIM_LENGTH
-    ? `${currentFull.slice(0, CHAT_CURRENT_PROMPT_TRIM_LENGTH - 1)}…`
-    : currentFull;
-  const compactAnalysis = compactChatAnalysisSnapshot(sessionObj.analysis_snapshot);
-  const analysis = compactAnalysis
-    ? JSON.stringify(compactAnalysis)
-    : '(no analysis snapshot was captured for this session)';
+const truncateChatPrompt = (prompt) => {
+  if (prompt.length <= CHAT_CURRENT_PROMPT_TRIM_LENGTH) return prompt;
+  return `${prompt.slice(0, CHAT_CURRENT_PROMPT_TRIM_LENGTH)}${CHAT_PROMPT_TRUNCATION_MARKER}`;
+};
 
-  const isZImageSession = sessionObj && typeof sessionObj.preset_id === 'string'
-    && ZIMAGE_PRESET_IDS.has(sessionObj.preset_id);
+const buildChatSystemPromptVariant = ({
+  original,
+  current,
+  pending,
+  hasPending,
+  analysis,
+  isZImageSession,
+  includeAnalysis,
+  trimWorking,
+  trimOriginal
+}) => {
+  const sameOriginalAndCurrent = original === current;
+  const displayedOriginal = trimOriginal ? truncateChatPrompt(original) : original;
+  const displayedCurrent = trimWorking ? truncateChatPrompt(current) : current;
+  const displayedPending = trimWorking ? truncateChatPrompt(pending) : pending;
+  const displayedShared = trimWorking || trimOriginal
+    ? truncateChatPrompt(original)
+    : original;
+  const promptBlocks = sameOriginalAndCurrent
+    ? `
 
-  return `${DEFAULT_CHAT_SYSTEM_PROMPT}
-
-# SESSION CONTEXT
+## Original generated prompt
+## Current working prompt (committed baseline)
+"""
+${displayedShared}
+"""`
+    : `
 
 ## Original generated prompt
 """
-${original}
+${displayedOriginal}
 """
 
 ## Current working prompt (committed baseline)
 """
-${current}
-"""${hasPending ? `
+${displayedCurrent}
+"""`;
+  const pendingBlock = hasPending
+    ? `
 
 ## Pending prompt (editing base)
 """
-${pending}
-"""` : ''}
+${displayedPending}
+"""`
+    : '';
+  const analysisBlock = includeAnalysis
+    ? `
 
 ## Analysis snapshot
-${analysis}${isZImageSession ? ZIMAGE_CHAT_CONSTRAINTS_BLOCK : ''}`;
+${analysis}`
+    : '';
+
+  return `${DEFAULT_CHAT_SYSTEM_PROMPT}
+
+# SESSION CONTEXT${promptBlocks}${pendingBlock}${analysisBlock}${isZImageSession ? ZIMAGE_CHAT_CONSTRAINTS_BLOCK : ''}`;
+};
+
+const buildChatSystemPrompt = (session) => {
+  const sessionObj = session || {};
+  const original = typeof sessionObj.original_prompt === 'string' ? sessionObj.original_prompt : '';
+  const current = typeof sessionObj.current_prompt === 'string' ? sessionObj.current_prompt : original;
+  const hasPending = typeof sessionObj.pending_prompt === 'string'
+    && sessionObj.pending_prompt.trim().length > 0;
+  const pending = hasPending ? sessionObj.pending_prompt : '';
+  const compactAnalysis = compactChatAnalysisSnapshot(sessionObj.analysis_snapshot);
+  const analysis = compactAnalysis
+    ? JSON.stringify(compactAnalysis)
+    : '(no analysis snapshot was captured for this session)';
+  const isZImageSession = sessionObj && typeof sessionObj.preset_id === 'string'
+    && ZIMAGE_PRESET_IDS.has(sessionObj.preset_id);
+  const build = (options) => buildChatSystemPromptVariant({
+    original,
+    current,
+    pending,
+    hasPending,
+    analysis,
+    isZImageSession,
+    ...options
+  });
+
+  let systemPrompt = build({
+    includeAnalysis: true,
+    trimWorking: false,
+    trimOriginal: false
+  });
+  if (systemPrompt.length <= CHAT_CONTEXT_CHAR_BUDGET) return systemPrompt;
+
+  systemPrompt = build({
+    includeAnalysis: false,
+    trimWorking: false,
+    trimOriginal: false
+  });
+  if (systemPrompt.length <= CHAT_CONTEXT_CHAR_BUDGET) return systemPrompt;
+
+  systemPrompt = build({
+    includeAnalysis: false,
+    trimWorking: true,
+    trimOriginal: false
+  });
+  if (systemPrompt.length <= CHAT_CONTEXT_CHAR_BUDGET) return systemPrompt;
+
+  return build({
+    includeAnalysis: false,
+    trimWorking: true,
+    trimOriginal: true
+  });
 };
 
 const buildChatRequestContext = (session) => {

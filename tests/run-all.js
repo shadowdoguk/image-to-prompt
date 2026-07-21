@@ -7180,6 +7180,80 @@ test('Chat context: compacts analysis and bounds provider input', () => {
   }
 });
 
+test('Chat context: labels identical original and committed prompts once', () => {
+  const { buildChatSystemPrompt } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const identical = 'IDENTICAL_ORIGINAL_CURRENT_PROMPT';
+  const samePrompt = buildChatSystemPrompt({
+    preset_id: 'preset_photorealistic',
+    original_prompt: identical,
+    current_prompt: identical,
+    pending_prompt: null,
+    analysis_snapshot: null
+  });
+  assertEqual(
+    (samePrompt.match(/## Original generated prompt/g) || []).length,
+    1,
+    'identical prompt has one original label'
+  );
+  assertEqual(
+    (samePrompt.match(/## Current working prompt \(committed baseline\)/g) || []).length,
+    1,
+    'identical prompt has one committed label'
+  );
+  assertEqual(
+    (samePrompt.split(identical).length - 1),
+    1,
+    'identical prompt content appears once'
+  );
+
+  const differentPrompt = buildChatSystemPrompt({
+    preset_id: 'preset_photorealistic',
+    original_prompt: 'ORIGINAL_DISTINCT_PROMPT',
+    current_prompt: 'CURRENT_DISTINCT_PROMPT',
+    pending_prompt: null,
+    analysis_snapshot: null
+  });
+  assertEqual(
+    (differentPrompt.match(/## Original generated prompt/g) || []).length,
+    1,
+    'different prompts keep one original block'
+  );
+  assertEqual(
+    (differentPrompt.match(/## Current working prompt \(committed baseline\)/g) || []).length,
+    1,
+    'different prompts keep one committed block'
+  );
+  assertTrue(differentPrompt.includes('ORIGINAL_DISTINCT_PROMPT'), 'different original prompt remains visible');
+  assertTrue(differentPrompt.includes('CURRENT_DISTINCT_PROMPT'), 'different current prompt remains visible');
+});
+
+test('Chat context: bounds pathological system prompt and retains original prompt', () => {
+  const {
+    CHAT_CONTEXT_CHAR_BUDGET,
+    buildChatRequestContext
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const snapshot = {};
+  for (let i = 0; i < 100; i++) snapshot[`analysis_${i}`] = 'ANALYSIS_PATHOLOGICAL '.repeat(10);
+  const context = buildChatRequestContext({
+    preset_id: 'preset_968c0ccdf6fc6151',
+    original_prompt: 'ORIGINAL_PATHOLOGICAL '.repeat(400),
+    current_prompt: 'CURRENT_PATHOLOGICAL '.repeat(400),
+    pending_prompt: 'PENDING_PATHOLOGICAL '.repeat(400),
+    analysis_snapshot: snapshot,
+    messages: Array.from({ length: 12 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `history ${i} ${'HISTORY_PATHOLOGICAL '.repeat(100)}`
+    }))
+  });
+  const totalChars = context.systemPrompt.length + context.messages.reduce(
+    (total, message) => total + message.content.length,
+    0
+  );
+  assertTrue(totalChars <= CHAT_CONTEXT_CHAR_BUDGET, 'pathological provider input fits the hard budget');
+  assertTrue(context.systemPrompt.includes('ORIGINAL_PATHOLOGICAL'), 'original prompt remains visible when truncated');
+  assertTrue(/truncat|…/i.test(context.systemPrompt), 'truncation is marked clearly');
+});
+
 // ─── Final invariants — must pass AFTER everything else ran ─────────
 
 test('No stale upload files in uploads/', () => {
