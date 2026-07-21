@@ -7451,6 +7451,17 @@ test('data/chat_sessions.json is parseable and an array (post-test state)', () =
   assertTrue(Array.isArray(parsed), 'chat_sessions.json must be an array');
 });
 
+test('Project commands: npm test points at the canonical suite', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8'));
+  assertEqual(packageJson.scripts.test, 'node tests/run-all.js', 'npm test uses canonical suite');
+});
+
+test('Chat contract documentation names the pending draft state', () => {
+  const context = fs.readFileSync(path.join(PROJECT_ROOT, 'CONTEXT.md'), 'utf8');
+  assertTrue(/pending_prompt/.test(context), 'CONTEXT documents pending_prompt');
+  assertTrue(/explicit|Apply/i.test(context), 'CONTEXT documents explicit commit');
+});
+
 (async () => {
   for (const { name, fn } of QUEUED) {
     try {
