@@ -6117,6 +6117,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       return res.status(404).json({ success: false, error: `Chat session "${req.params.id}" not found.` });
     }
     const session = sessions[idx];
+    normalizeChatSession(session);
 
     if (session.messages.length >= MAX_CHAT_MESSAGES_PER_SESSION) {
       return res.status(409).json({
@@ -6135,13 +6136,35 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     };
     session.messages.push(userMessage);
 
-    const { systemPrompt, messages: apiMessages } = buildChatRequestContext(session);
-    const lastUserRequest = userMessage.content;
+    if (isExplicitChatCommit(userMessage.content) && session.pending_prompt) {
+      const proposal = findLatestChatProposalMessage(session);
+      if (!proposal) {
+        session.messages.pop();
+        session.updated_at = now;
+        writeChatSessions(sessions);
+        return res.status(409).json({ success: false, error: 'The pending proposal is no longer available. Ask the assistant for a new proposal.' });
+      }
+      session.current_prompt = session.pending_prompt;
+      session.pending_prompt = null;
+      session.messages.push({
+        id: generateChatMessageId(),
+        role: 'assistant',
+        content: 'Applied the latest proposal to the working prompt.',
+        suggested_prompt: null,
+        timestamp: new Date().toISOString()
+      });
+      session.updated_at = new Date().toISOString();
+      writeChatSessions(sessions);
+      return res.json({ success: true, data: session });
+    }
+
+    const context = buildChatRequestContext(session);
+    const activePrompt = session.pending_prompt || session.current_prompt;
     let parsedReply;
     try {
-      parsedReply = await callMiniMaxChat(systemPrompt, apiMessages, {
-        currentPrompt: session.current_prompt,
-        lastUserRequest
+      parsedReply = await callMiniMaxChat(context.systemPrompt, context.messages, {
+        currentPrompt: activePrompt,
+        lastUserRequest: userMessage.content
       });
     } catch (err) {
       // Roll back the user message so the failed attempt doesn't leave
@@ -6150,6 +6173,10 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       session.updated_at = now;
       writeChatSessions(sessions);
       return res.status(500).json({ success: false, error: sanitizeError(err.message) });
+    }
+
+    if (typeof parsedReply.suggested_prompt === 'string' && parsedReply.suggested_prompt.length > 0) {
+      session.pending_prompt = parsedReply.suggested_prompt;
     }
 
     const assistantMessage = {
@@ -6215,6 +6242,7 @@ app.post('/api/chat/sessions/:id/apply/:messageId', (req, res) => {
     }
 
     session.current_prompt = message.suggested_prompt;
+    session.pending_prompt = null;
     session.updated_at = new Date().toISOString();
     writeChatSessions(sessions);
     res.json({ success: true, data: session });

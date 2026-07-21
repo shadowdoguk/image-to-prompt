@@ -587,6 +587,26 @@ const fetchJson = async (url, options = {}) => {
   return { status: res.status, body };
 };
 
+const withMockChatProvider = async (responses, callback) => {
+  const realFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    if (!String(url).endsWith('/chat/completions')) return realFetch(url, options);
+    const payload = responses.shift();
+    if (!payload) throw new Error('mock chat response queue exhausted');
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(payload) } }]
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+  try {
+    return await callback();
+  } finally {
+    global.fetch = realFetch;
+  }
+};
+
 test('HTTP integration: GET /api/palettes returns an array', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
@@ -5996,6 +6016,143 @@ test('HTTP chat integration: connection close during send does not corrupt file'
   }
 });
 
+test('HTTP chat drafts: discussion, proposal, refinement, and text commit preserve state', async () => {
+  const snapshot = snapshotChatFile();
+  resetChatFile();
+  const srv = await startTestServer();
+  try {
+    const presetId = getFirstPresetId();
+    const created = await fetchJson(`${srv.base}/api/chat/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'original prompt', preset_id: presetId })
+    });
+    const sessionId = created.body.data.id;
+
+    const responses = [
+      { reply: 'The lighting was chosen to separate the subject from the background.', suggested_prompt: '' },
+      { reply: 'I recommend a warmer, more directional treatment while keeping the subject unchanged.', suggested_prompt: 'original prompt with warmer directional lighting' },
+      { reply: 'I kept the proposal and softened the warmth.', suggested_prompt: 'original prompt with softer warm directional lighting' }
+    ];
+
+    await withMockChatProvider(responses, async () => {
+      const discussion = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'Why is the lighting described this way?' })
+      });
+      assertEqual(discussion.status, 200, 'discussion succeeds');
+      assertEqual(discussion.body.data.current_prompt, 'original prompt', 'discussion does not commit');
+      assertEqual(discussion.body.data.pending_prompt, null, 'discussion has no pending draft');
+
+      const proposal = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'What change would make the lighting warmer?' })
+      });
+      assertEqual(proposal.status, 200, 'proposal succeeds');
+      assertEqual(proposal.body.data.current_prompt, 'original prompt', 'proposal does not commit');
+      assertEqual(proposal.body.data.pending_prompt, 'original prompt with warmer directional lighting', 'proposal becomes pending');
+
+      const refinement = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'Keep the idea but make it softer.' })
+      });
+      assertEqual(refinement.status, 200, 'refinement succeeds');
+      assertEqual(refinement.body.data.current_prompt, 'original prompt', 'refinement does not commit');
+      assertEqual(refinement.body.data.pending_prompt, 'original prompt with softer warm directional lighting', 'refinement replaces pending draft');
+
+      const committed = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'apply it' })
+      });
+      assertEqual(committed.status, 200, 'text Apply succeeds');
+      assertEqual(committed.body.data.current_prompt, 'original prompt with softer warm directional lighting', 'text Apply commits latest draft');
+      assertEqual(committed.body.data.pending_prompt, null, 'text Apply clears pending draft');
+    });
+  } finally {
+    await srv.close();
+    restoreChatFile(snapshot);
+  }
+});
+
+test('HTTP chat drafts: ambiguous text without pending proposal is treated as discussion', async () => {
+  const snapshot = snapshotChatFile();
+  resetChatFile();
+  const srv = await startTestServer();
+  try {
+    const presetId = getFirstPresetId();
+    const created = await fetchJson(`${srv.base}/api/chat/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'original prompt', preset_id: presetId })
+    });
+    const sessionId = created.body.data.id;
+
+    const responses = [
+      { reply: 'Sure, happy to discuss — what aspect are you weighing?', suggested_prompt: '' }
+    ];
+
+    await withMockChatProvider(responses, async () => {
+      const reply = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'I think we should use that approach' })
+      });
+      assertEqual(reply.status, 200, 'ambiguous text returns 200');
+      assertEqual(reply.body.data.current_prompt, 'original prompt', 'current_prompt unchanged');
+      assertEqual(reply.body.data.pending_prompt, null, 'pending_prompt still null');
+      assertEqual(reply.body.data.messages.length, 2, 'user + assistant persisted');
+      assertEqual(reply.body.data.messages[1].role, 'assistant', 'assistant message persisted');
+      assertEqual(reply.body.data.messages[1].suggested_prompt, null, 'assistant has no suggestion');
+    });
+  } finally {
+    await srv.close();
+    restoreChatFile(snapshot);
+  }
+});
+
+test('HTTP chat drafts: malformed provider response preserves existing pending draft', async () => {
+  const snapshot = snapshotChatFile();
+  resetChatFile();
+  const srv = await startTestServer();
+  try {
+    const presetId = getFirstPresetId();
+    const created = await fetchJson(`${srv.base}/api/chat/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'original prompt', preset_id: presetId })
+    });
+    const sessionId = created.body.data.id;
+
+    const seedPending = 'seeded pending draft to preserve';
+    const persisted = readPersistedSessions();
+    const direct = persisted.find((s) => s.id === sessionId);
+    direct.pending_prompt = seedPending;
+    fs.writeFileSync(CHAT_FILE, JSON.stringify(persisted, null, 2), 'utf8');
+
+    const malformedResponses = ['this is not parseable json at all {', 'still garbage', 'more garbage'];
+
+    await withMockChatProvider(malformedResponses, async () => {
+      const reply = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'Try to do something' })
+      });
+      assertEqual(reply.status, 200, 'malformed response still returns 200');
+      assertEqual(reply.body.data.current_prompt, 'original prompt', 'current_prompt unchanged');
+      assertEqual(reply.body.data.pending_prompt, seedPending, 'pending_prompt preserved through parse fallback');
+      assertEqual(reply.body.data.messages.length, 2, 'user + assistant fallback persisted');
+      assertEqual(reply.body.data.messages[1].role, 'assistant', 'fallback assistant message persisted');
+    });
+  } finally {
+    await srv.close();
+    restoreChatFile(snapshot);
+  }
+});
+
 test('Frontend chat: submitChatMessage preserves user text on failure', () => {
   const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
   // The post-investigation fix moves `dom.chatInput.value = ''` AFTER
@@ -6509,8 +6666,8 @@ test('ADR 0012: callMiniMaxChat wires the validator into the retry loop', () => 
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   const callSite = serverText.match(/parsedReply = await callMiniMaxChat\([\s\S]*?\}\);/);
   assertTrue(callSite, 'call site present');
-  assertTrue(/currentPrompt:\s*session\.current_prompt/.test(callSite[0]),
-    'call site passes session.current_prompt');
+  assertTrue(/currentPrompt:\s*(activePrompt|session\.pending_prompt\s*\|\|\s*session\.current_prompt|session\.current_prompt)/.test(callSite[0]),
+    'call site passes a currentPrompt derived from the session (pending || current)');
   assertTrue(/lastUserRequest/.test(callSite[0]),
     'call site passes lastUserRequest');
 });
