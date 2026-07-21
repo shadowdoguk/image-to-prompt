@@ -5189,63 +5189,42 @@ const validatePromptPreservation = (original, revised, userRequest) => {
  * (`validatePromptPreservation`) catches wholesale rewrites that
  * slip through and declines them.
  */
-const DEFAULT_CHAT_SYSTEM_PROMPT = `You are a focused prompt-refinement assistant. The user has just generated an image-generation prompt through a two-stage pipeline. Your job is to converse with them about that prompt and propose concrete revisions when they ask for changes.
+const DEFAULT_CHAT_SYSTEM_PROMPT = `You are a focused prompt-refinement assistant iterating with a user on an image prompt.
 
-# CONTEXT (carried with every turn)
+# MODES
+- Discussion (default): answer in \`reply\`; emit \`suggested_prompt: ""\`.
+- Proposal (recommended or requested change): emit the FULL revised prompt in \`suggested_prompt\`.
+- Never commit from your output — the user clicks Apply.
 
-## Original generated prompt
-The text Stage 2 produced when the user clicked "Generate prompt". This is the user's starting point.
-
-## Current working prompt
-The latest applied revision. Starts equal to the original; advances whenever the user clicks "Apply" on one of your revisions.
-
-## Analysis snapshot
-The structured JSON Stage 1 returned (subject, style, lighting, etc.). Treat this as the source of truth for what facts the prompt is grounded in. Even if the user later edits the live analysis editor, the snapshot preserves the context Stage 2 actually used.
+# EDIT BASE
+- A PENDING PROMPT, when present, is the editing base.
+- Otherwise the current working prompt is the editing base.
+- Preserve every concrete fact the user did NOT explicitly ask to change (application context, hex codes, dimensions, named values, technical parameters, production requirements).
+- Preserve the original / current / pending distinction.
 
 # CORE CONTRACT — EDIT, DO NOT REGENERATE
 
-The current working prompt is an EDIT BASE, not a topic to write about. Before you generate any revision, mentally perform three steps:
+INVENTORY the current working prompt. CLASSIFY each item against the user's request:
+- DELTA: items the user explicitly mentioned. These you may change.
+- ANCHOR SET: items the user did NOT mention. Non-negotiable.
 
-1. INVENTORY the current working prompt. List every concrete fact it contains: application or use case (e.g. "paint specification", "product packaging", "architectural rendering"), pre-defined values (hex codes, dimensions, named colors, quantities, technical parameters), and production requirements (low-VOC, food-safe, royalty-free, ADA-compliant, color-space, durability specs, etc.).
-2. CLASSIFY each item in that inventory against the user's request. Items the user explicitly mentioned are the DELTA — those are what you are allowed to change. Items the user did NOT mention are the ANCHOR SET — those are immutable for this revision.
-3. APPLY only the delta to the anchor set. The revised prompt is the anchor set verbatim (or with paraphrastic equivalence that preserves meaning) PLUS the user's requested change. Do NOT add new facts the user did not ask for. Do NOT drop anchor-set items. Do NOT introduce a different medium, application, or style direction unless the user asked for one.
+APPLY only the delta to the anchor set. The revised prompt is the anchor set verbatim (or paraphrastic equivalence preserving meaning) PLUS the user's requested change. Do NOT introduce new facts the user did not ask for. Do NOT drop anchor-set items.
 
-If the user explicitly asks for a wholesale rewrite ("rewrite the whole prompt in a punchier voice", "start fresh with a different angle"), the anchor set is empty by their request — produce a fresh prompt. Otherwise the anchor set is non-empty and you MUST preserve it.
+If the user explicitly asks for a wholesale rewrite, the anchor set is empty by their request. Otherwise anchor preservation is non-negotiable.
+
+# JSON SCHEMA (strict)
+
+Respond with EXACTLY one JSON object — no markdown fences, no prose. Two string fields:
+- \`reply\`: 1-3 sentences. Address what the user asked. NEVER empty.
+- \`suggested_prompt\`: a string. NEVER null, NEVER omitted. Use \`""\` for discussion. Use the FULL revised prompt when proposing a revision.
 
 # RULES
 
-- Every reply MUST be a JSON object with EXACTLY two string fields:
-    - \`reply\`: short, conversational acknowledgement of the user's message (1-3 sentences). Address what they asked. NEVER empty. NEVER omitted.
-    - \`suggested_prompt\`: a string. NEVER null, NEVER an array, NEVER an object, NEVER omitted. Use empty string \`""\` for question-only replies.
-- \`reply\` is MANDATORY and NON-EMPTY. The API rejects responses with an empty or missing \`reply\`. Always include it, even for "I can't help with that" answers.
-- Set \`suggested_prompt\` to the FULL revised prompt text (a non-empty string) when the user is asking for a change: "make the lighting more dramatic", "shorten the subject", "use second-person voice", "add a film-grain mention", "rewrite in comma-separated tags", "change the colors to navy, gold, white", etc.
-- Set \`suggested_prompt\` to an empty string \`""\` when the user is asking a question, requesting explanation, or just chatting: "why this lighting?", "what does chiaroscuro mean here?", "thanks", "what's the mood?".
-- When you DO propose a revision, the new text must be a complete, self-contained image-generation prompt — never a fragment or a diff. The user will see ONLY the revised text; they will not see your reply outside the chat.
-- ANCHOR PRESERVATION (non-negotiable for any non-wholesale request): every pre-defined value, technical parameter, application context, named constraint, hex code, dimension, or production requirement that the user did NOT explicitly ask to change MUST still appear in the revised prompt. Removing or substituting anchor-set content is a wholesale rewrite and will be rejected by the server-side validator.
-- DO NOT introduce new facts the user did not ask for. A revision that names a different medium, application, style direction, or use case than the original is a rewrite. New adjectives, synonyms, or stylistic flourishes on the EXISTING content are fine; introducing a new direction is not.
-- Keep \`reply\` under 200 words. Keep revisions proportional: don't shrink a 600-word prompt to 50 words unless the user asked for terse output.
-- Do NOT comment on style, aesthetic quality, or medium — your job is editing, not critiquing.
-- Do NOT ask clarifying questions in \`reply\`; if a request is ambiguous, propose the most natural interpretation and let the user redirect.
-- Respond with ONLY the JSON object — no markdown fences, no prose around it.
-
-# EXAMPLES
-
-Example A — TARGETED EDIT (the user's request names one parameter; everything else must survive). The user message is "Change the colors to navy, gold, and white" and the current working prompt is a paint-application specification. The anchor set is: paint specification context, eggshell finish, low-VOC formula, brush/roller application method, two-coat minimum, 4-hour drying time, 350 sq ft coverage. The delta is: the three named colors and their hex codes. A correct reply:
-\`\`\`json
-{"reply":"I've swapped the three colors to navy, gold, and white while keeping the paint specification, eggshell finish, low-VOC formula, application method, drying time, and coverage unchanged.","suggested_prompt":"Professional interior paint specification. Eggshell finish, low-VOC formula, suitable for high-traffic residential areas. Apply with synthetic brush or roller; two coats minimum. Drying time 4 hours between coats. Coverage 350 sq ft per gallon. Colors: Navy (HEX #1F2A44), Gold (HEX #C9A227), White (HEX #FFFFFF)."}
-\`\`\`
-
-Example B — WHOLESALE REWRITE (explicitly requested by the user; the anchor set is empty by their request). The user message is "Rewrite the whole prompt from scratch with a more cinematic feel". A correct reply:
-\`\`\`json
-{"reply":"Here's a fresh take with cinematic framing and a moodier palette.","suggested_prompt":"A cinematic wide shot of a rain-soaked alley at night, neon signs bleeding pink and teal across wet asphalt, a lone figure under a black umbrella, shallow depth of field, anamorphic lens flare, 35mm film grain, Roger Deakins lighting."}
-\`\`\`
-
-Example C — QUESTION (no revision this turn). The user message is "why did you pick this framing?". A correct reply:
-\`\`\`json
-{"reply":"I chose the three-quarter view because it shows both the figure's face and their gesture toward the canvas, giving the viewer spatial context that a straight profile would lose.","suggested_prompt":""}
-\`\`\`
-
-Both fields are ALWAYS present and ALWAYS strings. Never omit either field.`;
+- \`reply\` is mandatory and non-empty.
+- A revision must be a complete self-contained prompt — never a fragment or diff.
+- Keep \`reply\` under 200 words.
+- Don't comment on style/aesthetic quality.
+- Don't ask clarifying questions — propose the most natural interpretation.`;
 
 /**
  * Generate a fresh chat session id (`chat_<16 hex>`).
@@ -5610,6 +5589,8 @@ const extractChatReply = (raw) => {
 const CHAT_MAX_RETRIES = 2;
 const CHAT_RETRY_DELAY_MS = 400;
 
+const CHAT_PARSE_CORRECTION_INSTRUCTION = 'Your previous response was empty or malformed. Reply with exactly one JSON object containing a non-empty reply string and a suggested_prompt string. Use an empty suggested_prompt for discussion only. Do not include markdown or explanation outside the JSON object.';
+
 /**
  * Reinforcement message appended to the conversation when a
  * previous revision failed the anchor-preservation validator.
@@ -5711,6 +5692,10 @@ const callMiniMaxChat = async (systemPrompt, messages, options = {}) => {
     // Parse-level fallback fired. Retry up to CHAT_MAX_RETRIES times.
     lastReason = result.value?.fallback_reason || 'unknown';
     if (attempt < CHAT_MAX_RETRIES) {
+      openaiMessages = [
+        ...baseOpenaiMessages,
+        { role: 'user', content: CHAT_PARSE_CORRECTION_INSTRUCTION }
+      ];
       await new Promise((r) => setTimeout(r, CHAT_RETRY_DELAY_MS * (attempt + 1)));
     }
   }
@@ -5828,82 +5813,35 @@ const ZIMAGE_PRESET_IDS = new Set(['preset_alla_prima_oil', 'preset_968c0ccdf6fc
  */
 const ZIMAGE_CHAT_CONSTRAINTS_BLOCK = `
 
-# Z-IMAGE CONTRACT — DOMAIN CONSTRAINTS (PIGMENT-NAMES ONLY, COLOR-CONTRAST GLOW)
+# Z-IMAGE CONTRACT — DOMAIN CONSTRAINTS
 
-The current working prompt is destined for Z-Image Turbo (Qwen3-4B
-encoder, 8 NFE, CFG=0, max_sequence_length = 1024 tokens). The
-following constraints are non-negotiable on every revision. Anchor-
-preservation rules above still apply — these add domain-model
-constraints on top.
+The current working prompt is destined for Z-Image Turbo (Qwen3-4B encoder, 8 NFE, CFG=0, max 1024 tokens). Apply on top of the anchor-preservation contract above.
 
-## FORBIDDEN VOCABULARY (will degrade Z-Image output)
+## FORBIDDEN VOCABULARY
 
-You must NEVER introduce any of the following into the revised prompt:
+- "no X" trailing constraints (CFG=0 ignores them).
+- Depicted-light vocabulary: "soft light", "illuminated by", "backlit", "rim light", "halo of light", "rays of light", "highlight from". The radiance comes from color contrast against the muted surround, not a depicted lamp.
+- Quality-tag suffix: "masterpiece", "8K", "ultra detailed", "best quality", "award winning", "highly detailed".
+- SDXL/FLUX tag-list vocabulary: "1girl", "solo", "long_hair", "bokeh", "score_9". Z-Image interprets prose; tag lists dilute focus.
+- Weight syntax "(keyword:1.3)" or Midjourney parameters ("--ar", "--s", "--v", "--niji").
+- Hex codes inside the prompt body. Pigment names only.
+- Section markers, bullets, lists, YAML, JSON, markup.
 
-- Negative-prompt tail: "no text", "no watermark", "no logos",
-  "no thin photographic detail", "no CGI", "no plastic gloss", or
-  any "no X" trailing constraint. CFG=0 ignores these phrases —
-  they're dead tokens.
-- Depicted-light vocabulary: "soft light from the left",
-  "illuminated by", "backlit", "rim light", "glowing with hidden
-  light", "halo of light", "rays of light", "highlight from". The
-  radiance in this style comes from color contrast against the
-  muted surround, not from a depicted lamp.
-- Quality-tag suffix: "masterpiece", "8K", "ultra detailed",
-  "best quality", "award winning", "highly detailed".
-- SDXL / FLUX tag-list vocabulary: "1girl", "solo", "long_hair",
-  "bokeh", "score_9", etc. Z-Image interprets prose naturally;
-  tag lists dilute focus.
-- Weight syntax "(keyword:1.3)" or Midjourney parameters ("--ar",
-  "--s", "--v", "--niji").
-- Hex codes inside the prompt body: "#cc3344", "#1f2a44", etc. Use
-  pigment names only.
-- Section markers: "== SECTION A ==", "== SECTION B ==",
-  labels, bullets, lists, YAML, JSON, or any markup.
+## REQUIRED VOCABULARY
 
-## REQUIRED VOCABULARY (anchors if user mentions these)
-
-If the user's revision touches Style, Lighting, Color, or Subject,
-preserve or strengthen the following vocabulary in the revised
-prompt:
-
-- Medium: "oil painting on canvas" (or "oil on raw linen" if weave
-  should read).
+When Style, Lighting, Color, or Subject is touched, preserve or strengthen:
+- Medium: "oil painting on canvas" (or "oil on raw linen").
 - Application: "palette knife" — never "brushwork" or "brush hairs".
-- Technique: "alla prima" — wet-in-wet, single session, paint
-  still pliable.
-- Palette: pastel / low-chroma dominant tones — chalky pale
-  greens, dusty putty, soft creams, weathered bone, muted
-  lavender-grays. ONE highly saturated accent (cadmium-coral,
-  vermillion, cobalt blue, cadmium yellow, viridian, fuchsia-
-  magenta) anchored to a specific element of the subject.
-- Glow mechanism: "achieved through color contrast, not depicted
-  illumination" — when the user asks for the focal to "pop" or
-  "glow", translate that into chroma contrast against the muted
-  surround.
-- Closing anchor: "natural paint sheen — matte in thick passages,
-  slight gloss in scraped areas — no plastic gloss, no digital
-  airbrush finish, no CGI look. Visible paint surface texture
-  throughout."
+- Technique: "alla prima" — wet-in-wet, single session.
+- Palette: pastel / low-chroma dominant tones with ONE highly saturated accent (cadmium-coral, vermillion, cobalt blue, cadmium yellow, viridian, fuchsia-magenta) anchored to a specific element of the subject.
+- Glow mechanism: achieved through color contrast, not depicted illumination.
+- Closing anchor: natural paint sheen — matte in thick passages, slight gloss in scraped areas — no plastic gloss, no digital airbrush finish, no CGI look.
 
 ## LENGTH
-
-The revised prompt must stay inside 150-300 words (sweet spot).
-Hard ceiling: 750 words / 1024 tokens. Below 80 words = generic
-output. If the user's revision would push the prompt above 300
-words, trim adjectives without dropping the six blocks (Subject,
-Scene/Ground, Composition, Lighting, Style & Technique,
-Constraints).
+150-300 words sweet spot. Hard ceiling: 750 words / 1024 tokens. Below 80 words = generic output.
 
 ## STYLE-SCHOOL ANCHOR
-
-This is the pastel-palette-with-saturated-focal tradition. Do NOT
-introduce gestural-expressionist vocabulary on revisions
-("gestural streaks of energy radiate outward from the figure",
-"de Kooning", "Riopelle", "vigorous scraped, dragged, and smeared
-paint" as a focal feature rather than as field treatment). The
-energy in this style is optical — saturated colour against muted
-surround — not kinetic.`;
+Pastel-palette-with-saturated-focal tradition. Do NOT introduce gestural-expressionist vocabulary as a focal feature — energy is optical (saturated colour against muted surround), not kinetic.`;
 
 /**
  * Build the chat system prompt for a given session at a given turn.
@@ -5915,36 +5853,84 @@ surround — not kinetic.`;
  * Z-Image constraints block is appended after the SESSION CONTEXT
  * block. The plain anchor-preservation contract is unaffected.
  */
+const compactChatAnalysisSnapshot = (snapshot, maxFieldLength = 240) => {
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) return null;
+  const compact = {};
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (value === null || value === undefined || value === '') continue;
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    if (!text) continue;
+    compact[key] = text.length > maxFieldLength
+      ? `${text.slice(0, maxFieldLength - 1)}…`
+      : text;
+  }
+  return compact;
+};
+
+const buildBoundedChatHistory = (messages, maxChars = CHAT_HISTORY_CHAR_BUDGET) => {
+  if (!Array.isArray(messages)) return [];
+  const selected = [];
+  let chars = 0;
+  for (let i = messages.length - 1; i >= 0 && selected.length < CHAT_HISTORY_MAX_MESSAGES; i--) {
+    const message = messages[i];
+    if (!message || (message.role !== 'user' && message.role !== 'assistant')) continue;
+    if (typeof message.content !== 'string' || message.content.length === 0) continue;
+    if (chars + message.content.length > maxChars) break;
+    selected.unshift({ role: message.role, content: message.content });
+    chars += message.content.length;
+  }
+  return selected;
+};
+
+const CHAT_CURRENT_PROMPT_TRIM_LENGTH = 2000;
+
 const buildChatSystemPrompt = (session) => {
-  const original = typeof session.original_prompt === 'string' ? session.original_prompt : '';
-  const current = typeof session.current_prompt === 'string' ? session.current_prompt : original;
-  const analysis = session.analysis_snapshot && typeof session.analysis_snapshot === 'object'
-    ? JSON.stringify(session.analysis_snapshot, null, 2)
+  const sessionObj = session || {};
+  const original = typeof sessionObj.original_prompt === 'string' ? sessionObj.original_prompt : '';
+  const currentFull = typeof sessionObj.current_prompt === 'string' ? sessionObj.current_prompt : original;
+  const hasPending = typeof sessionObj.pending_prompt === 'string'
+    && sessionObj.pending_prompt.trim().length > 0;
+  const pending = hasPending ? sessionObj.pending_prompt : '';
+  const current = hasPending && currentFull.length > CHAT_CURRENT_PROMPT_TRIM_LENGTH
+    ? `${currentFull.slice(0, CHAT_CURRENT_PROMPT_TRIM_LENGTH - 1)}…`
+    : currentFull;
+  const compactAnalysis = compactChatAnalysisSnapshot(sessionObj.analysis_snapshot);
+  const analysis = compactAnalysis
+    ? JSON.stringify(compactAnalysis)
     : '(no analysis snapshot was captured for this session)';
 
-  const isZImageSession = session && typeof session.preset_id === 'string'
-    && ZIMAGE_PRESET_IDS.has(session.preset_id);
+  const isZImageSession = sessionObj && typeof sessionObj.preset_id === 'string'
+    && ZIMAGE_PRESET_IDS.has(sessionObj.preset_id);
 
   return `${DEFAULT_CHAT_SYSTEM_PROMPT}
 
-# SESSION CONTEXT (live values)
+# SESSION CONTEXT
 
 ## Original generated prompt
 """
 ${original}
 """
 
-## Current working prompt (anchors your revisions)
+## Current working prompt (committed baseline)
 """
 ${current}
+"""${hasPending ? `
+
+## Pending prompt (editing base)
 """
+${pending}
+"""` : ''}
 
-## Analysis snapshot (JSON Stage 1 returned)
-\`\`\`json
-${analysis}
-\`\`\`
+## Analysis snapshot
+${analysis}${isZImageSession ? ZIMAGE_CHAT_CONSTRAINTS_BLOCK : ''}`;
+};
 
-Treat the CURRENT WORKING PROMPT as the authoritative text the user is iterating on. When you propose a revision, base it on the CURRENT WORKING PROMPT — not the ORIGINAL — so subsequent revisions are additive.${isZImageSession ? ZIMAGE_CHAT_CONSTRAINTS_BLOCK : ''}`;
+const buildChatRequestContext = (session) => {
+  const sessionObj = session || {};
+  const systemPrompt = buildChatSystemPrompt(sessionObj);
+  const remaining = Math.max(0, CHAT_CONTEXT_CHAR_BUDGET - systemPrompt.length);
+  const messages = buildBoundedChatHistory(sessionObj.messages, remaining);
+  return { systemPrompt, messages };
 };
 
 // ─── Routes ───────────────────────────────────────────────────────
@@ -6076,14 +6062,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     };
     session.messages.push(userMessage);
 
-    // Call the model with the FULL message history (including the just-
-    // appended user message). The system prompt is rebuilt per turn so
-    // `current_prompt` reflects the latest applied revision. The current
-    // prompt + last user request are also passed so the server-side
-    // anchor-preservation validator (ADR 0012) can score the revision
-    // and trigger a retry if it's a wholesale rewrite.
-    const systemPrompt = buildChatSystemPrompt(session);
-    const apiMessages = session.messages.map((m) => ({ role: m.role, content: m.content }));
+    const { systemPrompt, messages: apiMessages } = buildChatRequestContext(session);
     const lastUserRequest = userMessage.content;
     let parsedReply;
     try {
@@ -6361,6 +6340,9 @@ module.exports = {
   writeChatSessions,
   buildChatTitle,
   buildChatSystemPrompt,
+  buildChatRequestContext,
+  compactChatAnalysisSnapshot,
+  buildBoundedChatHistory,
   validateChatSessionCreate,
   validateChatMessage,
   extractChatReply,

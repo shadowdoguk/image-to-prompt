@@ -6474,7 +6474,7 @@ test('ADR 0012: validatePromptPreservation handles empty strings gracefully', ()
 test('ADR 0012: DEFAULT_CHAT_SYSTEM_PROMPT includes the anchor-preservation contract', () => {
   const { DEFAULT_CHAT_SYSTEM_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
 
-  // The new contract section (ADR 0012) must be present and the old
+  // The core contract section (ADR 0012) must be present and the old
   // soft rule must have been replaced with a hard contract.
   assertTrue(/EDIT, DO NOT REGENERATE/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
     'system prompt has EDIT, DO NOT REGENERATE heading');
@@ -6486,23 +6486,21 @@ test('ADR 0012: DEFAULT_CHAT_SYSTEM_PROMPT includes the anchor-preservation cont
     'anchor preservation is marked non-negotiable');
   assertTrue(/DO NOT introduce new facts/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
     'system prompt forbids adding new facts');
+  assertTrue(/wholesale rewrite/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt carves out the wholesale rewrite case');
 
-  // The paint-spec example must be present as Example A so the
-  // model has an in-context reference for the targeted-edit shape.
-  assertTrue(/paint specification/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'system prompt includes paint-spec example');
-  assertTrue(/Navy \(HEX #1F2A44\)/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'system prompt paint example uses Navy/Gold/White colors');
-  assertTrue(/Wholesale/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'system prompt carves out the wholesale rewrite case (Example B)');
-
-  // The two contrasted examples (A and B) must both be present.
-  assertTrue(/Example A — TARGETED EDIT/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'Example A (targeted edit) present');
-  assertTrue(/Example B — WHOLESALE REWRITE/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'Example B (wholesale rewrite) present');
-  assertTrue(/Example C — QUESTION/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'Example C (question) present');
+  // Task 2 contract requirements: discussion vs proposal modes, no
+  // self-commit, two-string JSON schema.
+  assertTrue(/Discussion/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt names the discussion mode');
+  assertTrue(/Proposal/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt names the proposal mode');
+  assertTrue(/Never commit/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt forbids self-commit');
+  assertTrue(/JSON SCHEMA/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt describes the two-string JSON schema');
+  assertTrue(/PENDING PROMPT/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt names the pending-prompt editing base');
 });
 
 test('ADR 0012: callMiniMaxChat wires the validator into the retry loop', () => {
@@ -7111,6 +7109,75 @@ test('ADR 0016: ADR file 0016-zimage-strength-and-placement.md exists with requi
   assertTrue(/## Feasibility/.test(text), 'Feasibility section present');
   assertTrue(/## Design/.test(text), 'Design section present');
   assertTrue(/## Consequences/.test(text), 'Consequences section present');
+});
+
+// ─── Task 2 — bounded chat context ────────────────────────────────
+
+test('Chat context: compacts analysis and bounds provider input', () => {
+  const {
+    CHAT_CONTEXT_CHAR_BUDGET,
+    CHAT_HISTORY_CHAR_BUDGET,
+    compactChatAnalysisSnapshot,
+    buildBoundedChatHistory,
+    buildChatRequestContext
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const snapshot = {};
+  for (let i = 0; i < 20; i++) snapshot[`field_${i}`] = 'x'.repeat(1000);
+  const compact = compactChatAnalysisSnapshot(snapshot);
+  assertTrue(JSON.stringify(compact).length < JSON.stringify(snapshot).length, 'analysis is compacted');
+
+  const messages = Array.from({ length: 200 }, (_, i) => ({
+    role: i % 2 === 0 ? 'user' : 'assistant',
+    content: `turn ${i} ${'x'.repeat(1000)}`
+  }));
+  const history = buildBoundedChatHistory(messages);
+  assertTrue(history.length <= 12, 'history message count is bounded');
+  assertTrue(
+    history.reduce((total, message) => total + message.content.length, 0) <= CHAT_HISTORY_CHAR_BUDGET,
+    'history character budget is bounded'
+  );
+
+  const session = {
+    preset_id: 'preset_968c0ccdf6fc6151',
+    original_prompt: 'ORIGINAL '.repeat(500),
+    current_prompt: 'CURRENT '.repeat(500),
+    pending_prompt: 'PENDING '.repeat(500),
+    analysis_snapshot: snapshot,
+    messages
+  };
+  const context = buildChatRequestContext(session);
+  const totalChars = context.systemPrompt.length + context.messages.reduce(
+    (total, message) => total + message.content.length,
+    0
+  );
+  assertTrue(totalChars <= CHAT_CONTEXT_CHAR_BUDGET, 'provider input fits the hard budget');
+  assertTrue(context.systemPrompt.includes('ORIGINAL'), 'original prompt remains visible');
+  assertTrue(context.systemPrompt.includes('PENDING'), 'pending prompt remains visible');
+  assertTrue(context.systemPrompt.includes('Z-IMAGE CONTRACT'), 'Z-Image contract remains visible');
+
+  const nonZImage = buildChatRequestContext({
+    preset_id: 'preset_photorealistic',
+    original_prompt: 'photo original',
+    current_prompt: 'photo original',
+    pending_prompt: null,
+    analysis_snapshot: null,
+    messages: []
+  });
+  assertTrue(!nonZImage.systemPrompt.includes('Z-IMAGE CONTRACT'), 'non-Z-Image sessions omit Z-Image contract');
+
+  const presets = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'presets.json'), 'utf8'));
+  for (const preset of presets) {
+    const presetContext = buildChatRequestContext({
+      preset_id: preset.id,
+      original_prompt: 'preset prompt',
+      current_prompt: 'preset prompt',
+      pending_prompt: null,
+      analysis_snapshot: null,
+      messages: []
+    });
+    assertTrue(presetContext.systemPrompt.length > 0, `${preset.id} builds chat context`);
+  }
 });
 
 // ─── Final invariants — must pass AFTER everything else ran ─────────
