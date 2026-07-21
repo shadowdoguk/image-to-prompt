@@ -6216,6 +6216,17 @@ test('Frontend chat: submitChatMessage never calls showError() (uses chat-form-s
     'submitChatMessage uses chat-form-status');
 });
 
+test('Frontend chat: pending proposal state is rendered and described as unapplied', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'styles.css'), 'utf8');
+  assertTrue(/pending_prompt/.test(js), 'frontend reads pending_prompt');
+  assertTrue(/Apply proposal/.test(js), 'frontend exposes Apply proposal copy');
+  assertTrue(/unapplied proposal/i.test(js), 'frontend labels unapplied state');
+  assertTrue(/discuss|recommend|proposal/i.test(html), 'HTML explains conversational workflow');
+  assertTrue(/chat-message--pending/.test(css), 'pending proposal style exists');
+});
+
 test('Chat fallback text is non-empty and human-readable', () => {
   // The fallback reply must NEVER be empty — that's the entire point
   // of the fix. The frontend relies on this contract to render an
