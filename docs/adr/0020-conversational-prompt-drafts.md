@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed until implementation verification completes.
+Accepted. Implemented 2026-07-21.
 
 ## Context
 
@@ -22,4 +22,12 @@ Automatically applying model proposals was rejected because conversational explo
 
 ## Verification
 
-Implementation is accepted only after the canonical test suite, session initialization, and manual browser smoke test pass.
+Verification commands run in the worktree on `db48e52`:
+
+- `npm test` — 308 passed, 0 failed (matches baseline; full transcript preserved in the task-6 verification report).
+- `node scripts/session-init.js` — 10/10 V-checks passed (validation gate green; `version_control` scanner reports `unavailable` for `not-a-git-repo` but the gate is non-blocking).
+- `node --check server.js && node --check src/app.js && node --check tests/run-all.js && echo "syntax OK"` — exit 0, prints `syntax OK`.
+- `git diff --check` — exit 0, no whitespace conflict markers.
+- `git status --short` — clean tree.
+- `git diff --stat` — no uncommitted changes against `db48e52`.
+- `node scripts/smoke/chat-conversational-smoke.js` — exit 0; four scenario blocks (`POST /api/chat/sessions`, discussion, proposal, `apply it`) each emitted the expected `current_prompt` / `pending_prompt` transitions; final line `SMOKE TEST RESULT: all checks passed`.
