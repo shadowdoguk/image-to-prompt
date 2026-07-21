@@ -114,6 +114,9 @@ const MAX_CHAT_MESSAGE_LENGTH = 2000;
 const MAX_CHAT_MESSAGES_PER_SESSION = 200;
 const MAX_CHAT_SESSIONS_TOTAL = 200;
 const CHAT_TITLE_MAX_LENGTH = 80;
+const CHAT_CONTEXT_CHAR_BUDGET = 20000;
+const CHAT_HISTORY_CHAR_BUDGET = 6000;
+const CHAT_HISTORY_MAX_MESSAGES = 12;
 
 // ─── Anchor-preserving chat refinements (ADR 0012) ────────────────
 // Wholesale-rewrite prevention: the validator below scores how much
@@ -5254,6 +5257,47 @@ const generateChatSessionId = () => `chat_${crypto.randomBytes(8).toString('hex'
  */
 const generateChatMessageId = () => `msg_${crypto.randomBytes(8).toString('hex')}`;
 
+const normalizeChatSession = (session) => {
+  if (!session || typeof session !== 'object') return session;
+  if (!Object.prototype.hasOwnProperty.call(session, 'pending_prompt')) {
+    session.pending_prompt = null;
+  }
+  if (typeof session.pending_prompt !== 'string' || session.pending_prompt.trim().length === 0) {
+    session.pending_prompt = null;
+  }
+  return session;
+};
+
+const isExplicitChatCommit = (content) => {
+  if (typeof content !== 'string') return false;
+  const normalized = content.trim().toLowerCase().replace(/[.!?]+$/g, '');
+  return new Set([
+    'apply it',
+    'apply that',
+    'apply the proposal',
+    'use it',
+    'use that',
+    'use the proposal',
+    'commit this',
+    'commit that',
+    'commit the proposal'
+  ]).has(normalized);
+};
+
+const findLatestChatProposalMessage = (session) => {
+  const pending = typeof session?.pending_prompt === 'string'
+    ? session.pending_prompt
+    : '';
+  if (!pending || !Array.isArray(session?.messages)) return null;
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const message = session.messages[i];
+    if (message?.role === 'assistant' && message.suggested_prompt === pending) {
+      return message;
+    }
+  }
+  return null;
+};
+
 /**
  * Read all chat sessions from disk. Seeds the file with `[]` on first
  * read. Drops malformed entries with a console warning so a partial
@@ -5290,7 +5334,7 @@ const readChatSessions = () => {
     if (typeof s.current_prompt !== 'string') return false;
     if (!Array.isArray(s.messages)) return false;
     return true;
-  });
+  }).map(normalizeChatSession);
 };
 
 /**
@@ -5937,6 +5981,7 @@ app.post('/api/chat/sessions', (req, res) => {
       title: buildChatTitle(body.prompt),
       original_prompt: body.prompt,
       current_prompt: body.prompt,
+      pending_prompt: null,
       analysis_snapshot: body.analysis_snapshot && typeof body.analysis_snapshot === 'object'
         ? body.analysis_snapshot
         : null,
@@ -6303,9 +6348,15 @@ module.exports = {
   CHAT_SESSION_ID_PREFIX,
   CHAT_MESSAGE_ID_PREFIX,
   CHAT_TITLE_MAX_LENGTH,
+  CHAT_CONTEXT_CHAR_BUDGET,
+  CHAT_HISTORY_CHAR_BUDGET,
+  CHAT_HISTORY_MAX_MESSAGES,
   DEFAULT_CHAT_SYSTEM_PROMPT,
   generateChatSessionId,
   generateChatMessageId,
+  normalizeChatSession,
+  isExplicitChatCommit,
+  findLatestChatProposalMessage,
   readChatSessions,
   writeChatSessions,
   buildChatTitle,

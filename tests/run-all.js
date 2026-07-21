@@ -5362,6 +5362,60 @@ test('ADR 0011: chat sessions survive a simulated "restart" (cross-session persi
   }
 });
 
+test('Chat drafts: legacy sessions normalize pending_prompt and explicit commit commands are narrow', () => {
+  const {
+    normalizeChatSession,
+    isExplicitChatCommit,
+    findLatestChatProposalMessage
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const legacy = normalizeChatSession({
+    id: 'chat_legacy',
+    original_prompt: 'original',
+    current_prompt: 'current',
+    messages: []
+  });
+  assertEqual(legacy.pending_prompt, null, 'legacy session gets null pending_prompt');
+
+  for (const command of ['apply it', 'Apply that.', 'use the proposal', 'commit this']) {
+    assertTrue(isExplicitChatCommit(command), `${command} is explicit`);
+  }
+  for (const message of ['I think we should use that approach', 'that looks good', 'please explain this']) {
+    assertTrue(!isExplicitChatCommit(message), `${message} remains conversational`);
+  }
+
+  const session = {
+    pending_prompt: 'new draft',
+    messages: [
+      { role: 'assistant', suggested_prompt: 'older draft' },
+      { role: 'assistant', suggested_prompt: 'new draft' }
+    ]
+  };
+  assertEqual(
+    findLatestChatProposalMessage(session).suggested_prompt,
+    'new draft',
+    'latest pending proposal is found'
+  );
+});
+
+test('Chat drafts: new sessions initialize pending_prompt to null', async () => {
+  const snapshot = snapshotChatFile();
+  resetChatFile();
+  const srv = await startTestServer();
+  try {
+    const created = await fetchJson(`${srv.base}/api/chat/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'new prompt', preset_id: getFirstPresetId() })
+    });
+    assertEqual(created.status, 201, 'session create succeeds');
+    assertEqual(created.body.data.pending_prompt, null, 'new pending prompt is null');
+  } finally {
+    await srv.close();
+    restoreChatFile(snapshot);
+  }
+});
+
 test('ADR 0011: chat input length cap is enforced at the schema level', () => {
   const { MAX_CHAT_MESSAGE_LENGTH } = require(path.join(PROJECT_ROOT, 'server.js'));
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
