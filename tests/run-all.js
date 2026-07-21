@@ -587,6 +587,26 @@ const fetchJson = async (url, options = {}) => {
   return { status: res.status, body };
 };
 
+const withMockChatProvider = async (responses, callback) => {
+  const realFetch = global.fetch;
+  global.fetch = async (url, options) => {
+    if (!String(url).endsWith('/chat/completions')) return realFetch(url, options);
+    const payload = responses.shift();
+    if (!payload) throw new Error('mock chat response queue exhausted');
+    return new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(payload) } }]
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  };
+  try {
+    return await callback();
+  } finally {
+    global.fetch = realFetch;
+  }
+};
+
 test('HTTP integration: GET /api/palettes returns an array', async () => {
   const snapshot = snapshotPalettesFile();
   resetPalettesFile();
@@ -5362,6 +5382,60 @@ test('ADR 0011: chat sessions survive a simulated "restart" (cross-session persi
   }
 });
 
+test('Chat drafts: legacy sessions normalize pending_prompt and explicit commit commands are narrow', () => {
+  const {
+    normalizeChatSession,
+    isExplicitChatCommit,
+    findLatestChatProposalMessage
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const legacy = normalizeChatSession({
+    id: 'chat_legacy',
+    original_prompt: 'original',
+    current_prompt: 'current',
+    messages: []
+  });
+  assertEqual(legacy.pending_prompt, null, 'legacy session gets null pending_prompt');
+
+  for (const command of ['apply it', 'Apply that.', 'use the proposal', 'commit this']) {
+    assertTrue(isExplicitChatCommit(command), `${command} is explicit`);
+  }
+  for (const message of ['I think we should use that approach', 'that looks good', 'please explain this']) {
+    assertTrue(!isExplicitChatCommit(message), `${message} remains conversational`);
+  }
+
+  const session = {
+    pending_prompt: 'new draft',
+    messages: [
+      { role: 'assistant', suggested_prompt: 'older draft' },
+      { role: 'assistant', suggested_prompt: 'new draft' }
+    ]
+  };
+  assertEqual(
+    findLatestChatProposalMessage(session).suggested_prompt,
+    'new draft',
+    'latest pending proposal is found'
+  );
+});
+
+test('Chat drafts: new sessions initialize pending_prompt to null', async () => {
+  const snapshot = snapshotChatFile();
+  resetChatFile();
+  const srv = await startTestServer();
+  try {
+    const created = await fetchJson(`${srv.base}/api/chat/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'new prompt', preset_id: getFirstPresetId() })
+    });
+    assertEqual(created.status, 201, 'session create succeeds');
+    assertEqual(created.body.data.pending_prompt, null, 'new pending prompt is null');
+  } finally {
+    await srv.close();
+    restoreChatFile(snapshot);
+  }
+});
+
 test('ADR 0011: chat input length cap is enforced at the schema level', () => {
   const { MAX_CHAT_MESSAGE_LENGTH } = require(path.join(PROJECT_ROOT, 'server.js'));
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
@@ -5942,6 +6016,143 @@ test('HTTP chat integration: connection close during send does not corrupt file'
   }
 });
 
+test('HTTP chat drafts: discussion, proposal, refinement, and text commit preserve state', async () => {
+  const snapshot = snapshotChatFile();
+  resetChatFile();
+  const srv = await startTestServer();
+  try {
+    const presetId = getFirstPresetId();
+    const created = await fetchJson(`${srv.base}/api/chat/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'original prompt', preset_id: presetId })
+    });
+    const sessionId = created.body.data.id;
+
+    const responses = [
+      { reply: 'The lighting was chosen to separate the subject from the background.', suggested_prompt: '' },
+      { reply: 'I recommend a warmer, more directional treatment while keeping the subject unchanged.', suggested_prompt: 'original prompt with warmer directional lighting' },
+      { reply: 'I kept the proposal and softened the warmth.', suggested_prompt: 'original prompt with softer warm directional lighting' }
+    ];
+
+    await withMockChatProvider(responses, async () => {
+      const discussion = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'Why is the lighting described this way?' })
+      });
+      assertEqual(discussion.status, 200, 'discussion succeeds');
+      assertEqual(discussion.body.data.current_prompt, 'original prompt', 'discussion does not commit');
+      assertEqual(discussion.body.data.pending_prompt, null, 'discussion has no pending draft');
+
+      const proposal = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'What change would make the lighting warmer?' })
+      });
+      assertEqual(proposal.status, 200, 'proposal succeeds');
+      assertEqual(proposal.body.data.current_prompt, 'original prompt', 'proposal does not commit');
+      assertEqual(proposal.body.data.pending_prompt, 'original prompt with warmer directional lighting', 'proposal becomes pending');
+
+      const refinement = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'Keep the idea but make it softer.' })
+      });
+      assertEqual(refinement.status, 200, 'refinement succeeds');
+      assertEqual(refinement.body.data.current_prompt, 'original prompt', 'refinement does not commit');
+      assertEqual(refinement.body.data.pending_prompt, 'original prompt with softer warm directional lighting', 'refinement replaces pending draft');
+
+      const committed = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'apply it' })
+      });
+      assertEqual(committed.status, 200, 'text Apply succeeds');
+      assertEqual(committed.body.data.current_prompt, 'original prompt with softer warm directional lighting', 'text Apply commits latest draft');
+      assertEqual(committed.body.data.pending_prompt, null, 'text Apply clears pending draft');
+    });
+  } finally {
+    await srv.close();
+    restoreChatFile(snapshot);
+  }
+});
+
+test('HTTP chat drafts: ambiguous text without pending proposal is treated as discussion', async () => {
+  const snapshot = snapshotChatFile();
+  resetChatFile();
+  const srv = await startTestServer();
+  try {
+    const presetId = getFirstPresetId();
+    const created = await fetchJson(`${srv.base}/api/chat/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'original prompt', preset_id: presetId })
+    });
+    const sessionId = created.body.data.id;
+
+    const responses = [
+      { reply: 'Sure, happy to discuss — what aspect are you weighing?', suggested_prompt: '' }
+    ];
+
+    await withMockChatProvider(responses, async () => {
+      const reply = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'I think we should use that approach' })
+      });
+      assertEqual(reply.status, 200, 'ambiguous text returns 200');
+      assertEqual(reply.body.data.current_prompt, 'original prompt', 'current_prompt unchanged');
+      assertEqual(reply.body.data.pending_prompt, null, 'pending_prompt still null');
+      assertEqual(reply.body.data.messages.length, 2, 'user + assistant persisted');
+      assertEqual(reply.body.data.messages[1].role, 'assistant', 'assistant message persisted');
+      assertEqual(reply.body.data.messages[1].suggested_prompt, null, 'assistant has no suggestion');
+    });
+  } finally {
+    await srv.close();
+    restoreChatFile(snapshot);
+  }
+});
+
+test('HTTP chat drafts: malformed provider response preserves existing pending draft', async () => {
+  const snapshot = snapshotChatFile();
+  resetChatFile();
+  const srv = await startTestServer();
+  try {
+    const presetId = getFirstPresetId();
+    const created = await fetchJson(`${srv.base}/api/chat/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'original prompt', preset_id: presetId })
+    });
+    const sessionId = created.body.data.id;
+
+    const seedPending = 'seeded pending draft to preserve';
+    const persisted = readPersistedSessions();
+    const direct = persisted.find((s) => s.id === sessionId);
+    direct.pending_prompt = seedPending;
+    fs.writeFileSync(CHAT_FILE, JSON.stringify(persisted, null, 2), 'utf8');
+
+    const malformedResponses = ['this is not parseable json at all {', 'still garbage', 'more garbage'];
+
+    await withMockChatProvider(malformedResponses, async () => {
+      const reply = await fetchJson(`${srv.base}/api/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: 'Try to do something' })
+      });
+      assertEqual(reply.status, 200, 'malformed response still returns 200');
+      assertEqual(reply.body.data.current_prompt, 'original prompt', 'current_prompt unchanged');
+      assertEqual(reply.body.data.pending_prompt, seedPending, 'pending_prompt preserved through parse fallback');
+      assertEqual(reply.body.data.messages.length, 2, 'user + assistant fallback persisted');
+      assertEqual(reply.body.data.messages[1].role, 'assistant', 'fallback assistant message persisted');
+    });
+  } finally {
+    await srv.close();
+    restoreChatFile(snapshot);
+  }
+});
+
 test('Frontend chat: submitChatMessage preserves user text on failure', () => {
   const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
   // The post-investigation fix moves `dom.chatInput.value = ''` AFTER
@@ -6003,6 +6214,29 @@ test('Frontend chat: submitChatMessage never calls showError() (uses chat-form-s
     'submitChatMessage must not call global showError (uses chat-form-status)');
   assertTrue(/setChatFormStatus\(/.test(block[0]),
     'submitChatMessage uses chat-form-status');
+});
+
+test('Frontend chat: submitChatMessage text-apply path syncs Step 4 result and token reminder', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  const block = js.match(/const submitChatMessage = async[\s\S]*?\n  \};/);
+  assertTrue(block, 'submitChatMessage defined');
+  assertTrue(/state\.finalPrompt\s*=\s*updated\.current_prompt/.test(block[0]),
+    'submitChatMessage text-apply path must update state.finalPrompt');
+  assertTrue(/dom\.resultPrompt\.textContent\s*=\s*updated\.current_prompt/.test(block[0]),
+    'submitChatMessage text-apply path must update dom.resultPrompt.textContent');
+  assertTrue(/updateTokenReminderBanner\(\s*\)/.test(block[0]),
+    'submitChatMessage text-apply path must re-run updateTokenReminderBanner');
+});
+
+test('Frontend chat: pending proposal state is rendered and described as unapplied', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'styles.css'), 'utf8');
+  assertTrue(/pending_prompt/.test(js), 'frontend reads pending_prompt');
+  assertTrue(/Apply proposal/.test(js), 'frontend exposes Apply proposal copy');
+  assertTrue(/unapplied proposal/i.test(js), 'frontend labels unapplied state');
+  assertTrue(/discuss|recommend|proposal/i.test(html), 'HTML explains conversational workflow');
+  assertTrue(/chat-message--pending/.test(css), 'pending proposal style exists');
 });
 
 test('Chat fallback text is non-empty and human-readable', () => {
@@ -6420,7 +6654,7 @@ test('ADR 0012: validatePromptPreservation handles empty strings gracefully', ()
 test('ADR 0012: DEFAULT_CHAT_SYSTEM_PROMPT includes the anchor-preservation contract', () => {
   const { DEFAULT_CHAT_SYSTEM_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
 
-  // The new contract section (ADR 0012) must be present and the old
+  // The core contract section (ADR 0012) must be present and the old
   // soft rule must have been replaced with a hard contract.
   assertTrue(/EDIT, DO NOT REGENERATE/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
     'system prompt has EDIT, DO NOT REGENERATE heading');
@@ -6432,23 +6666,21 @@ test('ADR 0012: DEFAULT_CHAT_SYSTEM_PROMPT includes the anchor-preservation cont
     'anchor preservation is marked non-negotiable');
   assertTrue(/DO NOT introduce new facts/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
     'system prompt forbids adding new facts');
+  assertTrue(/wholesale rewrite/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt carves out the wholesale rewrite case');
 
-  // The paint-spec example must be present as Example A so the
-  // model has an in-context reference for the targeted-edit shape.
-  assertTrue(/paint specification/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'system prompt includes paint-spec example');
-  assertTrue(/Navy \(HEX #1F2A44\)/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'system prompt paint example uses Navy/Gold/White colors');
-  assertTrue(/Wholesale/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'system prompt carves out the wholesale rewrite case (Example B)');
-
-  // The two contrasted examples (A and B) must both be present.
-  assertTrue(/Example A — TARGETED EDIT/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'Example A (targeted edit) present');
-  assertTrue(/Example B — WHOLESALE REWRITE/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'Example B (wholesale rewrite) present');
-  assertTrue(/Example C — QUESTION/.test(DEFAULT_CHAT_SYSTEM_PROMPT),
-    'Example C (question) present');
+  // Task 2 contract requirements: discussion vs proposal modes, no
+  // self-commit, two-string JSON schema.
+  assertTrue(/Discussion/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt names the discussion mode');
+  assertTrue(/Proposal/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt names the proposal mode');
+  assertTrue(/Never commit/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt forbids self-commit');
+  assertTrue(/JSON SCHEMA/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt describes the two-string JSON schema');
+  assertTrue(/PENDING PROMPT/i.test(DEFAULT_CHAT_SYSTEM_PROMPT),
+    'system prompt names the pending-prompt editing base');
 });
 
 test('ADR 0012: callMiniMaxChat wires the validator into the retry loop', () => {
@@ -6457,8 +6689,8 @@ test('ADR 0012: callMiniMaxChat wires the validator into the retry loop', () => 
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   const callSite = serverText.match(/parsedReply = await callMiniMaxChat\([\s\S]*?\}\);/);
   assertTrue(callSite, 'call site present');
-  assertTrue(/currentPrompt:\s*session\.current_prompt/.test(callSite[0]),
-    'call site passes session.current_prompt');
+  assertTrue(/currentPrompt:\s*(activePrompt|session\.pending_prompt\s*\|\|\s*session\.current_prompt|session\.current_prompt)/.test(callSite[0]),
+    'call site passes a currentPrompt derived from the session (pending || current)');
   assertTrue(/lastUserRequest/.test(callSite[0]),
     'call site passes lastUserRequest');
 });
@@ -7059,6 +7291,149 @@ test('ADR 0016: ADR file 0016-zimage-strength-and-placement.md exists with requi
   assertTrue(/## Consequences/.test(text), 'Consequences section present');
 });
 
+// ─── Task 2 — bounded chat context ────────────────────────────────
+
+test('Chat context: compacts analysis and bounds provider input', () => {
+  const {
+    CHAT_CONTEXT_CHAR_BUDGET,
+    CHAT_HISTORY_CHAR_BUDGET,
+    compactChatAnalysisSnapshot,
+    buildBoundedChatHistory,
+    buildChatRequestContext
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const snapshot = {};
+  for (let i = 0; i < 20; i++) snapshot[`field_${i}`] = 'x'.repeat(1000);
+  const compact = compactChatAnalysisSnapshot(snapshot);
+  assertTrue(JSON.stringify(compact).length < JSON.stringify(snapshot).length, 'analysis is compacted');
+
+  const messages = Array.from({ length: 200 }, (_, i) => ({
+    role: i % 2 === 0 ? 'user' : 'assistant',
+    content: `turn ${i} ${'x'.repeat(1000)}`
+  }));
+  const history = buildBoundedChatHistory(messages);
+  assertTrue(history.length <= 12, 'history message count is bounded');
+  assertTrue(
+    history.reduce((total, message) => total + message.content.length, 0) <= CHAT_HISTORY_CHAR_BUDGET,
+    'history character budget is bounded'
+  );
+
+  const session = {
+    preset_id: 'preset_968c0ccdf6fc6151',
+    original_prompt: 'ORIGINAL '.repeat(500),
+    current_prompt: 'CURRENT '.repeat(500),
+    pending_prompt: 'PENDING '.repeat(500),
+    analysis_snapshot: snapshot,
+    messages
+  };
+  const context = buildChatRequestContext(session);
+  const totalChars = context.systemPrompt.length + context.messages.reduce(
+    (total, message) => total + message.content.length,
+    0
+  );
+  assertTrue(totalChars <= CHAT_CONTEXT_CHAR_BUDGET, 'provider input fits the hard budget');
+  assertTrue(context.systemPrompt.includes('ORIGINAL'), 'original prompt remains visible');
+  assertTrue(context.systemPrompt.includes('PENDING'), 'pending prompt remains visible');
+  assertTrue(context.systemPrompt.includes('Z-IMAGE CONTRACT'), 'Z-Image contract remains visible');
+
+  const nonZImage = buildChatRequestContext({
+    preset_id: 'preset_photorealistic',
+    original_prompt: 'photo original',
+    current_prompt: 'photo original',
+    pending_prompt: null,
+    analysis_snapshot: null,
+    messages: []
+  });
+  assertTrue(!nonZImage.systemPrompt.includes('Z-IMAGE CONTRACT'), 'non-Z-Image sessions omit Z-Image contract');
+
+  const presets = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'presets.json'), 'utf8'));
+  for (const preset of presets) {
+    const presetContext = buildChatRequestContext({
+      preset_id: preset.id,
+      original_prompt: 'preset prompt',
+      current_prompt: 'preset prompt',
+      pending_prompt: null,
+      analysis_snapshot: null,
+      messages: []
+    });
+    assertTrue(presetContext.systemPrompt.length > 0, `${preset.id} builds chat context`);
+  }
+});
+
+test('Chat context: labels identical original and committed prompts once', () => {
+  const { buildChatSystemPrompt } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const identical = 'IDENTICAL_ORIGINAL_CURRENT_PROMPT';
+  const samePrompt = buildChatSystemPrompt({
+    preset_id: 'preset_photorealistic',
+    original_prompt: identical,
+    current_prompt: identical,
+    pending_prompt: null,
+    analysis_snapshot: null
+  });
+  assertEqual(
+    (samePrompt.match(/## Original generated prompt/g) || []).length,
+    1,
+    'identical prompt has one original label'
+  );
+  assertEqual(
+    (samePrompt.match(/## Current working prompt \(committed baseline\)/g) || []).length,
+    1,
+    'identical prompt has one committed label'
+  );
+  assertEqual(
+    (samePrompt.split(identical).length - 1),
+    1,
+    'identical prompt content appears once'
+  );
+
+  const differentPrompt = buildChatSystemPrompt({
+    preset_id: 'preset_photorealistic',
+    original_prompt: 'ORIGINAL_DISTINCT_PROMPT',
+    current_prompt: 'CURRENT_DISTINCT_PROMPT',
+    pending_prompt: null,
+    analysis_snapshot: null
+  });
+  assertEqual(
+    (differentPrompt.match(/## Original generated prompt/g) || []).length,
+    1,
+    'different prompts keep one original block'
+  );
+  assertEqual(
+    (differentPrompt.match(/## Current working prompt \(committed baseline\)/g) || []).length,
+    1,
+    'different prompts keep one committed block'
+  );
+  assertTrue(differentPrompt.includes('ORIGINAL_DISTINCT_PROMPT'), 'different original prompt remains visible');
+  assertTrue(differentPrompt.includes('CURRENT_DISTINCT_PROMPT'), 'different current prompt remains visible');
+});
+
+test('Chat context: bounds pathological system prompt and retains original prompt', () => {
+  const {
+    CHAT_CONTEXT_CHAR_BUDGET,
+    buildChatRequestContext
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const snapshot = {};
+  for (let i = 0; i < 100; i++) snapshot[`analysis_${i}`] = 'ANALYSIS_PATHOLOGICAL '.repeat(10);
+  const context = buildChatRequestContext({
+    preset_id: 'preset_968c0ccdf6fc6151',
+    original_prompt: 'ORIGINAL_PATHOLOGICAL '.repeat(400),
+    current_prompt: 'CURRENT_PATHOLOGICAL '.repeat(400),
+    pending_prompt: 'PENDING_PATHOLOGICAL '.repeat(400),
+    analysis_snapshot: snapshot,
+    messages: Array.from({ length: 12 }, (_, i) => ({
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `history ${i} ${'HISTORY_PATHOLOGICAL '.repeat(100)}`
+    }))
+  });
+  const totalChars = context.systemPrompt.length + context.messages.reduce(
+    (total, message) => total + message.content.length,
+    0
+  );
+  assertTrue(totalChars <= CHAT_CONTEXT_CHAR_BUDGET, 'pathological provider input fits the hard budget');
+  assertTrue(context.systemPrompt.includes('ORIGINAL_PATHOLOGICAL'), 'original prompt remains visible when truncated');
+  assertTrue(/truncat|…/i.test(context.systemPrompt), 'truncation is marked clearly');
+});
+
 // ─── Final invariants — must pass AFTER everything else ran ─────────
 
 test('No stale upload files in uploads/', () => {
@@ -7086,6 +7461,17 @@ test('data/chat_sessions.json is parseable and an array (post-test state)', () =
   if (!fs.existsSync(CHAT_FILE)) return;
   const parsed = JSON.parse(fs.readFileSync(CHAT_FILE, 'utf8'));
   assertTrue(Array.isArray(parsed), 'chat_sessions.json must be an array');
+});
+
+test('Project commands: npm test points at the canonical suite', () => {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8'));
+  assertEqual(packageJson.scripts.test, 'node tests/run-all.js', 'npm test uses canonical suite');
+});
+
+test('Chat contract documentation names the pending draft state', () => {
+  const context = fs.readFileSync(path.join(PROJECT_ROOT, 'CONTEXT.md'), 'utf8');
+  assertTrue(/pending_prompt/.test(context), 'CONTEXT documents pending_prompt');
+  assertTrue(/explicit|Apply/i.test(context), 'CONTEXT documents explicit commit');
 });
 
 (async () => {

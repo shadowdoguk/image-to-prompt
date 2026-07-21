@@ -2195,6 +2195,15 @@ body {
   color: var(--success);
 }
 
+.chat-message--pending {
+  border-left-color: var(--warning);
+  background: var(--color-accent-soft);
+}
+
+.chat-message--pending .chat-message__preview-label {
+  color: var(--warning);
+}
+
 .chat-message__actions {
   display: flex;
   gap: 0.5rem;

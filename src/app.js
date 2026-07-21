@@ -4058,7 +4058,7 @@
     }
 
     const frag = document.createDocumentFragment();
-    messages.forEach((m) => frag.appendChild(buildChatMessageNode(m)));
+    messages.forEach((m) => frag.appendChild(buildChatMessageNode(m, session)));
     dom.chatMessages.appendChild(frag);
     // Scroll to bottom so the newest message is visible after a send.
     dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
@@ -4071,11 +4071,24 @@
    * is disabled if `current_prompt` already matches `suggested_prompt`
    * (prevents double-applies and gives the user a clear "applied"
    * signal).
+   *
+   * `session` is required so we can mark the unapplied proposal draft
+   * with the `chat-message--pending` modifier and switch the Apply
+   * button copy to `Apply proposal` for that specific message only.
    */
-  const buildChatMessageNode = (m) => {
+  const buildChatMessageNode = (m, session) => {
     const node = document.createElement('article');
     node.className = `chat-message chat-message--${m.role === 'assistant' ? 'assistant' : 'user'}`;
     node.dataset.messageId = m.id || '';
+
+    const isPendingProposal = m.role === 'assistant' &&
+      session &&
+      typeof session.pending_prompt === 'string' &&
+      session.pending_prompt.length > 0 &&
+      m.suggested_prompt === session.pending_prompt;
+    if (isPendingProposal) {
+      node.classList.add('chat-message--pending');
+    }
 
     const header = document.createElement('div');
     header.className = 'chat-message__header';
@@ -4102,7 +4115,9 @@
     if (m.role === 'assistant' && typeof m.suggested_prompt === 'string' && m.suggested_prompt.length > 0) {
       const previewLabel = document.createElement('div');
       previewLabel.className = 'chat-message__preview-label';
-      previewLabel.textContent = 'Proposed revision — click Apply to use it';
+      previewLabel.textContent = isPendingProposal
+        ? 'Unapplied proposal — click Apply proposal to use it'
+        : 'Proposed revision — click Apply to use it';
       node.appendChild(previewLabel);
 
       const preview = document.createElement('pre');
@@ -4116,7 +4131,7 @@
       const apply = document.createElement('button');
       apply.type = 'button';
       apply.className = 'chat-message__apply';
-      apply.textContent = 'Apply revision';
+      apply.textContent = isPendingProposal ? 'Apply proposal' : 'Apply revision';
       apply.setAttribute('aria-label', 'Apply this revision to the generated prompt');
       apply.dataset.messageId = m.id || '';
       apply.addEventListener('click', () => applyChatRevision(m.id, m.suggested_prompt));
@@ -4289,6 +4304,24 @@
   };
 
   /**
+   * Format the inline session-status line so the user can see at a
+   * glance whether there is an unapplied proposal awaiting an Apply
+   * click. The string always contains either `unapplied proposal`
+   * (when `pending_prompt` is set) or `no unapplied proposal` (when
+   * it's null); both are detected by the frontend contract test.
+   */
+  const formatChatSessionStatus = (session) => {
+    if (!session) return '';
+    const title = session.title || 'Untitled conversation';
+    const count = Array.isArray(session.messages) ? session.messages.length : 0;
+    const messagePart = `${count} message${count === 1 ? '' : 's'}`;
+    const proposalPart = (typeof session.pending_prompt === 'string' && session.pending_prompt.length > 0)
+      ? 'unapplied proposal'
+      : 'no unapplied proposal';
+    return `Session "${title}" — ${messagePart} — ${proposalPart}.`;
+  };
+
+  /**
    * Called from `displayResult` after Stage 2 returns. Creates a fresh
    * chat session on the server, anchors the chat console to it, and
    * shows the section. The console is hidden until this resolves so a
@@ -4339,7 +4372,7 @@
     if (dom.stepChat) dom.stepChat.hidden = false;
     if (dom.chatSessionStatus) {
       dom.chatSessionStatus.hidden = false;
-      dom.chatSessionStatus.textContent = `Session "${session.title}" — ask for any change to refine the prompt.`;
+      dom.chatSessionStatus.textContent = formatChatSessionStatus(session);
     }
     if (dom.chatSessionDeleteBtn) {
       dom.chatSessionDeleteBtn.disabled = false;
@@ -4424,6 +4457,19 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text })
       });
+      const prevSession = state.chatSessions.find((s) => s.id === updated.id);
+      const lastMsg = Array.isArray(updated.messages) && updated.messages.length > 0
+        ? updated.messages[updated.messages.length - 1]
+        : null;
+      const isTextApply = lastMsg &&
+        lastMsg.role === 'assistant' &&
+        lastMsg.content === 'Applied the latest proposal to the working prompt.' &&
+        (!prevSession || prevSession.current_prompt !== updated.current_prompt);
+      if (isTextApply) {
+        state.finalPrompt = updated.current_prompt;
+        dom.resultPrompt.textContent = updated.current_prompt;
+        updateTokenReminderBanner();
+      }
       // Splice the updated session into state.chatSessions in place so
       // the conversation selector reflects the new updated_at.
       const idx = state.chatSessions.findIndex((s) => s.id === updated.id);
@@ -4437,6 +4483,9 @@
       });
       renderChatSessionSelect();
       renderChatMessages(updated);
+      if (dom.chatSessionStatus && !dom.chatSessionStatus.hidden) {
+        dom.chatSessionStatus.textContent = formatChatSessionStatus(updated);
+      }
       sendSucceeded = true;
     } catch (err) {
       // Keep the user's text in the input so they can retry without
@@ -4518,6 +4567,9 @@
       if (idx !== -1) state.chatSessions[idx] = updated;
       else state.chatSessions.unshift(updated);
       renderChatMessages(updated);
+      if (dom.chatSessionStatus && !dom.chatSessionStatus.hidden) {
+        dom.chatSessionStatus.textContent = formatChatSessionStatus(updated);
+      }
       setChatFormStatus('Applied revision to the prompt.', false);
     } catch (err) {
       setChatFormStatus(err.message || 'Apply failed.', true);
@@ -4616,7 +4668,7 @@
     if (dom.stepChat) dom.stepChat.hidden = false;
     if (dom.chatSessionStatus) {
       dom.chatSessionStatus.hidden = false;
-      dom.chatSessionStatus.textContent = `Session "${session.title}" — ${session.messages.length} message${session.messages.length === 1 ? '' : 's'}.`;
+      dom.chatSessionStatus.textContent = formatChatSessionStatus(session);
     }
     if (dom.chatSessionDeleteBtn) dom.chatSessionDeleteBtn.disabled = false;
     updateChatSendButton();

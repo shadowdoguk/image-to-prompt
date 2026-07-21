@@ -8,7 +8,7 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "session:init": "node scripts/session-init.js",
-    "test": "node --test scripts/"
+    "test": "node tests/run-all.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

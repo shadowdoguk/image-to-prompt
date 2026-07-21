@@ -129,24 +129,7 @@ The product has two top-level surfaces:
 - **Stage 2.5 (Post-generation chat, ADR 0011)** activates the moment
   Stage 2 returns successfully. The frontend posts the new prompt +
   analysis snapshot to `/api/chat/sessions`; the server mints a fresh
-  `chat_<16 hex>` session anchored to that run. The chat system prompt
-  (`DEFAULT_CHAT_SYSTEM_PROMPT`, code constant) carries three context
-  blocks (original prompt, current working prompt, analysis snapshot)
-  and forces the model to respond with a JSON object
-  `{ reply, suggested_prompt }`. Revisions ("make the lighting more
-  dramatic") return a non-null `suggested_prompt` and surface an Apply
-  button that advances `current_prompt`. Pure questions ("why this
-  framing?") return `suggested_prompt: null`. `messages[]` is
-  append-only; sessions survive server restarts. ADR 0011a added a
-  defensive parser + retry loop + frontend hardening. **ADR 0012
-  (anchor-preservation)** layers a wholesale-rewrite guard on top:
-  the system prompt reframes the assistant's job as "edit, do not
-  regenerate" (with an inventory-classify-apply contract and
-  contrasted examples), and a server-side validator
-  (`validatePromptPreservation`) scores every revision against the
-  current working prompt and retries with a reinforcement message if
-  too much of the original context was lost — declining the revision
-  (no Apply button) if the model can't produce a targeted edit.
+  `chat_<16 hex>` session anchored to that run. The chat session tracks three prompt fields with distinct semantics: `original_prompt` is the immutable Stage 2 output, `current_prompt` is the user-committed working prompt, and `pending_prompt` is an optional unapplied model proposal. Discussion turns ("why this framing?") do not change prompt state and return `suggested_prompt: null`. Recommendation and refinement turns ("make the lighting more dramatic") update `pending_prompt` only — never `current_prompt`. The user commits a pending proposal to `current_prompt` via an explicit "Apply proposal" button (or a deterministic explicit text command). The chat provider context is bounded at 20,000 characters using the compact analysis snapshot plus recent history. Revisions still return a JSON `{ reply, suggested_prompt }` envelope. `messages[]` is append-only; sessions survive server restarts. ADR 0011a added a defensive parser + retry loop + frontend hardening. **ADR 0012 (anchor-preservation)** layers a wholesale-rewrite guard on top: the system prompt reframes the assistant's job as "edit, do not regenerate" (with an inventory-classify-apply contract and contrasted examples), and a server-side validator (`validatePromptPreservation`) scores every revision against the current working prompt and retries with a reinforcement message if too much of the original context was lost — declining the revision (no Apply button) if the model can't produce a targeted edit.
 
 ## Core entities
 
@@ -166,7 +149,7 @@ The product has two top-level surfaces:
 | Mood / Lighting curated presets | code constants `MOOD_PRESETS`, `LIGHTING_PRESETS` in `src/app.js` | n/a (single global each) | Static, code-defined taxonomies of one-click descriptors rendered as chips beneath the Populate-with-AI button on the `mood` and `lighting` fields (ADR 0018). NOT persisted (unlike saved directives, ADR 0009) — they are a canonical taxonomy shared by every user. Mood: 5 categories × 7-9 items (Positive / Reflective / Intense / Atmospheric / Still). Lighting: 5 categories × 6-8 items (Natural / Directional / Quality / Stylized / Studio). Clicking a chip sets the field value to the chip's label and updates `state.currentAnalysis`. The user is free to edit the value after clicking — chips are a quick starting point, not a lock. |
 | Stage 2 override | `data/stage2_overrides.json` | `presetId` | Per-preset override of `preset.stage2_system_prompt` (ADR 0007). Editable from UI via the "Edit prompt" button beside "Generate prompt". When present, used instead of the preset's built-in Stage 2 prompt on the next `POST /api/generate-prompt`. |
 | Saved directive | `data/directives.json` | `id` (`directive_<16 hex>`) | name, content, tags, history[], usage_count, last_used_at, created_at, updated_at (ADR 0009). Selectable from the apply `<select>` below the directives textarea; editable from the Manage modal; rollback via version history; importable / exportable as `.i2p.json` envelope. The textarea is the source of truth at Stage 2 time; saved directives are a library loaded into the textarea via Apply. |
-| Chat session | `data/chat_sessions.json` | `id` (`chat_<16 hex>`) | preset_id, preset_name, run_id, title, original_prompt, current_prompt, analysis_snapshot, messages[], created_at, updated_at (ADR 0011). Anchored to a finished Stage 2 run; activated immediately after `displayResult`. `messages` is append-only (`role: user \| assistant`, `content`, `suggested_prompt: string \| null`, `timestamp`). Apply advances `current_prompt` from an assistant's `suggested_prompt`. Persists across server restarts. |
+| Chat session | `data/chat_sessions.json` | `id` (`chat_<16 hex>`) | preset_id, preset_name, run_id, title, original_prompt, current_prompt, pending_prompt, analysis_snapshot, messages[], created_at, updated_at (ADR 0011). Anchored to a finished Stage 2 run; activated immediately after `displayResult`. `original_prompt` is the immutable Stage 2 output; `current_prompt` is the user-committed working prompt; `pending_prompt` is an optional unapplied model proposal. Discussion turns do not change prompt state; recommendation and refinement turns update `pending_prompt` only — never `current_prompt`. Apply proposal commits `pending_prompt` to `current_prompt`. `messages` is append-only (`role: user \| assistant`, `content`, `suggested_prompt: string \| null`, `timestamp`). Persists across server restarts. Chat provider context is bounded at 20,000 characters using the compact analysis snapshot plus recent history. |
 | Issue | GitHub Issues (planned) | number | Tracked via `gh` CLI per `docs/agents/issue-tracker.md` |
 | ADR | `docs/adr/NNNN-*.md` | filename | Architectural decisions; immutable once Accepted |
 
