@@ -11,10 +11,10 @@
 | **Workflow** | Existing (continue mode) |
 | **Current phase** | Phase C — pick first slice (Phase A + B complete) |
 | **Last completed slice** | n/a — no slices yet under the new methodology |
-| **Currently in** | Awaiting user sign-off on Phase C proposal (which slice to do first) |
-| **Open questions** | 3 — see §5 |
+| **Currently in** | Building Slice 1 SPEC (Gate G2) — texture AI button |
+| **Open questions** | 2 — see §5 |
 | **Kill criteria status** | n/a — set at Gate G2 when first spec lands |
-| **Next action** | Decide which slice to do first (proposal in this session's output) |
+| **Next action** | Write `docs/SPEC.md` for Slice 1, then user approval (G2) |
 
 ---
 
@@ -37,6 +37,11 @@ Empty. Work-blocked: pick a slice in `docs/SPEC.md` (Phase C, Gate G2).
 ## 3. Decisions since last session
 
 This is the first session under the new methodology. No ADRs added by Goose yet — the project already has 22 ADRs in `docs/adr/`. Any new decision worth an ADR (3 criteria met per `docs/PRINCIPLES.md` §8) will go there.
+
+**Commits landed this session:**
+
+- `eb0ef3e` — `chore: bootstrap App Build methodology, reconcile three docs systems` (AGENTS.md merge, CONTEXT.md symlink, DECISIONS.md removed, methodology docs, RECON, SYNTHESIS, PROJECT-README, SESSION-STATE)
+- `6722030` — `chore: ignore .superpowers/ and .tmp/` (pre-existing untracked dirs)
 
 ## 4. Blockers / parked items
 

@@ -93,6 +93,21 @@ The product has two top-level surfaces:
   constant `DEFAULT_CAMERA_ANGLE_PROMPT` in `server.js`; a UI editor is
   out of scope for ADR 0008 (the camera-angle contract is narrower than
   the subject factual contract, so user iteration is less likely).
+- **Stage 1.T** (Texture re-analysis, Slice 1 — App Build methodology,
+  pattern-mirrors ADR 0018) runs ONLY when the user clicks the "Populate
+  with AI" button beneath the `texture` textarea in the analysis editor.
+  Calls `/api/texture` with a texture-only system prompt that excludes the
+  subject, lighting, color, mood, composition, style, and medium, and
+  covers five texture categories (surface quality, mark-making / tool
+  traces, material identification, pigment interaction, tactile cues).
+  Independent of the active preset. Updates the `texture` textarea value
+  in place — does not re-render the analysis editor. The system prompt is
+  the shipped default constant `DEFAULT_TEXTURE_PROMPT` in `server.js`.
+  Texture is image-specific and resists a curated chip taxonomy (mirror
+  ADR 0018 §5 / Slice 1 SPEC §8); only the AI button is rendered, no
+  curated chips. Texture is the 6th per-field vision endpoint, joining
+  subject (Stage 1.S), camera_angle (Stage 1.C), actions, mood, and
+  lighting from ADR 0018.
 - **Stage 2** runs ONLY when the user explicitly clicks "Generate prompt" with
   an edited analysis + optional directives. Synthesizes the final image-gen prompt.
   The system prompt used for Stage 2 is resolved at call time:

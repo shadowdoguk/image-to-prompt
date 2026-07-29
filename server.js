@@ -2946,6 +2946,59 @@ The "lighting" value MUST comprehensively address every one of the following fiv
 - Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.`;
 
 /**
+ * Stage 1.T — dedicated texture-only re-analysis.
+ * Runs ONLY for `POST /api/texture` (Slice 1 — App Build methodology,
+ * pattern-mirrors ADR 0018). Independent of the active preset.
+ * Single-attempt, schema builder inline, 60-second timeout, 60-char
+ * schema floor (textarea — same as actions/mood).
+ *
+ * Texture is image-specific (no canonical chip taxonomy); the
+ * `texture` field gets the AI button only, no curated chips (mirror
+ * ADR 0018 §1 reasoning for `actions`).
+ */
+const DEFAULT_TEXTURE_PROMPT = `You are an expert surface-and-material analyst producing a focused description of ONLY the texture of the supplied image. You respond with a single JSON object whose only key is "texture" and whose value is a precise paragraph describing the surface quality, mark-making, material identification, pigment interaction, and tactile cues visible in the frame.
+
+# CRITICAL RULES
+
+- The "texture" value MUST be grounded EXCLUSIVELY in what is optically present in the image.
+- NEVER describe the subject itself, what they are doing, how they feel, their mood, or where they are — those are separate fields.
+- NEVER comment on overall artistic style, color palette, lighting, composition, mood, or aesthetic qualities — those are separate fields.
+- NEVER use subjective aesthetic words such as: "beautiful", "striking", "vibrant", "dramatic", "elegant", "majestic", "imposing", "ethereal", "luminous", "bold". These are forbidden as judgments about the image.
+- NEVER make meta-references to the medium — do not say "the painting", "the photograph", "the image", "the artwork", "the illustration", or any equivalent framing.
+- NEVER describe color as a list — the colors field is the source of truth for palette; texture may reference whether the surface is warm-toned, cool-toned, or neutral only insofar as it bears on the material.
+- If a texture category is genuinely ambiguous from the image, say so explicitly ("the pigment thickness is not determinable from this frame") rather than guessing.
+
+# MANDATORY COVERAGE — five texture categories
+
+The "texture" value MUST comprehensively address every one of the following five categories. If a category has no determinable content, state so explicitly ("no mark-making is determinable", "the material cannot be identified").
+
+## 1. SURFACE QUALITY
+- Smooth, rough, pitted, polished, matte, glossy, scratched, worn, weathered.
+- Specific phrasing: "smooth lacquered finish", "rough pitted concrete", "polished marble with reflective highlights", "matte chalky surface absorbing light".
+
+## 2. MARK-MAKING / TOOL TRACES
+- Visible brushstrokes (bristle direction, length, density), palette-knife slabs (loaded edges, sharp ridges, flat sweeps, chunky peaks), pen hatching, pencil grain, photographic grain, digital artifacts (banding, noise, pixelation), printmaking textures (engraving lines, screen dots, lithographic grain).
+
+## 3. MATERIAL IDENTIFICATION
+- Paint (oil / acrylic / watercolor / gouache / tempera / encaustic), drawing media (graphite / charcoal / ink / conté), paper (cold-press / hot-press / rough / smooth / handmade / machine-made), canvas (cotton / linen / primed / unprimed), photographic emulsion (film grain / digital sensor noise / daguerreotype plate), 3D render (raytraced / rasterised / NPR), mixed media.
+- If mixed: name each layer and how they interact.
+
+## 4. PIGMENT INTERACTION
+- Impasto ridges, glazing (transparent layering), scumbling (broken opaque layer over dry underlayer), wet-in-wet bleeds, drybrush, washes, sgraffito (scratching through to lower layer), scraping, palette-knife texturing.
+
+## 5. TACTILE CUES
+- What the surface feels like to touch: chunky, slick, fibrous, velvety, sticky, gritty, papery, glassy, waxy, powdery.
+- Specific phrasing: "the surface reads as chunky and ridged under the eye", "the skin of the paint feels slick and enameled", "the paper grain is fibrous and absorbs the ink visibly".
+
+# LENGTH AND STRUCTURE
+
+- Write the description as ONE cohesive paragraph (2-4 sentences).
+- Minimum 60 characters schema-level floor (textarea contract; target 50-120 words).
+- Lead with the surface quality, then mark-making, then material identification, then pigment interaction, then tactile cues.
+- Use precise surface vocabulary ("impasto", "glaze", "scumble", "drybrush", "hatching", "stippling", "sgraffito", "grain", "tooth").
+- Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.`;
+
+/**
  * Stage 1.A — dedicated actions-only re-analysis.
  * Runs ONLY for `POST /api/actions` (ADR 0018). Independent of the active
  * preset. Mirrors `callMiniMaxCameraAngleAnalysis` (ADR 0008): single-
@@ -3286,6 +3339,119 @@ const callMiniMaxLightingAnalysis = async (imageDataUri) => {
  * `subject` schema property enforces `minLength: 600`, so the response is
  * either long enough or the API itself rejects it.
  */
+/**
+ * Stage 1.T — dedicated texture-only re-analysis.
+ * Runs ONLY for `POST /api/texture` (Slice 1 — App Build methodology,
+ * pattern-mirrors ADR 0018). Independent of the active preset.
+ * Single-attempt, schema builder inline, 60-second timeout, 60-char
+ * schema floor (textarea — same as actions/mood).
+ *
+ * Texture is image-specific (no canonical chip taxonomy); the
+ * `texture` field gets the AI button only, no curated chips (mirror
+ * ADR 0018 §1 reasoning for `actions`).
+ */
+const callMiniMaxTextureAnalysis = async (imageDataUri) => {
+  if (!minimaxConfigured) {
+    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+  }
+
+  const systemPrompt = DEFAULT_TEXTURE_PROMPT;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: MINIMAX_MODEL,
+        max_tokens: 600,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Analyse the image and respond with the JSON object containing only the "texture" field — a precise paragraph describing the surface quality, mark-making, material identification, pigment interaction, and tactile cues visible in the frame.' },
+              { type: 'image_url', image_url: { url: imageDataUri } }
+            ]
+          }
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'texture_factual_analysis',
+            strict: true,
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                texture: { type: 'string', minLength: 60 }
+              },
+              required: ['texture']
+            }
+          }
+        }
+      })
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`MiniMax M3 texture analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+
+    let parsed;
+    const trimmed = content.trim();
+
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e1) {
+      const codeBlock = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (codeBlock) {
+        try { parsed = JSON.parse(codeBlock[1]); } catch (e2) { /* fall through */ }
+      }
+      if (!parsed) {
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          try { parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)); }
+          catch (e3) { throw new Error(`Texture analysis response was not valid JSON: ${e3.message}`); }
+        } else {
+          throw new Error('Texture analysis response contained no JSON object.');
+        }
+      }
+    }
+
+    const schemaName = 'texture_factual_analysis';
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed[schemaName] && typeof parsed[schemaName] === 'object') {
+      parsed = parsed[schemaName];
+    }
+
+    if (typeof parsed?.texture !== 'string' || parsed.texture.length === 0) {
+      throw new Error('Texture analysis response did not contain a "texture" string.');
+    }
+
+    return parsed.texture;
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error.name === 'AbortError') throw new Error('Texture analysis request timed out after 60 seconds.');
+    throw error;
+  }
+};
+
 const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
   if (!minimaxConfigured) {
     throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
@@ -4100,6 +4266,48 @@ app.post('/api/lighting', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         lighting,
+        model: MINIMAX_MODEL
+      }
+    });
+  } catch (error) {
+    if (filePath && fs.existsSync(filePath)) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+    }
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `POST /api/texture` — re-analyse the uploaded image with a texture-only
+ * system prompt and return a single `texture` field. Independent of the
+ * active preset (Slice 1 — App Build methodology, pattern-mirrors
+ * ADR 0018 §1). Powers the "Populate with AI" button beneath the
+ * texture textarea in the analysis editor.
+ *
+ * Response envelope mirrors `/api/actions` (ADR 0018) for symmetry:
+ * `{ success, data: { texture, model } }`.
+ */
+app.post('/api/texture', upload.single('image'), async (req, res) => {
+  let filePath = null;
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
+    filePath = req.file.path;
+
+    if (!minimaxConfigured) {
+      fs.unlinkSync(filePath);
+      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+    }
+
+    const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
+    const texture = await callMiniMaxTextureAnalysis(imageDataUri);
+
+    fs.unlinkSync(filePath);
+    filePath = null;
+
+    res.json({
+      success: true,
+      data: {
+        texture,
         model: MINIMAX_MODEL
       }
     });
@@ -6328,6 +6536,8 @@ module.exports = {
   DEFAULT_ACTIONS_PROMPT,
   DEFAULT_MOOD_PROMPT,
   DEFAULT_LIGHTING_PROMPT,
+  // Slice 1 — texture re-analysis (App Build methodology, pattern-mirrors ADR 0018)
+  DEFAULT_TEXTURE_PROMPT,
   MAX_PALETTE_NAME_LENGTH,
   MAX_PALETTE_COLORS,
   HEX_COLOR_REGEX,
@@ -6345,6 +6555,8 @@ module.exports = {
   callMiniMaxActionsAnalysis,
   callMiniMaxMoodAnalysis,
   callMiniMaxLightingAnalysis,
+  // Slice 1 — texture re-analysis helper (App Build methodology, pattern-mirrors ADR 0018)
+  callMiniMaxTextureAnalysis,
   generatePaletteId,
   generateRunId,
   readPalettes,

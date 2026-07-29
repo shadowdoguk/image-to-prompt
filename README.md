@@ -15,6 +15,7 @@ An AI-powered web application that transforms uploaded images into refined, deta
 - **Saved color palettes** — name and reuse a palette from any run. After analyze, a "Save palette…" button sits directly under the analyzed colors — click it, name the palette, and it becomes available in the Step 1 picker to override the auto-analyzed colors on the next job. Per-color **weight** (1–10) + **accent flag** + palette-level **accent cap** shape how the palette influences generated prompts: the server appends a deterministic `Color usage budget` block to the Stage 2 user message, and a distribution dashboard panel surfaces measured vs target mention counts per color (ADR 0014).
 - **Saved directives** — name, tag, version, search, share, and reuse your favorite Stage 2 directives. Below the directives textarea, a "Save directive…" button captures the current text as a named, tagged directive; a "Manage directives…" modal lets you edit, search, filter, restore prior versions, and import/export directive sets as `.i2p.json` files. Usage frequency and last-used date are tracked automatically each time you apply a directive.
 - **Focused re-analysis + curated presets for Actions / Mood / Lighting** — three new "Populate with AI" buttons (ADR 0018) sit directly beneath the `actions`, `mood`, and `lighting` fields in the analysis editor, each delegating a focused MiniMax M3 vision call to a single field via dedicated endpoints (`/api/actions`, `/api/mood`, `/api/lighting`). For `mood` and `lighting`, a curated taxonomy of preset chips is rendered beneath the button — five labeled categories (Positive / Reflective / Intense / Atmospheric / Still for mood; Natural / Directional / Quality / Stylized / Studio for lighting). Click a chip to fill the field with a one-line descriptor; edit after clicking. Chips are a zero-credit quick override; the AI button is the custom image-derived escape hatch.
+- **Focused re-analysis for Texture** — a "Populate with AI" button (Slice 1) sits directly beneath the `texture` field in the analysis editor, delegating a focused MiniMax M3 vision call to a single field via a dedicated endpoint (`/api/texture`). The shipped prompt excludes the subject, lighting, color, mood, composition, style, and medium — those are separate fields — and mandates coverage of five texture categories: surface quality (smooth / rough / pitted / polished / matte / glossy), mark-making and tool traces (brushstrokes / palette-knife slabs / pen hatching / photographic grain), material identification (oil / acrylic / watercolor / paper / canvas / photographic emulsion / 3D render), pigment interaction (impasto / glazing / scumbling / wet-in-wet bleeds / drybrush / washes / sgraffito), and tactile cues (chunky / slick / fibrous / velvety / sticky / gritty). Texture is image-specific and resists a curated chip taxonomy (mirror ADR 0018 §5); only the AI button is rendered, no chips.
 
 ## Architecture
 
@@ -330,6 +331,42 @@ prompt-attention window for one question.
   "success": true,
   "data": {
     "lighting": "Soft diffused natural daylight from a north-facing window at camera-left, falling across the subject with a warm golden cast; shadows are soft-edged and short, falling toward camera-right.",
+    "model": "MiniMax-Text-01"
+  }
+}
+```
+
+### `POST /api/texture`
+
+Re-analyse an uploaded image with a texture-only system prompt and return a
+single `texture` field. Powers the "Populate with AI" button beneath the
+texture textarea in the analysis editor (Slice 1 — App Build methodology,
+pattern-mirrors ADR 0018).
+
+Independent of the active preset. The shipped prompt excludes the subject,
+lighting, color, mood, composition, style, and medium — those are
+separate fields — and mandates coverage of five texture categories:
+surface quality (smooth / rough / pitted / polished / matte / glossy),
+mark-making and tool traces (brushstrokes / palette-knife slabs / pen
+hatching / photographic grain), material identification (oil / acrylic /
+watercolor / paper / canvas / photographic emulsion / 3D render), pigment
+interaction (impasto / glazing / scumbling / wet-in-wet bleeds /
+drybrush / washes / sgraffito), and tactile cues (chunky / slick /
+fibrous / velvety / sticky / gritty).
+
+Texture is image-specific and resists a curated chip taxonomy (mirror
+ADR 0018 §5); only the AI button is rendered, no chips. Mirrors the
+per-field pattern from `/api/actions`, `/api/mood`, and `/api/lighting`.
+
+**Request:** `multipart/form-data`
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "texture": "Heavy impasto with visible palette-knife slabs and sharp knife-edge ridges, layered alla prima with thick pigment standing proud of the canvas weave. The surface reads as chunky and ridged under the eye, with broken-color passages and canvas showing through in thinner scraped areas.",
     "model": "MiniMax-Text-01"
   }
 }

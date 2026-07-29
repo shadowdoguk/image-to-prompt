@@ -3305,6 +3305,185 @@ test('Frontend JS: mood and lighting curated presets taxonomies defined (ADR 001
     'src/app.js must call renderPresetChips("lighting", LIGHTING_PRESETS) to wire lighting chips');
 });
 
+// ─── Slice 1 — texture re-analysis (App Build methodology, pattern-mirrors ADR 0018) ─────
+//
+// Adds the 6th per-field re-analysis endpoint following the established
+// pattern (ADR 0018). No curated chips — texture is image-specific and
+// resists a chip taxonomy (mirror ADR 0018 §5 / SPEC §8).
+
+test('Slice 1: POST /api/texture endpoint is registered', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const re = /app\.(get|post|put|delete)\(['"](\/api\/[^'"]+)['"]/g;
+  const endpoints = [];
+  let m;
+  while ((m = re.exec(serverText)) !== null) endpoints.push(m[1] + ' ' + m[2]);
+  assertTrue(endpoints.some((e) => e === 'post /api/texture'),
+    `POST /api/texture must be registered; found endpoints: ${endpoints.join(', ')}`);
+});
+
+test('Slice 1: callMiniMaxTextureAnalysis helper + DEFAULT_TEXTURE_PROMPT are exported', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof server.callMiniMaxTextureAnalysis === 'function',
+    'callMiniMaxTextureAnalysis must be exported from server.js');
+  assertTrue(typeof server.DEFAULT_TEXTURE_PROMPT === 'string' && server.DEFAULT_TEXTURE_PROMPT.length > 0,
+    'DEFAULT_TEXTURE_PROMPT must be a non-empty string exported from server.js');
+});
+
+test('Slice 1: POST /api/texture uses multer single-image upload middleware', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const re = /app\.post\(['"]\/api\/texture['"]\s*,\s*upload\.single\(['"]image['"]\)/;
+  assertTrue(re.test(serverText),
+    'POST /api/texture must use upload.single("image") middleware to match the /api/camera-angle pattern');
+});
+
+test('Slice 1: texture is included in the multer-middleware per-field regression test', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  for (const path of ['/api/actions', '/api/mood', '/api/lighting', '/api/texture']) {
+    const re = new RegExp(`app\\.post\\(['"]${path.replace(/\//g, '\\/')}['"]\\s*,\\s*upload\\.single\\(['"]image['"]\\)`);
+    assertTrue(re.test(serverText),
+      `POST ${path} must use upload.single("image") middleware to match the /api/camera-angle pattern`);
+  }
+});
+
+test('Slice 1: DEFAULT_TEXTURE_PROMPT excludes adjacent-field commentary', () => {
+  const { DEFAULT_TEXTURE_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // Must forbid commentary on adjacent fields by name (mirror actions/mood/lighting).
+  assertTrue(/subject/i.test(DEFAULT_TEXTURE_PROMPT),
+    'prompt must forbid subject description');
+  assertTrue(/lighting/i.test(DEFAULT_TEXTURE_PROMPT),
+    'prompt must forbid lighting commentary');
+  assertTrue(/color/i.test(DEFAULT_TEXTURE_PROMPT),
+    'prompt must forbid color commentary');
+  assertTrue(/mood/i.test(DEFAULT_TEXTURE_PROMPT),
+    'prompt must forbid mood commentary');
+  assertTrue(/composition/i.test(DEFAULT_TEXTURE_PROMPT),
+    'prompt must forbid composition commentary');
+  assertTrue(/artistic style/i.test(DEFAULT_TEXTURE_PROMPT),
+    'prompt must forbid artistic-style commentary');
+  assertTrue(/aesthetic/i.test(DEFAULT_TEXTURE_PROMPT),
+    'prompt must forbid aesthetic commentary');
+
+  // Must list subjective aesthetic adjectives as forbidden vocabulary.
+  const forbiddenAdjectives = ['beautiful', 'striking', 'dramatic', 'elegant', 'majestic'];
+  for (const adj of forbiddenAdjectives) {
+    assertTrue(DEFAULT_TEXTURE_PROMPT.includes(adj),
+      `prompt must list "${adj}" as forbidden aesthetic vocabulary`);
+  }
+
+  // Must enforce the schema-level length floor (textarea contract — same as actions/mood).
+  assertTrue(/60/.test(DEFAULT_TEXTURE_PROMPT),
+    'prompt must enforce 60-character minimum length');
+});
+
+test('Slice 1: DEFAULT_TEXTURE_PROMPT mandates the five texture categories', () => {
+  const { DEFAULT_TEXTURE_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  const categories = [
+    /SURFACE QUALITY/i,
+    /MARK-MAKING/i,
+    /MATERIAL IDENTIFICATION/i,
+    /PIGMENT INTERACTION/i,
+    /TACTILE CUES/i
+  ];
+  for (const re of categories) {
+    assertTrue(re.test(DEFAULT_TEXTURE_PROMPT),
+      `prompt must mandate coverage of category matching: ${re}`);
+  }
+
+  // Spot-check surface-and-material vocabulary the LLM should be primed with.
+  const requiredVocab = ['impasto', 'glaze', 'scumble', 'drybrush', 'hatching'];
+  for (const term of requiredVocab) {
+    assertTrue(DEFAULT_TEXTURE_PROMPT.toLowerCase().includes(term.toLowerCase()),
+      `prompt must include surface vocabulary example: "${term}"`);
+  }
+});
+
+test('Slice 1: HTTP integration — /api/texture rejects missing file with 400', async () => {
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/texture`, { method: 'POST' });
+    assertEqual(r.status, 400, 'no file → 400');
+    assertTrue(/no image/i.test(r.body && r.body.error), 'error names missing image');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('Slice 1: HTTP integration — /api/texture with valid upload reaches LLM call', async () => {
+  const srv = await startTestServer();
+  try {
+    const fd = new FormData();
+    fd.append('image', new Blob([new Uint8Array([0xff, 0xd8, 0xff])], { type: 'image/jpeg' }), 'tiny.jpg');
+    const r = await fetchJson(`${srv.base}/api/texture`, { method: 'POST', body: fd });
+    assertTrue(r.status === 200 || r.status === 500 || r.status === 503,
+      `expected 200/500/503 (got ${r.status}) — proves multer + key-guard worked`);
+    assertTrue(r.status !== 400, 'must not 400 (route guard misbehaved)');
+  } finally {
+    await srv.close();
+    cleanupUploads();
+  }
+});
+
+test('Slice 1: Frontend CSS — .btn-populate-texture selector defined (or reuses .btn-secondary)', () => {
+  // The established pattern (ADR 0018 §3 "Why .btn-secondary, not a new visual
+  // primitive") is that the populate buttons reuse .btn-secondary styling.
+  // Either the project defines a dedicated .btn-populate-texture selector
+  // (mirroring .btn-populate-actions/.btn-populate-mood/.btn-populate-lighting)
+  // or the texture button inherits .btn-secondary alone. Both are valid; we
+  // assert the texture button className is present in src/app.js either way.
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+
+  // The button must use the established className pattern.
+  assertTrue(js.includes('btn-populate-texture'),
+    'src/app.js must apply the .btn-populate-texture class to the texture Populate button');
+
+  // If a dedicated CSS selector exists, it must mirror the established
+  // selectors. If it doesn't, .btn-secondary must be defined (which the
+  // other per-field tests already assert, but be defensive here too).
+  const hasDedicatedSelector = /\.btn-populate-texture/.test(css);
+  const hasSecondaryBase = /\.btn-secondary/.test(css);
+  assertTrue(hasDedicatedSelector || hasSecondaryBase,
+    'CSS must define either .btn-populate-texture selector or a .btn-secondary base class');
+});
+
+test('Slice 1: Frontend JS — populateTextureWithAI handler + button + state flag', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+
+  // Handler defined
+  const handlerRe = /const\s+populateTextureWithAI\s*=/;
+  assertTrue(handlerRe.test(js),
+    'src/app.js must define populateTextureWithAI handler');
+
+  // no-image guard
+  const guardRe = /populateTextureWithAI[\s\S]{0,400}?if\s*\(\s*!\s*state\.currentFile\s*\)/;
+  assertTrue(guardRe.test(js),
+    'populateTextureWithAI must guard on state.currentFile before fetching');
+
+  // POSTs to /api/texture
+  assertTrue(js.includes("'/api/texture'"),
+    'populateTextureWithAI must POST to /api/texture');
+
+  // State flag
+  assertTrue(js.includes('isPopulatingTexture'),
+    'src/app.js must track isPopulatingTexture state flag');
+
+  // Button rendering for the texture field
+  const fieldRe = /fieldName\s*===\s*['"]texture['"]/;
+  assertTrue(fieldRe.test(js),
+    'src/app.js must render the Populate-with-AI button for fieldName === "texture"');
+
+  // In-place DOM update via textarea[data-field="texture"]
+  assertTrue(/textarea\[data-field=['"]texture['"]\]/.test(js),
+    'src/app.js must query textarea[data-field="texture"] for in-place update');
+
+  // Test-hook exposure (used by browser tests)
+  // Search forward from window.__i2pTest into the test-hook block (~12 lines).
+  assertTrue(/window\.__i2pTest[\s\S]{0,500}populateTextureWithAI/.test(js),
+    'populateTextureWithAI must be exposed via window.__i2pTest for browser tests');
+});
+
 // ─── ADR 0018 — chip-click selector regression tests ─────────────────────
 //
 // Bug found: applyPresetToField used `querySelector('[data-field="..."]')` which

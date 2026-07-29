@@ -28,6 +28,7 @@
     isPopulatingActions: false,    // ADR 0018 — actions "Populate with AI" in flight
     isPopulatingMood: false,       // ADR 0018 — mood "Populate with AI" in flight
     isPopulatingLighting: false,   // ADR 0018 — lighting "Populate with AI" in flight
+    isPopulatingTexture: false,    // Slice 1 — texture "Populate with AI" in flight
     editingPresetId: null,  // null when creating new
     selectedFieldSources: {},  // { [fieldName]: 'analysis' | 'preset' } (ADR 0002)
     palettes: [],               // ADR 0006 — saved color palettes
@@ -861,6 +862,45 @@
         row.appendChild(actionWrap);
       }
 
+      // Slice 1 — "Populate with AI" button directly beneath the texture
+      // textarea. Triggers a focused, texture-only re-analysis via
+      // /api/texture and updates the texture textarea value in-place.
+      // Mirrors the actions button (ADR 0018): no preset chips because
+      // texture is image-specific and resists a curated taxonomy
+      // (mirror ADR 0018 §5 / Slice 1 SPEC §8). The button is only
+      // rendered for the texture field; other fields are unaffected.
+      if (fieldName === 'texture') {
+        const actionWrap = document.createElement('div');
+        actionWrap.className = 'field-row__action';
+
+        const populateBtn = document.createElement('button');
+        populateBtn.type = 'button';
+        populateBtn.className = 'btn-secondary btn-populate-texture';
+        populateBtn.disabled = !state.currentFile || state.isPopulatingTexture;
+        populateBtn.setAttribute('aria-label', 'Populate texture with AI texture-only re-analysis');
+
+        const btnText = document.createElement('span');
+        btnText.className = 'btn-text';
+        btnText.textContent = 'Populate with AI';
+        populateBtn.appendChild(btnText);
+
+        const btnSpinner = document.createElement('span');
+        btnSpinner.className = 'btn-spinner';
+        btnSpinner.hidden = true;
+        btnSpinner.setAttribute('aria-hidden', 'true');
+        populateBtn.appendChild(btnSpinner);
+
+        populateBtn.addEventListener('click', () => populateTextureWithAI(populateBtn));
+        actionWrap.appendChild(populateBtn);
+
+        const hint = document.createElement('span');
+        hint.className = 'field-action-hint';
+        hint.textContent = 'Re-analyses the image with a focused texture-only prompt.';
+        actionWrap.appendChild(hint);
+
+        row.appendChild(actionWrap);
+      }
+
       // ADR 0018 — "Populate with AI" button + curated mood preset chips
       // beneath the mood textarea. The button triggers a focused,
       // mood-only re-analysis via /api/mood; the chips provide a
@@ -1325,6 +1365,49 @@
       showError(`Populate failed: ${e.message}`);
     } finally {
       state.isPopulatingLighting = false;
+      btn.disabled = false;
+      setButtonLoading(btn, false, 'Populate with AI');
+    }
+  };
+
+  /**
+   * Slice 1 — "Populate with AI" handler for the `texture` field.
+   * Re-uploads the current image to `/api/texture` (texture-only
+   * system prompt) and replaces the texture textarea value in place.
+   * Mirrors `populateLightingWithAI` (ADR 0018): no-image guard,
+   * in-flight state flag, in-place DOM update on success, error
+   * surfaced via `showError` toast.
+   *
+   * Texture is image-specific and resists a curated chip taxonomy
+   * (mirror ADR 0018 §1 reasoning for `actions`); only the AI
+   * button is rendered, no chips.
+   */
+  const populateTextureWithAI = async (btn) => {
+    if (!state.currentFile) {
+      return showError('No image uploaded. Upload an image first.');
+    }
+    if (state.isPopulatingTexture) return;
+
+    state.isPopulatingTexture = true;
+    btn.disabled = true;
+    setButtonLoading(btn, true, 'Populating…');
+
+    const fd = new FormData();
+    fd.append('image', state.currentFile);
+
+    try {
+      const data = await apiCall('/api/texture', { method: 'POST', body: fd });
+      const textureTextarea = dom.analysisFields.querySelector('textarea[data-field="texture"]');
+      if (textureTextarea) {
+        textureTextarea.value = data.texture;
+        textureTextarea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      if (state.currentAnalysis) state.currentAnalysis.texture = data.texture;
+      hideError();
+    } catch (e) {
+      showError(`Populate failed: ${e.message}`);
+    } finally {
+      state.isPopulatingTexture = false;
       btn.disabled = false;
       setButtonLoading(btn, false, 'Populate with AI');
     }
@@ -4743,6 +4826,7 @@
           populateLightingWithAI,
           populateMoodWithAI,
           populateActionsWithAI,
+          populateTextureWithAI,
           populateCameraAngleWithAI,
           populateSubjectWithAI,
           MOOD_PRESETS,
