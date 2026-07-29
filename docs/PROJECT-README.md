@@ -1,31 +1,29 @@
-# PROJECT-README.md Template
+# PROJECT-README.md — image-to-prompt
 
-**Usage:** One-page project overview. Lives at `docs/PROJECT-README.md`. Edit freely as the project state changes. This is the file a stranger reads to understand what this project is, in 60 seconds.
-
----
-
-# image-to-prompt
-
-**Workflow:** existing
-**Created:** 2026-07-29
+**Workflow:** existing (continue mode)
+**Created:** 2026-07-29 (methodology bootstrapped via `goose-review`)
+**Bootstrapped from:** pre-existing project, mid-life, active development
 
 ---
 
 ## What this is (one paragraph)
 
-{{ONE_PARAGRAPH_DESCRIPTION}}
+An AI-powered web application that transforms uploaded images into refined, detailed text prompts optimized for AI image generation models (Stable Diffusion, Midjourney, DALL-E, Flux). Powered by MiniMax M3 (`MiniMax-Text-01`). Single-page vanilla-JS frontend, Express backend, JSON-file state, 44 API endpoints, 22 ADRs of design history.
 
 ## Why it exists (the problem it solves)
 
-{{PROBLEM_STATEMENT}}
+AI artists iterating on prompts need structured output, not freeform prose. Manually composing subject/style/mood/lighting/etc. into a coherent prompt is tedious and inconsistent across image generators. This app extracts a 14-field structured analysis from any uploaded image and assembles the final prompt.
 
 ## Who it's for (the primary user)
 
-{{PRIMARY_USER}}
+An AI artist using SD / Midjourney / DALL-E / Flux who:
+- Wants structured prompts (14 named fields) not prose
+- Iterates on saved palettes, directives, presets
+- Wants the same image analyzed multiple ways quickly
 
 ## The ONE thing it does well
 
-> {{ONE_THING}}
+**Upload an image, get a refined 14-field structured prompt in under 30 seconds.**
 
 If this project succeeds, this is the single capability it nails.
 
@@ -33,74 +31,84 @@ If this project succeeds, this is the single capability it nails.
 
 | Field | Value |
 |---|---|
-| Phase | Sync / Spec / Architecture / Slices (slice N of M) / Polish / Done |
-| Last completed slice | image-to-prompt |
-| Frontier | {{LIST_OF_UNBLOCKED_SLICES}} |
-| Open questions | {{COUNT}} |
-| Kill criteria status | {{0_TRIGGERED / 1_TRIGGERED — see SPEC §11}} |
-| Session count | {{N}} |
+| Phase | Phase B complete (Synthesis done). Phase C next — pick the first slice. |
+| Server | Running on http://localhost:3100 (was up at bootstrap time) |
+| Last completed slice | n/a — methodology is brand new to this project; no slices yet |
+| Frontier | empty — no slice plan yet |
+| Open questions | 3 (see Phase C proposal below) |
+| Kill criteria status | n/a — set at Gate G2 when first spec lands |
+| Session count | 1 (this is the bootstrap session) |
 
 ## Where to start reading
 
 **Cold start (60 seconds):**
 
 1. **You are here.** ✓
-2. `docs/AGENTS.md` — how to work in this project (in the repo root).
-3. `docs/CONTEXT.md` — the project glossary (sharp domain terms).
+2. `AGENTS.md` — how to work in this project (merged: project-runtime + App Build methodology).
+3. `CONTEXT.md` — the project glossary (sharp domain terms, 20K of real content).
 4. `docs/SESSION-STATE.md` — current state, frontier, mood.
-5. If new ADRs since you last looked, read those in `docs/DECISIONS.md`.
+5. If new ADRs since you last looked, read those in `docs/adr/NNNN-*.md`.
 
 **Cold start (5 minutes):**
 
-6. `docs/SPEC.md` — what we're building.
-7. `docs/ARCHITECTURE.md` — how the pieces fit.
-8. `docs/PRE-MORTEM.md` — top risks + pre-commitments.
-9. `docs/BACKLOG.md` — parked / stretch work.
-10. The most recent `docs/CODE-REVIEW-{{N}}-{{SLICE}}.md` — to see how prior slices were reviewed.
+6. `docs/RECON.md` — the inventory.
+7. `docs/SYNTHESIS.md` — the mental model.
+8. `docs/PRINCIPLES.md` — methodology reference (read-only).
+9. The most recent 2–3 ADRs in `docs/adr/` (recent design context).
+10. `README.md` (34K — feature overview).
 
-## In scope
+## In scope (current project, as observed)
 
-- {{IN_SCOPE_1}}
-- {{IN_SCOPE_2}}
+- Express server + vanilla-JS frontend (no build step)
+- 14-field structured prompt analysis via MiniMax M3 vision
+- Saved palettes, directives, presets (with versioning + import/export)
+- Per-field AI buttons for actions / mood / lighting (ADR 0018)
+- Subject + Stage 2 prompt templates (editable, persistable)
+- Cross-browser dnd + chip interaction tests
 
-## Out of scope
+## Out of scope (current project, as observed)
 
-- {{OUT_OF_SCOPE_1}}
-- {{OUT_OF_SCOPE_2}}
+- Social login / multi-user accounts
+- Database (state is JSON files in `data/`)
+- Mobile app
+- Build step / bundler
+- TypeScript
+- CI / CD pipeline
+- Server.js split into multiple files (would be a wide refactor)
 
 ## Stack (one-line per layer)
 
 | Layer | Choice |
 |---|---|
-| Language | {{LANG}} |
-| Framework | {{FRAMEWORK}} |
-| Database | {{DB}} |
-| ORM | {{ORM}} |
-| Auth | {{AUTH}} |
-| Hosting | {{HOST}} |
-| Testing | {{TEST}} |
+| Language | JavaScript (CommonJS) |
+| Runtime | Node.js >= 18 |
+| Framework | Express 4.21 |
+| View layer | Vanilla HTML/CSS/JS (no build) |
+| File upload | Multer 1.4.5-lts |
+| Drag-and-drop | SortableJS 1.15 |
+| External API | MiniMax M3 (`MiniMax-Text-01`) |
+| Config | dotenv 16 |
+| Tests | Bespoke Node scripts (no framework) |
 
 ## Slices (current plan)
 
-| # | Slice | Blocked by | Status |
-|---|---|---|---|
-| 1 | image-to-prompt | — | ✅ / 🚧 / ⏸ |
-| 2 | image-to-prompt | Slice 1 | ✅ / 🚧 / ⏸ |
-| 3 | image-to-prompt | Slices 1, 2 | ✅ / 🚧 / ⏸ |
-
-See `docs/SPEC.md` §9 for the full plan with min/target/stretch + acceptance tests + user-story mappings.
+**No slice plan yet.** The methodology just landed; the next step (Phase C) is to pick what to work on next.
 
 ## Pointers
 
 - **Methodology reference:** `docs/PRINCIPLES.md` (read-only)
 - **Existing-project discipline:** `docs/EXISTING-PROJECT-WORKFLOW.md`
 - **Background on the methodology:** `docs/COMPARISON-MATTPOCOCK.md`
-- **Worked example (reference):** `~/.goose/methodology/examples/reading-list/README.md` (in your method home, not this repo)
+- **Project inventory:** `docs/RECON.md`
+- **Project mental model:** `docs/SYNTHESIS.md`
+- **Project glossary:** `CONTEXT.md` (= `docs/CONTEXT.md` via symlink)
+- **ADRs:** `docs/adr/NNNN-*.md` (22 and counting; this project's home for design decisions)
+- **Project-runtime agent workflows:** `docs/agents/*` (session-init, triage, drift-prevention)
+- **Worked example (methodology in motion):** `~/.goose/methodology/examples/reading-list/README.md`
 
 ## Change Log
 
 | Date | Change | Reason |
 |---|---|---|
-| 2026-07-29 | Initial overview | — |
-
-(Edit freely. This file is not append-only.)
+| 2026-07-29 | Initial overview | `goose-review` bootstrap |
+| 2026-07-29 | Methodology reconciled with project: CONTEXT.md symlinked, DECISIONS.md removed, AGENTS.md merged | Phase A reconciliation per user decision |
