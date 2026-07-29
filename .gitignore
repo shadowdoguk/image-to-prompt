@@ -19,3 +19,7 @@ data/palette_runs.json
 data/palettes.json
 data/stage2_overrides.json
 data/subject_prompt.json
+# Agent runtime / scratch space — pre-existing untracked dirs.
+# Treated like .opencode/ above. Local-only; not part of the codebase.
+.superpowers/
+.tmp/
