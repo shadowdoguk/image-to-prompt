@@ -66,13 +66,9 @@ Empty. Work-blocked: pick Slice 2 in `docs/SPEC.md` (Phase C, Gate G2).
 
 ## 5. Open questions
 
-**Q1 — What's next?**
+**Q1 (resolved 2026-07-29, on user's behalf):** What's next?
 
-- **(a)** Slice 2 in continue mode — next per-field AI button (mirror Slice 1's pattern for one of: `style`, `composition`, `era`, `artistic_medium`, `depth_of_field`, `contrast`).
-- **(b)** Slice 2 in heal mode — name a specific bug/pain.
-- **(c)** Slice 2 as the wide-refactor split of `server.js` (per `docs/SYNTHESIS.md` §9 risk #3 — only fire when a feature slice needs to touch ≥3 feature groups).
-- **(d)** Run Gate G5 (POLISH-AUDIT.md) for Slice 1's contribution to the *project*-level polish audit (accessibility, visual, prose, copy, performance).
-- **(e)** Stop here. Slice 1 done; come back later.
+- **Choice: (d) — Run Gate G5 (POLISH-AUDIT.md).** Reasoning: Slice 1 added user-visible UI (button + handler + in-place DOM update + aria-label) and shipped ~95 lines of new server.js code, but the polish audit has not been run for this slice. Gate G5 is the natural "close-out for what just shipped" gate per the methodology's 5-gate structure. Running it before declaring Slice 1 truly complete catches the polish debt (a11y, prose, visual, copy, performance) while it's still fresh — not deferred to a later "we should probably clean up" pass. Slice 2 (next per-field AI button or wide refactor) can be picked in the next session once polish lands.
 
 **Q2 (resolved):** Smoke test scope for Slice 1. Answer: ran 3-image demo (oil/digital/photograph) per pre-mortem commitment #3 — all 3 returned useful output, kill criterion #3 not triggered. (3 MiniMax credits spent; uploads/ stayed at 0.)
 
