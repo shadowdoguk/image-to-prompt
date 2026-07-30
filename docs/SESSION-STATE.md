@@ -9,12 +9,12 @@
 | Field | Value |
 |---|---|
 | **Workflow** | Existing (continue mode) |
-| **Current phase** | **DONE — Slice 1 fully shipped through Gate G5** |
-| **Last completed slice** | Slice 1 — texture Populate-with-AI button (commit `0542dbf`, ship-verdict PASS at Gate G5, commit `d42561b`) |
-| **Currently in** | Awaiting Slice 2 selection (Phase C re-entry) or follow-up work triage |
-| **Open questions** | 0 — see §5 |
+| **Current phase** | **🚢 SHIPPED — Slice 1 fully through Gate G5 (sign-off: approve / ship)** |
+| **Last completed slice** | Slice 1 — texture Populate-with-AI button (commit `0542dbf`, ship-verdict PASS at Gate G5, commit `d42561b`, session close-out `f9bfdd1`) |
+| **Currently in** | Awaiting Q3 decision: polish-triage slice vs Slice 2 (Phase C re-entry) |
+| **Open questions** | 1 — see §5 (Q3) |
 | **Kill criteria status** | 0 of 3 triggered (server.js size: 6675 lines, well under 290KB kill criterion from SPEC §11) |
-| **Next action** | Triage the 14 Gate G5 polish findings into follow-up work, OR pick Slice 2 |
+| **Next action** | Q3 prompt → pick polish-triage slice or Slice 2 (continue mode) |
 
 ---
 
