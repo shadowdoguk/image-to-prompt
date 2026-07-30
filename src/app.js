@@ -258,8 +258,9 @@
 
   // ─── Utilities ─────────────────────────────────────────────────────────
 
-  const showError = (msg) => {
+  const showError = (msg, opts = {}) => {
     dom.errorMessage.textContent = msg;
+    dom.errorToast.classList.toggle('is-warning', opts.severity === 'warning');
     dom.errorToast.hidden = false;
     setTimeout(() => { dom.errorToast.hidden = true; }, 6000);
   };
@@ -4442,7 +4443,14 @@
       });
     } catch (e) {
       console.warn('Could not start chat session:', e.message);
-      showError(`Chat console unavailable: ${e.message}`);
+      // Soft-state: chat session cap is a guardrail, not a fatal error.
+      // Tone the toast down so the user reads it as actionable, not broken.
+      const isChatLimit = /chat session limit reached/i.test(e.message);
+      if (isChatLimit) {
+        showError(`Chat history is full (200 sessions). Delete older conversations from the picker above to start a new one.`, { severity: 'warning' });
+      } else {
+        showError(`Chat console unavailable: ${e.message}`);
+      }
       return;
     }
 

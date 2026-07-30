@@ -782,6 +782,15 @@ body {
 
 .error-toast span { color: var(--error); font-size: 0.9rem; }
 
+/* ─── Warning toast (soft-state, e.g. chat session cap) ──────────────── */
+
+.error-toast.is-warning {
+  background: var(--warning-bg, rgba(234, 179, 8, 0.12));
+  border-color: var(--warning, #eab308);
+}
+
+.error-toast.is-warning span { color: var(--warning, #eab308); }
+
 /* ─── Modal ───────────────────────────────────────────────────────────── */
 
 .modal {

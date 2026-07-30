@@ -134,3 +134,57 @@ Bundle these into one housekeeping slice (~30 lines code, ~2 hours) or triage in
 - Append any new ADRs.
 - Update the Mood line.
 - If a wide refactor is in progress (PRINCIPLES.md §6.3), note where the Expand / Migrate batches / Contract sequence sits.
+---
+
+## Session #2 — 2026-07-30 (chat-console bug, issue #20)
+
+**Workflow:** existing (continue mode) — off-slice bug fix per `docs/agents/bug-workflow.md`.
+
+### Symptom
+After Stage 2 returns, chat console never activates and a red toast reads:
+"Chat console unavailable: Chat session limit reached (200). Delete older sessions before creating new ones."
+
+### Root cause (two defects, not one)
+1. **Data state** — `data/chat_sessions.json` had organically grown to 200 entries; the `MAX_CHAT_SESSIONS_TOTAL` guardrail at `server.js:6235` is correct in principle but blocked all new sessions.
+2. **UX framing** — the error was routed through `showError(...)` at `src/app.js:4445` and rendered with red-error styling (`src/styles.css:766`), treating a soft maintenance guardrail as a fatal failure. Recovery requires a picker that lives inside the very chat section hidden because activation failed — the user was trapped.
+
+### Fix landed (issue #20 immediate-track, all green)
+- `data/chat_sessions.json`: 200 → 50 newest (sorted by `updated_at` desc, fallback `created_at`; atomic write via temp+rename, mirrors `writeChatSessions`). File size 1,983,327 → 514,866 bytes. Backup retained at `data/chat_sessions.json.bak.20260730-120651`.
+- `src/styles.css`: added `.error-toast.is-warning` + `.error-toast.is-warning span` (yellow modifier; uses `--warning`/`--warning-bg` tokens, falls back to amber).
+- `src/app.js` `showError`: now takes `(msg, opts = {})`; toggles `.is-warning` on the toast when `opts.severity === 'warning'`. Default behaviour unchanged for all other call sites (54 existing callers).
+- `src/app.js:4445` chat-activation catch block: detects `/chat session limit reached/i` and routes to a rewording ("Chat history is full (200 sessions). Delete older conversations from the picker above to start a new one.") with `severity: 'warning'`. Non-cap errors still flow through the existing red-error path.
+
+### Regression test
+`scripts/smoke/chat-limit-guardrail-smoke.js` (new, 191 lines). Locks:
+1. POST `/api/chat/sessions` at cap returns 409 with the canonical error string + `(200)` count.
+2. POST `/api/chat/sessions` below cap returns 201 with `id` starting `chat_`.
+3. Frontend regex literal `/chat session limit reached/i` present in `src/app.js`.
+4. `severity: 'warning'` route present in `src/app.js`.
+5. `.error-toast.is-warning` modifier present in `src/styles.css`.
+
+**Result:** 10/10 PASS. 319/319 test suite still green. `session-init.js` V-checks still 10/10 (only the pre-existing ADR-0001 length-validation noise remains).
+
+### Long-term contract decision (deferred, tracked)
+**Open question Q4:** when a user with 200 saved conversations generates a 201st prompt, what should happen?
+- (a) Auto-evict oldest N (best UX; contract change → ADR per PRINCIPLES.md §6.3).
+- (b) Block generate with an explicit notice.
+- (c) Silently disable chat, surface in picker.
+- (d) Raise the cap.
+- (e) Leave as-is, only improve the picker.
+
+Tracked in issue #20. **Not** resolved by this fix.
+
+### Files changed (uncommitted at end of session)
+- `src/app.js` (+17 / −2)
+- `src/styles.css` (+9)
+- `data/chat_sessions.json` (data-only, 200 → 50)
+- `scripts/smoke/chat-limit-guardrail-smoke.js` (new, 191 lines)
+- `data/chat_sessions.json.bak.20260730-120651` (new, retained for user reference)
+- `docs/SESSION-STATE.md` (this entry)
+
+### Issue
+https://github.com/shadowdoguk/image-to-prompt/issues/20 — label `bug`. Immediate-track acceptance criteria all checked; long-term-track open.
+
+### Mood / risk flag
+> Bug shipped (immediate track). Chat console activates again on the next Stage 2 run; the cap is now framed as a maintenance state, not a fatal error. **No new architectural commitments** — the contract decision for "what should happen at the cap" is explicitly deferred to issue #20 so it doesn't get silently buried. Kill criteria unchanged: `server.js` 6675 lines (well under 290KB); test suite 319/319; `session-init` 10/10; backup retained on disk for user inspection.
+
