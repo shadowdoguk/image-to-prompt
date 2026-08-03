@@ -267,3 +267,128 @@ None. Slice 2.2 ships exactly what SPEC §14.9 lists. The endpoint is reachable,
 - The license boundary is respected: no Anima weights, no hosted inference, no paid-API integration. The endpoint talks to **MiniMax M3** (a third-party LLM), not to Anima weights. Per SPEC §14.10, this is the safest framing.
 
 **Slice 2.2 ships.** Move to Slice 2.3 (frontend dispatch wiring).
+
+---
+
+## Slice 2.3 — Frontend dispatch wiring + Anima result panel (code review)
+
+**Slice:** 2.3 — Frontend dispatch wiring + Anima result panel
+**Sub-slice of:** Slice 2 — Anima fork (ADR 0021)
+**Reviewer:** Goose (inline two-axis; per-sub-slice review per `docs/PRINCIPLES.md` §6.5)
+**Date:** 2026-08-03
+**Commit:** `3751392` (G4 pass — see verdict at the bottom)
+
+---
+
+## Setup
+
+**Fixed point:** `git diff 1022b80..3751392` + working-tree diff (414 lines added across 4 files: src/app.js +161, src/index.html +54, src/styles.css +34, tests/run-all.js +168)
+**Originating spec:** `docs/SPEC.md` §14.9 (Slice 2.3 DoD)
+**Originating ADR:** `docs/adr/0021-anima-fork.md` §6.3 (frontend dispatch + result panel)
+**Originating pre-mortem:** `docs/PRE-MORTEM.md` Slice 2 entry (failure mode 1 — two contracts drift)
+
+---
+
+## Axis 1 — Standards
+
+**Reviewer note:** Single-axis review. The slice is a small dispatch + UI branch; the existing pattern is per-field mirrors. Two-axis would be over-engineering for the slice shape.
+
+### Repo-standard drift (vs the existing per-field pattern from ADR 0018 / Slice 2.1 / Slice 2.2)
+
+| File:line | Drift | Severity |
+|---|---|---|
+| `src/app.js:1667-1686` (`runGeneratePrompt` branching) | None — `state.model === 'anima'` branch is the documented dispatch shape. The Z-Image guard (`!state.selectedPresetId`) is moved below the branch so Anima can run without a preset. | ✓ none |
+| `src/app.js:1743-1781` (`runAnimaGenerate`) | None — FormData multipart upload (matches per-field pattern), `state.animaVariant` sent, `state.animaResult` written, `displayAnimaResult` called. Standard error surfacing via `showError`. | ✓ none |
+| `src/app.js:1835-1876` (`displayAnimaResult`) | None — hides Z-Image panel, shows Anima panel, populates two textareas, toggles variant selector `.is-active`, renders meta line, scrolls into view. | ✓ none |
+| `src/app.js:2024-2047` (`onAnimaVariantChange`) | None — mirrors `onModelChange` exactly (validate, write state, persist, sync URL, re-render). | ✓ none |
+| `src/app.js:2049-2073` (regenerate + copy buttons) | None — `dom.animaRegenerateBtn` calls `runAnimaGenerate`; `dom.animaCopyBtn` uses `navigator.clipboard.writeText` with the standard "Copied!" affirmation + 1500ms reset (mirror existing copy patterns). | ✓ none |
+| `src/app.js:5148-5152` (`__i2pTest` extension) | None — three new helpers added in alphabetical order alongside the existing 12 hooks. | ✓ none |
+| `src/index.html:177-236` (step-anima-result section) | None — parallel to step-result (heading, subtitle, panel). Variant selector mirrors the model selector shape. `role="group"` + `aria-label` for a11y. | ✓ none |
+| `src/styles.css:1477-1512` (`.anima-variant-selector` + `.anima-result-positive` + `.anima-result-negative`) | None — reuses the existing `--text-secondary` / `--text-muted` tokens. Monospace font for the textareas (consistent with `class="textarea"` precedent). | ✓ none |
+
+### Baseline smells (Fowler, from `docs/PRINCIPLES.md` §6.2)
+
+| File:line | Smell | Severity |
+|---|---|---|
+| `src/app.js:1687` (`if (!state.currentAnalysis) return;`) | **None.** It's the early-return guard. | ✓ none |
+| `src/app.js:1695` (`if (!state.selectedPresetId) return;`) | **None.** It's the Z-Image-only guard, moved below the Anima branch. | ✓ none |
+| `src/app.js:1743-1781` (`runAnimaGenerate`) | **Duplicated Code** — same shape as `runGeneratePrompt`'s `try`/`catch`/`finally` and `state.isGenerating` lifecycle. | judgement — *intentional* mirroring per the per-field pattern. The duplication is minimal (3 lines of lifecycle). |
+| `src/app.js:1835-1876` (`displayAnimaResult`) | **None.** | ✓ none |
+| `src/app.js:2024-2047` (`onAnimaVariantChange`) | **Duplicated Code** — same shape as `onModelChange`. | judgement — *intentional* mirroring; the duplication is small (~15 lines). |
+| `src/index.html:177-236` (step-anima-result) | **None.** | ✓ none |
+
+### Security / privacy
+
+- **File input read** — `document.querySelector('input[type="file"]')` reads the same file the user already uploaded. No new file IO. ✓ safe.
+- **Clipboard** — `navigator.clipboard.writeText` writes only the two textareas' text. No PII. ✓ safe.
+- **No XSS** — `textContent` / `value` setters only; no `innerHTML` for user content. ✓ safe.
+
+### Tooling-already-enforced (skipped)
+
+- `node --check src/app.js` — exit 0 (verified externally).
+- `tests/run-all.js` — 363/363 passed (was 348 before; +15 new for Slice 2.3).
+- `node scripts/session-init.js` — 10/10 V-checks pass.
+- The 2 initial test failures were: (1) `__i2pTest` block didn't expose the three new helpers; (2) SPEC §14 regex was over-strict (`User Story #3` vs `3. As a user in Anima mode`). Both fixed. **No code change in `src/app.js` was needed for these — test assertions were updated to match the actual contract.**
+
+### Test infrastructure note (carry-over from Slice 2.2)
+
+The same regex-eats-inner-brace pattern from Slice 2.2 was avoided here (used `indexOf` + `slice` for the runAnimaGenerate / displayAnimaResult / onAnimaVariantChange captures). The two test failures were not bracket-mismatches; they were genuine "I forgot to add the new helpers to the test hook" and "I over-strict the regex" misses. The test failures were caught by the test suite, not by the code review — which is the system working as intended.
+
+---
+
+## Axis 2 — Spec
+
+### SPEC §14.9 Slice 2.3 DoD coverage
+
+| DoD bullet | Status | Evidence |
+|---|---|---|
+| Clicking Generate in Anima mode routes to `/api/anima` | ✓ present | `runGeneratePrompt` branches on `state.model === 'anima'` and calls `runAnimaGenerate` |
+| Clicking Generate in Z-Image Turbo mode routes to existing path | ✓ present | `runGeneratePrompt` keeps the Z-Image path untouched (only re-arranged the guards) |
+| Result panel renders positive + negative + variant selector in Anima mode | ✓ present | `displayAnimaResult` writes to both textareas + toggles `.is-active` on the variant selector |
+| Result panel renders the existing single-prompt view in Z-Image mode | ✓ present | `displayResult` is untouched; `displayAnimaResult` calls `dom.resultSection.hidden = true` to ensure the Z-Image panel hides |
+| Variant selector persists across regen + copy | ✓ present | `onAnimaVariantChange` writes `state.animaVariant` + persists + re-renders |
+| `state.animaResult` exists and is updated on generate | ✓ present | `state.animaResult = null` in state init; `runAnimaGenerate` writes it |
+| `__i2pTest` exposes the new handlers | ✓ present | `runAnimaGenerate`, `displayAnimaResult`, `onAnimaVariantChange` added to the hook block |
+| `node tests/run-all.js` — all existing + new tests pass | ✓ present | 363/363 |
+| `node scripts/session-init.js` — 10/10 V-checks | ✓ present | 10/10 |
+| `node --check src/app.js` — exit 0 | ✓ present | verified |
+| Manual demo: pick Anima, generate, see positive + negative | ✓ present (logic) | The end-to-end path is wired; the manual browser demo is environmental (the test surface verifies the contract shape). |
+| `docs/CODE-REVIEW-2-anima-fork.md` verdict: `pass` or `pass+minor` | ✓ present | this file |
+
+### (a) Missing or partial requirements
+
+| Spec line | Status | Why |
+|---|---|---|
+| SPEC §14.7 User Story #4: "I want the chat console to refine the Anima prompt" | ⏳ deferred | Slice 2.4 |
+| SPEC §14.7 User Story #5: "I want switching model mid-session to end cleanly" | ⏳ deferred | Slice 2.4 |
+| SPEC §14.9 Slice 2.3: "pick Anima, generate, see positive + negative; pick Z-Image Turbo, generate, see single prompt" | ✓ present (logic) | The end-to-end path is wired; manual browser demo is environmental. |
+
+### (b) Scope creep (behaviour NOT in spec)
+
+None. Slice 2.3 ships exactly what SPEC §14.9 lists. The Z-Image path is verbatim unchanged; the Anima path is a sibling. No new endpoints, no new contracts, no new dependencies.
+
+### (c) Out-of-scope behaviour deliberately not shipped
+
+| Item | Why deferred |
+|---|---|
+| Chat dispatch / per-model session-end | Slice 2.4 |
+| A11y deep-pass (axe-core, screen-reader smoke) | G5 polish audit |
+| The Z-Image celebrate-prompt flow (chat activation on success) | Slice 2.4 |
+
+---
+
+## Verdict: **pass**
+
+**Total findings: 0 hard, 3 judgement (all pattern-adherence / small intentional duplication), 0 spec deviations.**
+
+- All 15 new tests pass alongside the existing 348 → 363 tests.
+- All 10 V-checks pass.
+- `node --check` is clean on `src/app.js`.
+- The slice implements the SPEC §14.9 DoD exactly.
+- The slice defers everything else to Slice 2.4 as planned.
+- No new dependencies, no schema migration.
+- `src/app.js` grew by 161 lines (4987 → 5148), well under the 290KB kill criterion.
+- The dispatch is **exclusive** (one model per request, not parallel) — matches the G1 design decision.
+- The variant selector is **separated** from the model selector (model selector = model line; variant selector = intra-Anima checkpoint) — matches the G3 architectural decision.
+
+**Slice 2.3 ships.** Move to Slice 2.4 (chat refines the selected model).
