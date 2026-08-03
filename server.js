@@ -2999,6 +2999,212 @@ The "texture" value MUST comprehensively address every one of the following five
 - Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.`;
 
 /**
+ * Slice 2.2 — ADR 0021 — Anima prompt contract.
+ *
+ * The Anima contract is the prompt-generation sibling to the Z-Image
+ * pastel-focal-glow contract. Where the Z-Image contract emits a single
+ * flowing-paragraph prose prompt, the Anima contract emits TWO comma-
+ * separated tag-style prompts — a positive prompt and a negative prompt
+ * — tuned for an Anima checkpoint (Base / Aesthetic / Turbo).
+ *
+ * Contract source of truth: docs/ANIMA-PROMPTING-MANUAL.md §5, §7, §14.
+ *
+ * The contract is parametrised by the "variant" argument:
+ *   - "base"       — full prefix, score_7, score_1/2/3 in negative
+ *   - "aesthetic"  — full prefix without score_7, drop score_1/2/3 in negative
+ *   - "turbo"      — same as "base" (prompt is the same; CFG/steps differ)
+ *
+ * The system prompt is the same for all variants; the LLM is told how
+ * to handle each variant inside the prompt itself. This keeps the
+ * shape all three variants stable.
+ *
+ * TWO output fields (positive + negative) — different from the per-field
+ * pattern (which has a single output). The schema enforces:
+ *   - positive: minLength 60 (the manual's full-character example is ~50 tags)
+ *   - negative: minLength 20 (the recommended negative is ~10 items)
+ */
+const DEFAULT_ANIMA_PROMPT = `You are an expert prompt engineer for the Anima text-to-image model (CircleStone Labs, 2B parameters, Qwen-3 text encoder, anime / illustration specialist). You transform visual analysis into the Anima tag-style prompt contract.
+
+You respond with a SINGLE JSON object with exactly two keys: "positive" and "negative". Both values are comma-separated tag lists (no prose paragraphs in either side).
+
+# POSITIVE PROMPT RULES
+
+- Use LOWERCASE tags. Use COMMAS to separate tags. Use SPACES (not underscores) inside tags. The ONLY tags that keep underscores are "score_1" through "score_9" and "1girl" / "1boy" / "1other" and "2girls" / "3girls" counters.
+- Tag order: [quality/meta/year/safety] [count] [character] [series] [artist] [general tags]. Within each section, tag order is arbitrary. The section order is NOT arbitrary.
+- The "artist" section tags MUST be prefixed with "@" (e.g. "@big chungus"). The effect is weak without the @.
+- Quality tags: lead with "masterpiece, best quality, score_7, safe, " for Base / Turbo. For Aesthetic, drop "score_7" but keep "masterpiece, best quality, safe, ".
+- Time-period tags: either "year 2025" / "year 2024" or period (newest / recent / mid / early / old).
+- Meta tags: "highres", "absurdres", "anime screenshot", etc.
+- Safety tags: "safe" / "sensitive" / "nsfw" / "explicit" — exactly one.
+- Multi-character: each character gets a cluster of name + hair + eyes + outfit. Name the character, then describe their appearance.
+- If the image is NON-ANIME (e.g. an oil painting, a digital render, a photograph), start the positive prompt with a dataset tag on line 1: "ye-pop" (LAION-POP non-anime artistic) or "deviantart" (DeviantArt non-anime artistic). Line 2 is the alt-text (ye-pop) or title (deviantart). Line 3+ is the caption.
+- For non-anime: do NOT use anime-specific tags (1girl, score_*, masterpiece). Use generic style vocabulary (oil painting, digital render, abstract, etc.) and the dataset tag.
+
+# NEGATIVE PROMPT RULES
+
+- Lowercase, comma-separated, same as positive.
+- Base / Turbo: "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration"
+- Aesthetic: drop "score_1, score_2, score_3" — keep "worst quality, low quality, artist name, blurry, jpeg artifacts, chromatic aberration"
+- The "artist name" entry suppresses bleed from other artists when "@artist" is in the positive.
+
+# VARIANT RULES
+
+- VARIANT = "base": full prefix "masterpiece, best quality, score_7, safe, " then content. Negative uses score_1/2/3.
+- VARIANT = "aesthetic": drop "score_7" from positive; drop "score_1, score_2, score_3" from negative. The model is fine-tuned on high-quality images so the score tags push it into slop.
+- VARIANT = "turbo": same as "base" — the prompt is identical; what differs is the sampling config (CFG 1, 8-12 steps). The score tags still help under the turbo CFG.
+
+# FORBIDDEN VOCABULARY (across both positive and negative)
+
+NEVER use: "beautiful", "striking", "vibrant", "dramatic", "elegant", "majestic", "imposing", "ethereal", "luminous", "bold".
+NEVER make meta-references to the medium — do not say "the painting", "the photograph", "the image", "the artwork", "the illustration".
+NEVER ask for photorealism — Anima is anime / illustration / art focused.
+NEVER ask for multi-word text rendering — single words sometimes work, short phrases rarely, long sentences won't render.
+
+# LENGTH AND STRUCTURE
+
+- "positive": minimum 60 characters (typical: 50-200 tags).
+- "negative": minimum 20 characters (typical: 8-15 items).
+- Both sides are tag lists. NEVER write prose paragraphs.
+- Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.
+
+# STYLE (when the subject is non-anime)
+
+- Use natural-language style vocabulary for non-anime subjects ("oil painting", "digital render", "abstract", "impressionist", "muted palette", "soft brushwork", "gallery lighting").
+- The dataset tag is on line 1, then the alt-text / title on line 2, then the caption on line 3+.
+
+# STYLE (when the subject is anime)
+
+- Use Danbooru-style tags. Default to single-character scenes unless the image clearly shows multiple.
+- Use the recommended positive prefix on all variants (with the variant-specific score_7 / score_1/2/3 differences).
+- The character can be a known Danbooru IP (e.g. "oomuro sakurako", "yuru yuri") or an original character described in tags.
+- The artist tag, if used, must be "@" prefixed.`;
+
+/**
+ * Slice 2.2 — callMiniMaxAnimaAnalysis.
+ * Returns { positive, negative } (the Anima contract, two-output shape).
+ *
+ * Mirrors the per-field pattern (callMiniMaxTextureAnalysis et al):
+ *  - single-attempt LLM call
+ *  - 60-second AbortController timeout
+ *  - schema builder inline, length floors enforced
+ *  - 429 / 401-403 / 5xx / empty / invalid-JSON / missing-field / AbortError paths
+ *  - multer file cleanup handled by the route wrapper
+ *
+ * The variant argument is one of "base" / "aesthetic" / "turbo". It
+ * controls how the LLM shapes the prompt — see DEFAULT_ANIMA_PROMPT
+ * "VARIANT RULES" section.
+ */
+const callMiniMaxAnimaAnalysis = async (imageDataUri, variant) => {
+  if (!minimaxConfigured) {
+    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+  }
+
+  const allowedVariants = ['base', 'aesthetic', 'turbo'];
+  const variantPrompt = allowedVariants.includes(variant) ? variant : 'base';
+
+  const systemPrompt = DEFAULT_ANIMA_PROMPT;
+  const userPrompt = `Analyse the image and respond with the JSON object containing only "positive" and "negative" — both lowercase comma-separated tag lists for the Anima model. VARIANT = ${variantPrompt}.`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
+  try {
+    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: MINIMAX_MODEL,
+        max_tokens: 1000,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: userPrompt },
+              { type: 'image_url', image_url: { url: imageDataUri } }
+            ]
+          }
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'anima_prompt_contract',
+            strict: true,
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                positive: { type: 'string', minLength: 60 },
+                negative: { type: 'string', minLength: 20 }
+              },
+              required: ['positive', 'negative']
+            }
+          }
+        }
+      })
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`MiniMax M3 anima analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+
+    let parsed;
+    const trimmed = content.trim();
+
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e1) {
+      const codeBlock = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (codeBlock) {
+        try { parsed = JSON.parse(codeBlock[1]); } catch (e2) { /* fall through */ }
+      }
+      if (!parsed) {
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace > firstBrace) {
+          try { parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)); }
+          catch (e3) { throw new Error(`Anima analysis response was not valid JSON: ${e3.message}`); }
+        } else {
+          throw new Error('Anima analysis response contained no JSON object.');
+        }
+      }
+    }
+
+    const schemaName = 'anima_prompt_contract';
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed[schemaName] && typeof parsed[schemaName] === 'object') {
+      parsed = parsed[schemaName];
+    }
+
+    if (typeof parsed?.positive !== 'string' || parsed.positive.length < 60) {
+      throw new Error('Anima analysis response did not contain a "positive" string of at least 60 characters.');
+    }
+    if (typeof parsed?.negative !== 'string' || parsed.negative.length < 20) {
+      throw new Error('Anima analysis response did not contain a "negative" string of at least 20 characters.');
+    }
+
+    return { positive: parsed.positive, negative: parsed.negative };
+  } catch (error) {
+    clearTimeout(timeout);
+    if (error.name === 'AbortError') throw new Error('Anima analysis request timed out after 60 seconds.');
+    throw error;
+  }
+};
+
+/**
  * Stage 1.A — dedicated actions-only re-analysis.
  * Runs ONLY for `POST /api/actions` (ADR 0018). Independent of the active
  * preset. Mirrors `callMiniMaxCameraAngleAnalysis` (ADR 0008): single-
@@ -4308,6 +4514,64 @@ app.post('/api/texture', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         texture,
+        model: MINIMAX_MODEL
+      }
+    });
+  } catch (error) {
+    if (filePath && fs.existsSync(filePath)) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+    }
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Routes — Anima prompt contract (Slice 2.2 — ADR 0021)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /api/anima` — re-analyse the uploaded image with the Anima
+ * prompt contract and return { positive, negative, variant }.
+ *
+ * Independent of the active preset (the Anima contract is its own
+ * document, set by ADR 0021). Powers the Anima branch of the
+ * pre-Generate model picker that landed in Slice 2.1.
+ *
+ * Variant comes from the multipart field "variant" (one of
+ * "base" / "aesthetic" / "turbo"). Default is "base" — the README
+ * recommendation: "LoRAs should be trained using this version."
+ *
+ * Response envelope mirrors the per-field pattern (ADR 0018):
+ * `{ success, data: { positive, negative, variant, model } }`.
+ * The two-output shape (positive + negative) is the Anima contract.
+ */
+app.post('/api/anima', upload.single('image'), async (req, res) => {
+  let filePath = null;
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
+    filePath = req.file.path;
+
+    if (!minimaxConfigured) {
+      fs.unlinkSync(filePath);
+      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+    }
+
+    const variant = (req.body && typeof req.body.variant === 'string') ? req.body.variant : 'base';
+    const allowedVariants = ['base', 'aesthetic', 'turbo'];
+    const variantPrompt = allowedVariants.includes(variant) ? variant : 'base';
+
+    const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
+    const result = await callMiniMaxAnimaAnalysis(imageDataUri, variantPrompt);
+
+    fs.unlinkSync(filePath);
+    filePath = null;
+
+    res.json({
+      success: true,
+      data: {
+        positive: result.positive,
+        negative: result.negative,
+        variant: variantPrompt,
         model: MINIMAX_MODEL
       }
     });
@@ -6538,6 +6802,8 @@ module.exports = {
   DEFAULT_LIGHTING_PROMPT,
   // Slice 1 — texture re-analysis (App Build methodology, pattern-mirrors ADR 0018)
   DEFAULT_TEXTURE_PROMPT,
+  // Slice 2.2 — ADR 0021 — Anima prompt contract (two-output: positive + negative)
+  DEFAULT_ANIMA_PROMPT,
   MAX_PALETTE_NAME_LENGTH,
   MAX_PALETTE_COLORS,
   HEX_COLOR_REGEX,
@@ -6557,6 +6823,8 @@ module.exports = {
   callMiniMaxLightingAnalysis,
   // Slice 1 — texture re-analysis helper (App Build methodology, pattern-mirrors ADR 0018)
   callMiniMaxTextureAnalysis,
+  // Slice 2.2 — ADR 0021 — Anima prompt contract helper (two-output)
+  callMiniMaxAnimaAnalysis,
   generatePaletteId,
   generateRunId,
   readPalettes,

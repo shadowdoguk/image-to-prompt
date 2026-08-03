@@ -372,6 +372,53 @@ per-field pattern from `/api/actions`, `/api/mood`, and `/api/lighting`.
 }
 ```
 
+### `POST /api/anima` (Slice 2.2 — ADR 0021)
+
+Re-analyse an uploaded image with the **Anima prompt contract** and return
+a `{ positive, negative }` pair. Powers the Anima branch of the
+pre-Generate model picker shipped in Slice 2.1.
+
+The Anima contract is the sibling to the Z-Image pastel-focal-glow
+contract; where the Z-Image contract emits a single flowing-paragraph
+prompts, the Anima contract emits two comma-separated tag-style prompts
+optimised for the Anima model line (Base / Aesthetic / Turbo by
+circlestone-labs). The contract source of truth is
+[`docs/ANIMA-PROMPTING-MANUAL.md`](./docs/ANIMA-PROMPTING-MANUAL.md).
+
+**Variant** comes from the multipart field `variant` (one of `base` /
+`aesthetic` / `turbo`). Default is `base` — the README's recommendation
+for maximum flexibility and LoRA training. The system prompt instructs
+the LLM to follow the variant rules internally; the helper does not
+swap the prompt template per variant.
+
+**Request:** `multipart/form-data`
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+- `variant` _(optional)_ — `base` (default) / `aesthetic` / `turbo`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "positive": "masterpiece, best quality, score_7, safe, 1girl, oomuro sakurako, yuru yuri, @nnn yryr, smile, brown hair, hat, solo, looking at viewer",
+    "negative": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
+    "variant": "base",
+    "model": "MiniMax-Text-01"
+  }
+}
+```
+
+The positive prompt is a comma-separated tag list (lowercase, spaces
+inside tags, `@`-prefix on artist tags, recommended Anima prefix at
+the top). The negative prompt is the recommended Anima negative
+vocabulary. Both follow the rules documented in `docs/ANIMA-PROMPTING-MANUAL.md` §5–§7.
+
+Mirrors the per-field pattern from `/api/actions`, `/api/mood`,
+`/api/lighting`, and `/api/texture` — same multer upload, same
+60-second timeout, same JSON Schema with length floors, same error
+sanitisation. The two-output shape (positive + negative) is the
+Anima contract.
+
 ### `GET /api/subject-prompt`
 
 Return the active subject-extraction system prompt plus the shipped default

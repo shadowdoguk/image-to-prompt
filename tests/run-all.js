@@ -2866,6 +2866,216 @@ test('Frontend JS: populateCameraAngleWithAI handler + camera_angle button + no-
     'src/app.js must track isPopulatingCameraAngle state flag for the in-flight guard');
 });
 
+// ─── Slice 2.2 — ADR 0021 — Anima backend contract ────────────────────
+
+test('Slice 2.2: POST /api/anima endpoint is registered (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const re = /app\.(get|post|put|delete)\(['"](\/api\/[^'"]+)['"]/g;
+  const endpoints = [];
+  let m;
+  while ((m = re.exec(serverText)) !== null) endpoints.push(m[1] + ' ' + m[2]);
+  assertTrue(endpoints.some((e) => e === 'post /api/anima'),
+    `POST /api/anima must be registered; found endpoints: ${endpoints.join(', ')}`);
+});
+
+test('Slice 2.2: callMiniMaxAnimaAnalysis helper + DEFAULT_ANIMA_PROMPT are exported (ADR 0021)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof server.callMiniMaxAnimaAnalysis === 'function',
+    'callMiniMaxAnimaAnalysis must be exported from server.js');
+  assertTrue(typeof server.DEFAULT_ANIMA_PROMPT === 'string' && server.DEFAULT_ANIMA_PROMPT.length > 0,
+    'DEFAULT_ANIMA_PROMPT must be a non-empty string exported from server.js');
+});
+
+test('Slice 2.2: POST /api/anima uses multer single-image upload middleware (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const re = /app\.post\(['"]\/api\/anima['"]\s*,\s*upload\.single\(['"]image['"]\)/;
+  assertTrue(re.test(serverText),
+    'POST /api/anima must use upload.single("image") middleware to match the per-field pattern');
+});
+
+test('Slice 2.2: POST /api/anima routes to callMiniMaxAnimaAnalysis (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The route block is short. Find the comment block that immediately precedes
+  // `app.post('/api/anima', ...)` and read forward until the next route.
+  const routeStart = serverText.indexOf("app.post('/api/anima'");
+  assertTrue(routeStart > 0, 'POST /api/anima route must be registered');
+  const routeEnd = serverText.indexOf("\n", serverText.indexOf('// ─', routeStart));
+  const body = serverText.slice(routeStart, routeEnd > 0 ? routeEnd : routeStart + 4000);
+  assertTrue(/callMiniMaxAnimaAnalysis\(/.test(body),
+    'POST /api/anima must call callMiniMaxAnimaAnalysis');
+  assertTrue(/variant/.test(body),
+    'POST /api/anima must pass the variant through to the helper');
+  assertTrue(/positive:/.test(body),
+    'POST /api/anima response envelope must include positive');
+  assertTrue(/negative:/.test(body),
+    'POST /api/anima response envelope must include negative');
+});
+
+test('Slice 2.2: DEFAULT_ANIMA_PROMPT mandates the two-output positive + negative shape (ADR 0021)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = server.DEFAULT_ANIMA_PROMPT;
+  assertTrue(/positive/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must mention positive');
+  assertTrue(/negative/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must mention negative');
+  // The prompt must mandate that both fields are non-empty strings.
+  assertTrue(/JSON object with exactly two keys/i.test(prompt),
+    'DEFAULT_ANIMA_PROMPT must instruct the LLM to emit a JSON object with exactly two keys');
+});
+
+test('Slice 2.2: DEFAULT_ANIMA_PROMPT excludes forbidden aesthetic vocabulary (ADR 0021)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = server.DEFAULT_ANIMA_PROMPT;
+  // Mirror the per-field test: forbidden vocabulary should be in the
+  // FORBIDDEN list, not in the positive rules.
+  for (const term of ['beautiful', 'striking', 'vibrant', 'dramatic', 'elegant', 'majestic', 'imposing', 'ethereal', 'luminous', 'bold']) {
+    // The term must appear in the FORBIDDEN list (so the prompt forbids it).
+    // It must NOT appear in the POSITIVE example block.
+    const forbiddenSection = prompt.slice(prompt.indexOf('# FORBIDDEN VOCABULARY'));
+    assertTrue(forbiddenSection.includes(term),
+      `DEFAULT_ANIMA_PROMPT FORBIDDEN section must mention "${term}"`);
+  }
+});
+
+test('Slice 2.2: DEFAULT_ANIMA_PROMPT enforces lowercase tags + comma-separated structure (ADR 0021)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = server.DEFAULT_ANIMA_PROMPT;
+  assertTrue(/LOWERCASE/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must mandate lowercase tags');
+  assertTrue(/COMMA/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must mandate comma-separated tags');
+  assertTrue(/SPACES \(not underscores\)/i.test(prompt),
+    'DEFAULT_ANIMA_PROMPT must mandate spaces not underscores (with score_* as the exception)');
+});
+
+test('Slice 2.2: DEFAULT_ANIMA_PROMPT enforces @-prefix on artist tags (ADR 0021)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = server.DEFAULT_ANIMA_PROMPT;
+  assertTrue(/@/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must mention the @ symbol');
+  assertTrue(/artist.*@/i.test(prompt) || /@.*artist/i.test(prompt),
+    'DEFAULT_ANIMA_PROMPT must connect @ to artist tags');
+  assertTrue(/weak/i.test(prompt) || /must/i.test(prompt),
+    'DEFAULT_ANIMA_PROMPT must warn that the effect is weak without @');
+});
+
+test('Slice 2.2: DEFAULT_ANIMA_PROMPT has variant rules for base / aesthetic / turbo (ADR 0021)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = server.DEFAULT_ANIMA_PROMPT;
+  assertTrue(/# VARIANT RULES/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must have a VARIANT RULES section');
+  assertTrue(/VARIANT = "base"/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must describe the Base variant');
+  assertTrue(/VARIANT = "aesthetic"/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must describe the Aesthetic variant');
+  assertTrue(/VARIANT = "turbo"/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must describe the Turbo variant');
+});
+
+test('Slice 2.2: DEFAULT_ANIMA_PROMPT has non-anime routing rules (ADR 0021)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = server.DEFAULT_ANIMA_PROMPT;
+  assertTrue(/ye-pop/.test(prompt), 'DEFAULT_ANIMA_PROMPT must mention ye-pop dataset tag');
+  assertTrue(/deviantart/.test(prompt), 'DEFAULT_ANIMA_PROMPT must mention deviantart dataset tag');
+  assertTrue(/NON-ANIME/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must have a non-anime routing section');
+});
+
+test('Slice 2.2: DEFAULT_ANIMA_PROMPT prohibits photorealism + long text rendering (ADR 0021)', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = server.DEFAULT_ANIMA_PROMPT;
+  assertTrue(/photorealism/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must prohibit photorealism');
+  assertTrue(/text rendering/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must address text rendering');
+});
+
+test('Slice 2.2: callMiniMaxAnimaAnalysis schema enforces positive + negative length floors (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The helper must declare the schema with both fields' minLengths.
+  const helperMatch = serverText.match(/const callMiniMaxAnimaAnalysis = async[\s\S]{0,5000}?\};/);
+  assertTrue(helperMatch !== null, 'callMiniMaxAnimaAnalysis must be defined');
+  const body = helperMatch[0];
+  assertTrue(/positive: \{ type: 'string', minLength: 60 \}/.test(body),
+    'Schema must declare positive with minLength 60');
+  assertTrue(/negative: \{ type: 'string', minLength: 20 \}/.test(body),
+    'Schema must declare negative with minLength 20');
+  assertTrue(/required: \['positive', 'negative'\]/.test(body),
+    'Schema must require both positive and negative');
+  assertTrue(/additionalProperties: false/.test(body),
+    'Schema must set additionalProperties: false');
+});
+
+test('Slice 2.2: callMiniMaxAnimaAnalysis has 60-second AbortController timeout (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // Find the helper by name and read forward until the next top-level
+  // declaration (const / function / app.post). The regex-based capture
+  // ate an inner `}` because the schema body uses `}` freely.
+  const helperStart = serverText.indexOf('const callMiniMaxAnimaAnalysis = async');
+  assertTrue(helperStart > 0, 'callMiniMaxAnimaAnalysis must be defined');
+  // Cap the read at 6000 chars; the helper is ~190 lines.
+  const slice = serverText.slice(helperStart, helperStart + 6000);
+  assertTrue(/new AbortController\(\)/.test(slice),
+    'callMiniMaxAnimaAnalysis must use an AbortController');
+  assertTrue(/setTimeout\(\(\) => controller\.abort\(\), 60000\)/.test(slice),
+    'callMiniMaxAnimaAnalysis must have a 60000ms timeout');
+  assertTrue(/AbortError/.test(slice),
+    'callMiniMaxAnimaAnalysis must handle AbortError');
+});
+
+test('Slice 2.2: callMiniMaxAnimaAnalysis has the standard 429 / 401-403 / 5xx error paths (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const helperMatch = serverText.match(/const callMiniMaxAnimaAnalysis = async[\s\S]{0,5000}?\};/);
+  const body = helperMatch[0];
+  assertTrue(/429/.test(body), 'callMiniMaxAnimaAnalysis must handle 429');
+  assertTrue(/401/.test(body) && /403/.test(body), 'callMiniMaxAnimaAnalysis must handle 401-403');
+  assertTrue(/response\.ok/.test(body), 'callMiniMaxAnimaAnalysis must handle non-ok responses');
+  assertTrue(/empty response/i.test(body), 'callMiniMaxAnimaAnalysis must handle empty responses');
+});
+
+test('Slice 2.2: POST /api/anima has the standard multer cleanup pattern (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const routeStart = serverText.indexOf("app.post('/api/anima'");
+  assertTrue(routeStart > 0, 'POST /api/anima route must be registered');
+  const slice = serverText.slice(routeStart, routeStart + 4000);
+  // Multer upload cleanup: fs.unlinkSync in success + silent catch in error.
+  assertTrue(/fs\.unlinkSync\(filePath\)/.test(slice),
+    'POST /api/anima must call fs.unlinkSync on success');
+  assertTrue(/try \{ fs\.unlinkSync\(filePath\); \} catch \(_\) \{\}/.test(slice),
+    'POST /api/anima must have a silent catch on cleanup in the error path');
+  assertTrue(/filePath = null/.test(slice),
+    'POST /api/anima must set filePath = null after success');
+  assertTrue(/400.*No image file/i.test(slice),
+    'POST /api/anima must return 400 on missing file');
+  assertTrue(/503.*API key not configured/i.test(slice),
+    'POST /api/anima must return 503 when API key is missing');
+  assertTrue(/500/.test(slice),
+    'POST /api/anima must return 500 on errors');
+});
+
+test('Slice 2.2: POST /api/anima validates the variant (base / aesthetic / turbo) (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const routeStart = serverText.indexOf("app.post('/api/anima'");
+  assertTrue(routeStart > 0, 'POST /api/anima route must be registered');
+  const slice = serverText.slice(routeStart, routeStart + 4000);
+  assertTrue(/allowedVariants/.test(slice),
+    'POST /api/anima must declare allowedVariants');
+  assertTrue(/'base'/.test(slice) && /'aesthetic'/.test(slice) && /'turbo'/.test(slice),
+    'POST /api/anima must declare base / aesthetic / turbo as the allowed variants');
+  assertTrue(/allowedVariants\.includes/.test(slice),
+    'POST /api/anima must validate the variant via allowedVariants.includes');
+});
+
+test('Slice 2.2: Anima contract source of truth is docs/ANIMA-PROMPTING-MANUAL.md (ADR 0021)', () => {
+  const manual = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/ANIMA-PROMPTING-MANUAL.md'), 'utf8');
+  assertTrue(/ANIMA/i.test(manual), 'Anima manual must exist');
+  assertTrue(/positive/.test(manual) && /negative/.test(manual),
+    'Anima manual must document positive + negative');
+  assertTrue(/score_7/.test(manual), 'Anima manual must document score_7 prefix');
+  assertTrue(/@/.test(manual), 'Anima manual must document @ artist prefix');
+  assertTrue(/ye-pop/.test(manual) && /deviantart/.test(manual),
+    'Anima manual must document non-anime dataset tags');
+});
+
+test('Slice 2.2: SPEC §14 + ADR 0021 are in place (pre-conditions for the slice)', () => {
+  const spec = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/SPEC.md'), 'utf8');
+  const adr = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/adr/0021-anima-fork.md'), 'utf8');
+  assertTrue(/## 14\. Slice 2 — Anima contract/.test(spec), 'SPEC §14 present');
+  assertTrue(/POST \/api\/anima/.test(spec), 'SPEC §14 names /api/anima');
+  assertTrue(/callMiniMaxAnimaAnalysis/.test(spec), 'SPEC §14 names callMiniMaxAnimaAnalysis');
+  assertTrue(/DEFAULT_ANIMA_PROMPT/.test(spec), 'SPEC §14 names DEFAULT_ANIMA_PROMPT');
+  assertTrue(/## Status/.test(adr), 'ADR 0021 has a Status section');
+  assertTrue(/Accepted/.test(adr), 'ADR 0021 status is Accepted');
+});
+
 // ─── ADR 0018 — actions / mood / lighting re-analysis + curated presets
 
 test('POST /api/actions endpoint is registered (ADR 0018)', () => {
