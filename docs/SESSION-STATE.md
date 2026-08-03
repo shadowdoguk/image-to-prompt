@@ -348,3 +348,40 @@ Slice 2 (Anima fork) is fully through Gate G5. Verdict: **PASS** (0 blocking, 8 
 ### Mood / risk flag (final)
 
 > Session #4 closed the Anima fork. The methodology held: a spec-first design (G1–G3 → 5 sub-slices → 4 per-sub-slice reviews + 1 aggregate → G5 polish audit) cleared every gate with passing verdicts and zero blocking findings. The mid-slice regression (branching the wrong function in Slice 2.4) was caught by the test suite on the first run — a load-bearing test for the methodology. The project is now two-slice-deep (Slice 1 fully shipped pre-session; Slice 2 fully shipped this session). 373/373 tests green; 10/10 V-checks; syntax OK on both `server.js` and `src/app.js`. `server.js` at 7104 lines (well under the 290KB kill criterion). `docs/ANIMA-PROMPTING-MANUAL.md` (902 lines) is the implicit goose-review of the Anima model/repo. **The full project shipped.** Cold-start recovery: read the "How to use this file" section above, then the Session #4 entry, then `docs/CODE-REVIEW-2-anima-fork.md` §Slice 2.5 for the slice-2 aggregate.
+
+---
+
+## Bug fix follow-up — `552f9a3`
+
+**Workflow:** existing (continue mode) — off-slice UX bug fix per `docs/agents/bug-workflow.md`.
+
+### Symptom
+After Slice 2 shipped, a user reported (with screenshot): clicking "Anima" in the new model picker, then clicking "Generate prompt" surfaced the error toast **"No image uploaded. Upload an image first."** — even though the same session had just generated a Z-Image prompt successfully. The Z-Image prose prompt from the prior run remained visible behind the toast.
+
+### Root cause
+`runAnimaGenerate` (Slice 2.3) read the file via:
+```js
+const fileInput = document.querySelector('input[type="file"]');
+const file = fileInput && fileInput.files && fileInput.files[0];
+```
+This generic selector picks the *first* `<input type="file">` on the page. Drag-drop uploads set `state.currentFile` directly via JS (`src/app.js:546, handleFile`) but do **not** populate the hidden file input's `.files` property. So `fileInput.files[0]` was `undefined` and the no-image guard fired.
+
+The Z-Image path was unaffected because it reads the analysis JSON (`state.currentAnalysis`), not the file. The bug was Anima-specific.
+
+### Fix
+`runAnimaGenerate` now reads `state.currentFile` directly — the canonical source used by all 6 per-field Populate-with-AI buttons (`subject`, `camera_angle`, `actions`, `mood`, `lighting`, `texture`) and by the analyze guard. One-block edit. No ADR required (one-line UX fix, not a wide refactor).
+
+### Regression test
+`tests/run-all.js`: +1 test that asserts (a) `runAnimaGenerate` does NOT use the generic DOM query, (b) it references `state.currentFile`, (c) the no-image error message is preserved, (d) the FormData append shape is preserved.
+
+**Result:** 374/374 PASS (was 373; +1 regression). `node --check src/app.js` exit 0. `session-init.js` 10/10 V-checks.
+
+### File changed
+- `src/app.js` (+13 / −4)
+- `tests/run-all.js` (+22)
+
+### Lesson
+The bug was a one-block pattern violation: `runAnimaGenerate` reached outside the canonical state object for a piece of state that already lived in `state.currentFile`. The Z-Image path works *because* it reads from state; the Anima path broke because it didn't. The fix restores the pattern. **Next slice that adds a backend endpoint with a file upload should default to `state.currentFile` — no `document.querySelector` for files.**
+
+### Mood / risk flag (post-bug-fix)
+> Bug shipped (UX track, no architectural commitment). 374/374 tests green; 10/10 V-checks; syntax OK. No new architectural debt. The fix is a one-block edit, no ADR required. **The Anima fork is now bug-free for the drag-drop path.** Cold-start recovery is unchanged — read the Session #4 entry + the Slice 2.5 aggregate verdict + this bug-fix follow-up entry.
