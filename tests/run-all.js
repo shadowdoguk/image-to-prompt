@@ -3379,6 +3379,28 @@ test('Slice 2.4: activateAnimaChatForResult defined and uses Anima envelope (ADR
     'activateAnimaChatForResult must set state.chatSessionId');
 });
 
+test('Bug fix (Anima drag-drop upload): runAnimaGenerate uses state.currentFile, not document.querySelector (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const runAnimaGenerate = async');
+  assertTrue(fnStart > 0, 'runAnimaGenerate must be defined');
+  const fnBody = js.slice(fnStart, fnStart + 4000);
+  // The bug: runAnimaGenerate used document.querySelector('input[type="file"]')
+  // which returned an empty FileList for drag-drop uploads (they set
+  // state.currentFile but don't populate the hidden <input>'s .files
+  // property). The fix: use state.currentFile directly — same as all
+  // 6 per-field Populate-with-AI buttons.
+  assertTrue(!/document\.querySelector\(['"]input\[type="file"\]['"]\)/.test(fnBody),
+    'runAnimaGenerate must NOT use document.querySelector(\'input[type="file"]\') — use state.currentFile instead');
+  assertTrue(/state\.currentFile/.test(fnBody),
+    'runAnimaGenerate must reference state.currentFile');
+  assertTrue(/No image uploaded/.test(fnBody),
+    'runAnimaGenerate must show the no-image error when state.currentFile is null');
+  // Sanity: FormData append shape preserved (image + variant fields).
+  assertTrue(/new FormData/.test(fnBody), 'runAnimaGenerate must still construct a FormData');
+  assertTrue(/fd\.append\('image'/.test(fnBody), 'runAnimaGenerate must still append image');
+  assertTrue(/fd\.append\('variant'/.test(fnBody), 'runAnimaGenerate must still append variant');
+});
+
 test('Slice 2.4: __i2pTest exposes activateAnimaChatForResult (ADR 0021)', () => {
   const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
   const hookBlock = js.slice(js.indexOf('window.__i2pTest = {'));

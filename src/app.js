@@ -1743,10 +1743,15 @@
   const runAnimaGenerate = async () => {
     try {
       // The Anima endpoint takes the uploaded image (multipart) + variant.
-      // We re-collect the image from the file picker; the server doesn't
-      // need the analysis here (the prompt contract is self-contained).
-      const fileInput = document.querySelector('input[type="file"]');
-      const file = fileInput && fileInput.files && fileInput.files[0];
+      // Use state.currentFile (set by handleFile / clearFile — the same
+      // canonical source used by all 6 per-field Populate-with-AI
+      // buttons and by the analyze guard). The earlier generic DOM
+      // query was the bug: drag-drop uploads set state.currentFile
+      // directly but don't populate the hidden file input's files
+      // list, so the Anima path saw an empty file list and surfaced a
+      // confusing "No image uploaded" toast even though the user had
+      // uploaded. Use the canonical state instead.
+      const file = state.currentFile;
       if (!file) {
         showError('No image uploaded. Upload an image first.');
         return;
