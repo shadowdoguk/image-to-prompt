@@ -53,7 +53,8 @@
     // exposes a variant selector (Base / Aesthetic / Turbo). Both fields
     // are persisted (localStorage) and mirrored in the URL (?model=...&variant=...).
     model: 'zimage_turbo',       // 'zimage_turbo' | 'anima'
-    animaVariant: 'base'         // 'base' | 'aesthetic' | 'turbo' (only meaningful when model === 'anima')
+    animaVariant: 'base',        // 'base' | 'aesthetic' | 'turbo' (only meaningful when model === 'anima')
+    animaResult: null            // Slice 2.3 — { positive, negative, variant, model } | null. Parallel to state.finalPrompt but for the Anima contract.
   };
 
   // ADR 0019 Issue #15 — count words in the current prompt and toggle the
@@ -109,6 +110,14 @@
     tokenReminderBanner: $('token-reminder-banner'),
     copyBtn: $('copy-btn'),
     regenerateBtn: $('regenerate-btn'),
+    // Slice 2.3 — ADR 0021 — Anima result panel
+    animaResultSection: $('step-anima-result'),
+    animaResultPositive: $('anima-result-positive'),
+    animaResultNegative: $('anima-result-negative'),
+    animaResultMetaInfo: $('anima-result-meta-info'),
+    animaVariantSelector: $('anima-variant-selector'),
+    animaCopyBtn: $('anima-copy-btn'),
+    animaRegenerateBtn: $('anima-regenerate-btn'),
 
     errorToast: $('error-toast'),
     errorMessage: $('error-message'),
@@ -1665,11 +1674,22 @@
   };
 
   const runGeneratePrompt = async () => {
-    if (!state.currentAnalysis || !state.selectedPresetId) return;
+    if (!state.currentAnalysis) return;
     state.isGenerating = true;
     setButtonLoading(dom.generatePromptBtn, true, 'Generating…');
     updateButtons();
 
+    // Slice 2.3 — ADR 0021 — model-fork dispatch. The pre-Generate
+    // picker chose which contract runs. Z-Image Turbo keeps the existing
+    // path (presetId required, /api/generate-prompt). Anima has its own
+    // path (no presetId required; /api/anima; emits a positive + negative
+    // pair instead of a single prompt).
+    if (state.model === 'anima') {
+      await runAnimaGenerate();
+      return;
+    }
+
+    if (!state.selectedPresetId) return;
     const analysis = collectAnalysisFromEditor();
     const directives = dom.directivesInput.value.trim();
 
@@ -1707,6 +1727,44 @@
       hideError();
     } catch (e) {
       showError(`Generation failed: ${e.message}`);
+    } finally {
+      state.isGenerating = false;
+      setButtonLoading(dom.generatePromptBtn, false, 'Generate prompt');
+      updateButtons();
+    }
+  };
+
+  /**
+   * Slice 2.3 — ADR 0021 — Anima-mode generate path.
+   * Calls /api/anima with the current image + variant, stores the result
+   * in state.animaResult, and renders via displayAnimaResult. The
+   * Z-Image path is untouched; this is a sibling.
+   */
+  const runAnimaGenerate = async () => {
+    try {
+      // The Anima endpoint takes the uploaded image (multipart) + variant.
+      // We re-collect the image from the file picker; the server doesn't
+      // need the analysis here (the prompt contract is self-contained).
+      const fileInput = document.querySelector('input[type="file"]');
+      const file = fileInput && fileInput.files && fileInput.files[0];
+      if (!file) {
+        showError('No image uploaded. Upload an image first.');
+        return;
+      }
+      const fd = new FormData();
+      fd.append('image', file);
+      fd.append('variant', state.animaVariant);
+      const data = await apiCall('/api/anima', { method: 'POST', body: fd });
+      state.animaResult = {
+        positive: data.positive,
+        negative: data.negative,
+        variant: data.variant,
+        model: data.model
+      };
+      displayAnimaResult(state.animaResult);
+      hideError();
+    } catch (e) {
+      showError(`Anima generation failed: ${e.message}`);
     } finally {
       state.isGenerating = false;
       setButtonLoading(dom.generatePromptBtn, false, 'Generate prompt');
@@ -1766,6 +1824,47 @@
         console.warn('Failed to activate chat console:', e.message);
       });
     }
+  };
+
+  /**
+   * Slice 2.3 — ADR 0021 — Anima-mode result render.
+   * Parallel to displayResult, but shapes the result panel for the
+   * Anima contract (positive + negative + variant selector). The
+   * Z-Image path is untouched.
+   */
+  const displayAnimaResult = (data) => {
+    if (!dom.animaResultSection) return;
+    // Hide the Z-Image result panel, show the Anima panel.
+    if (dom.resultSection) dom.resultSection.hidden = true;
+    dom.animaResultSection.hidden = false;
+
+    // Populate the two textareas.
+    if (dom.animaResultPositive) dom.animaResultPositive.value = data.positive || '';
+    if (dom.animaResultNegative) dom.animaResultNegative.value = data.negative || '';
+
+    // Active variant indicator.
+    if (dom.animaVariantSelector) {
+      const buttons = dom.animaVariantSelector.querySelectorAll('[data-anima-variant]');
+      buttons.forEach((btn) => {
+        const isActive = btn.dataset.animaVariant === (data.variant || state.animaVariant);
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+    }
+
+    // Meta line.
+    if (dom.animaResultMetaInfo) {
+      const meta = [
+        `Variant: ${data.variant || state.animaVariant}`,
+        `Model: ${data.model || 'MiniMax-Text-01'}`,
+        `Positive: ${(data.positive || '').length} chars`,
+        `Negative: ${(data.negative || '').length} chars`
+      ];
+      dom.animaResultMetaInfo.textContent = meta.join(' • ');
+    }
+
+    // Scroll the user into the result panel.
+    dom.animaResultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   const setButtonLoading = (btn, loading, text) => {
@@ -1915,6 +2014,58 @@
       const btn = e.target.closest('[data-model]');
       if (!btn) return;
       onModelChange(btn.dataset.model);
+    });
+  }
+
+  // ─── Slide 2.3 — Anima variant selector (in the result panel) ──────
+  // Sibling to the model selector. Event delegation via closest. The
+  // change only writes to state.animaVariant — the actual prompt
+  // generation happens on the next Generate click (no auto-regenerate).
+  const onAnimaVariantChange = (nextVariant) => {
+    const validated = validateVariant(nextVariant);
+    if (validated === state.animaVariant) return;
+    state.animaVariant = validated;
+    writeStateToLocalStorage();
+    syncStateToURL();
+    // Re-render the variant selector (toggles .is-active).
+    if (dom.animaVariantSelector) {
+      const buttons = dom.animaVariantSelector.querySelectorAll('[data-anima-variant]');
+      buttons.forEach((btn) => {
+        const isActive = btn.dataset.animaVariant === state.animaVariant;
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+    }
+  };
+
+  if (dom.animaVariantSelector) {
+    dom.animaVariantSelector.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-anima-variant]');
+      if (!btn) return;
+      onAnimaVariantChange(btn.dataset.animaVariant);
+    });
+  }
+
+  // Slice 2.3 — Anima regenerate button re-uses the same dispatch path.
+  if (dom.animaRegenerateBtn) {
+    dom.animaRegenerateBtn.addEventListener('click', runAnimaGenerate);
+  }
+
+  // Slice 2.3 — Anima copy button copies both positive + negative as
+  // a single block so the user can paste either side independently.
+  if (dom.animaCopyBtn) {
+    dom.animaCopyBtn.addEventListener('click', async () => {
+      const pos = dom.animaResultPositive ? dom.animaResultPositive.value : '';
+      const neg = dom.animaResultNegative ? dom.animaResultNegative.value : '';
+      const text = `Positive:\n${pos}\n\nNegative:\n${neg}\n`;
+      try {
+        await navigator.clipboard.writeText(text);
+        const orig = dom.animaCopyBtn.textContent;
+        dom.animaCopyBtn.textContent = 'Copied!';
+        setTimeout(() => { dom.animaCopyBtn.textContent = orig; }, 1500);
+      } catch (e) {
+        showError(`Copy failed: ${e.message}`);
+      }
     });
   }
 
@@ -4994,7 +5145,11 @@
           syncStateToURL,
           restoreStateFromUrlOrStorage,
           renderModelSelector,
-          onModelChange
+          onModelChange,
+          // Slice 2.3 — ADR 0021 — Anima dispatch + result surface
+          runAnimaGenerate,
+          displayAnimaResult,
+          onAnimaVariantChange
         };
       }
     } catch (_) {

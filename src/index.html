@@ -176,6 +176,60 @@
       </div>
     </section>
 
+    <!-- ─── Step 4b: Anima result (Slice 2.3 — ADR 0021) ───────────── -->
+    <section class="step" id="step-anima-result" aria-label="Step 4b: Anima prompt result" hidden>
+      <div class="step-inner">
+        <header class="step-header">
+          <h2 class="step-title">Anima prompt result</h2>
+          <p class="step-subtitle">
+            Comma-separated tag-list prompts for Anima checkpoints (Base / Aesthetic / Turbo).
+            Copy the positive and negative into ComfyUI or any of the 7 author-endorsed platforms.
+          </p>
+        </header>
+
+        <div class="anima-variant-selector" id="anima-variant-selector" role="group" aria-label="Anima checkpoint variant">
+          <span class="label anima-variant-selector-label">
+            Variant
+            <span class="label-hint">— which Anima checkpoint the prompt is optimised for</span>
+          </span>
+          <button type="button" class="btn-toggle" data-anima-variant="base" aria-pressed="true">Base</button>
+          <button type="button" class="btn-toggle" data-anima-variant="aesthetic" aria-pressed="false">Aesthetic</button>
+          <button type="button" class="btn-toggle" data-anima-variant="turbo" aria-pressed="false">Turbo</button>
+        </div>
+
+        <label for="anima-result-positive" class="label">
+          Positive prompt
+          <span class="label-hint">— comma-separated tag list, lowercase, @-prefixed artist tags</span>
+        </label>
+        <textarea
+          id="anima-result-positive"
+          class="textarea anima-result-positive"
+          rows="6"
+          aria-label="Anima positive prompt"
+        ></textarea>
+
+        <label for="anima-result-negative" class="label">
+          Negative prompt
+          <span class="label-hint">— recommended Anima negative vocabulary</span>
+        </label>
+        <textarea
+          id="anima-result-negative"
+          class="textarea anima-result-negative"
+          rows="3"
+          aria-label="Anima negative prompt"
+        ></textarea>
+
+        <div class="result-meta">
+          <span id="anima-result-meta-info" class="result-meta-info"></span>
+        </div>
+
+        <div class="step-actions">
+          <button type="button" id="anima-copy-btn" class="btn-copy">Copy both to clipboard</button>
+          <button type="button" id="anima-regenerate-btn" class="btn-secondary">Regenerate</button>
+        </div>
+      </div>
+    </section>
+
     <!-- ─── Step 5: Chat console (ADR 0011) ─────────────────────────── -->
     <section class="step" id="step-chat" aria-label="Step 5: Refine via chat" hidden>
       <header class="step-header">

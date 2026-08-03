@@ -1486,6 +1486,40 @@ body {
   outline-offset: 2px;
 }
 
+/* Slice 2.3 — ADR 0021 — Anima result panel.
+   Two textareas (positive + negative), a variant selector that mirrors
+   the model-selector button group, and a meta line. The existing
+   .result-prompt / .result-meta-info / .step-actions styles are reused. */
+.anima-variant-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+  flex-wrap: wrap;
+}
+.anima-variant-selector-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+.anima-variant-selector-label .label-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.anima-result-positive,
+.anima-result-negative {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 4rem;
+  margin-bottom: 0.75rem;
+}
+
 /* ADR 0019 Issue #15 — 1024-token reminder banner in the chat panel.
    Hidden by default; surfaced when the current prompt hits
    STAGE2_HARD_MAX_WORDS (750 words). Yellow-tinted to mirror the

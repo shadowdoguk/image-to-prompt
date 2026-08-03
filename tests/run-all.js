@@ -3076,6 +3076,174 @@ test('Slice 2.2: SPEC §14 + ADR 0021 are in place (pre-conditions for the slice
   assertTrue(/Accepted/.test(adr), 'ADR 0021 status is Accepted');
 });
 
+// ─── Slice 2.3 — ADR 0021 — frontend dispatch wiring + result panel ───
+
+test('Slice 2.3: state.animaResult exists in app state (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/animaResult: null/.test(js), 'state.animaResult must exist with default null');
+});
+
+test('Slice 2.3: runGeneratePrompt branches on state.model === anima (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/state\.model === 'anima'/.test(js),
+    'runGeneratePrompt must branch on state.model === anima');
+  assertTrue(/runAnimaGenerate/.test(js),
+    'runGeneratePrompt must call runAnimaGenerate on the anima branch');
+});
+
+test('Slice 2.3: runAnimaGenerate calls /api/anima with the file + variant (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Find runAnimaGenerate body.
+  const start = js.indexOf('const runAnimaGenerate = async');
+  assertTrue(start > 0, 'runAnimaGenerate must be defined');
+  const body = js.slice(start, start + 3000);
+  assertTrue(/\/api\/anima/.test(body),
+    'runAnimaGenerate must call /api/anima');
+  assertTrue(/state\.animaVariant/.test(body),
+    'runAnimaGenerate must pass state.animaVariant');
+  assertTrue(/FormData/.test(body),
+    'runAnimaGenerate must use FormData for multipart upload');
+  assertTrue(/image/.test(body),
+    'runAnimaGenerate must include the image field');
+  assertTrue(/state\.animaResult = \{/.test(body),
+    'runAnimaGenerate must write state.animaResult');
+  assertTrue(/displayAnimaResult/.test(body),
+    'runAnimaGenerate must call displayAnimaResult');
+});
+
+test('Slice 2.3: runAnimaGenerate has the no-image guard (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const start = js.indexOf('const runAnimaGenerate = async');
+  const body = js.slice(start, start + 3000);
+  assertTrue(/No image uploaded/.test(body),
+    'runAnimaGenerate must showError on no image');
+  assertTrue(/showError/.test(body),
+    'runAnimaGenerate must surface errors via the existing showError');
+});
+
+test('Slice 2.3: displayAnimaResult writes to both textareas + meta (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const start = js.indexOf('const displayAnimaResult = ');
+  assertTrue(start > 0, 'displayAnimaResult must be defined');
+  const body = js.slice(start, start + 3000);
+  assertTrue(/dom\.animaResultPositive/.test(body),
+    'displayAnimaResult must populate animaResultPositive');
+  assertTrue(/dom\.animaResultNegative/.test(body),
+    'displayAnimaResult must populate animaResultNegative');
+  assertTrue(/dom\.animaResultMetaInfo/.test(body),
+    'displayAnimaResult must populate animaResultMetaInfo');
+  assertTrue(/is-active/.test(body),
+    'displayAnimaResult must toggle .is-active on the variant selector');
+  assertTrue(/data-anima-variant/.test(body),
+    'displayAnimaResult must read data-anima-variant from the buttons');
+});
+
+test('Slice 2.3: displayAnimaResult hides the Z-Image result panel (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const start = js.indexOf('const displayAnimaResult = ');
+  const body = js.slice(start, start + 3000);
+  assertTrue(/dom\.resultSection/.test(body),
+    'displayAnimaResult must reference resultSection');
+  assertTrue(/hidden = true/.test(body),
+    'displayAnimaResult must set hidden = true on the Z-Image result panel');
+  assertTrue(/dom\.animaResultSection/.test(body),
+    'displayAnimaResult must show the Anima result panel');
+  assertTrue(/hidden = false/.test(body),
+    'displayAnimaResult must set hidden = false on the Anima result panel');
+});
+
+test('Slice 2.3: onAnimaVariantChange updates state + persists + re-renders (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const start = js.indexOf('const onAnimaVariantChange = ');
+  assertTrue(start > 0, 'onAnimaVariantChange must be defined');
+  const body = js.slice(start, start + 2000);
+  assertTrue(/validateVariant/.test(body),
+    'onAnimaVariantChange must validate the variant');
+  assertTrue(/state\.animaVariant/.test(body),
+    'onAnimaVariantChange must update state.animaVariant');
+  assertTrue(/writeStateToLocalStorage/.test(body),
+    'onAnimaVariantChange must persist to localStorage');
+  assertTrue(/syncStateToURL/.test(body),
+    'onAnimaVariantChange must sync to URL');
+  assertTrue(/is-active/.test(body),
+    'onAnimaVariantChange must re-render the variant selector');
+});
+
+test('Slice 2.3: animaVariantSelector click handler uses event delegation (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/dom\.animaVariantSelector\.addEventListener\('click',/.test(js),
+    'animaVariantSelector click handler must be wired');
+  assertTrue(/e\.target\.closest\('\[data-anima-variant\]'\)/.test(js),
+    'animaVariantSelector click handler must use [data-anima-variant] delegation');
+  assertTrue(/onAnimaVariantChange\(btn\.dataset\.animaVariant\)/.test(js),
+    'animaVariantSelector click handler must call onAnimaVariantChange');
+});
+
+test('Slice 2.3: Anima regenerate button calls runAnimaGenerate (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/dom\.animaRegenerateBtn\.addEventListener\('click', runAnimaGenerate\)/.test(js),
+    'animaRegenerateBtn click must call runAnimaGenerate');
+});
+
+test('Slice 2.3: Anima copy button copies both positive + negative (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/dom\.animaCopyBtn\.addEventListener\('click',/.test(js),
+    'animaCopyBtn click handler must be wired');
+  assertTrue(/navigator\.clipboard\.writeText/.test(js),
+    'animaCopyBtn must use navigator.clipboard.writeText');
+  assertTrue(/Positive:/.test(js) && /Negative:/.test(js),
+    'animaCopyBtn must copy both positive and negative as a single block');
+});
+
+test('Slice 2.3: src/index.html has the Anima result panel + variant selector (ADR 0021)', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/id="step-anima-result"/.test(html), 'step-anima-result section must exist');
+  assertTrue(/id="anima-result-positive"/.test(html), 'anima-result-positive textarea must exist');
+  assertTrue(/id="anima-result-negative"/.test(html), 'anima-result-negative textarea must exist');
+  assertTrue(/id="anima-variant-selector"/.test(html), 'anima-variant-selector must exist');
+  assertTrue(/data-anima-variant="base"/.test(html), 'Base variant button must exist');
+  assertTrue(/data-anima-variant="aesthetic"/.test(html), 'Aesthetic variant button must exist');
+  assertTrue(/data-anima-variant="turbo"/.test(html), 'Turbo variant button must exist');
+  assertTrue(/id="anima-copy-btn"/.test(html), 'anima-copy-btn must exist');
+  assertTrue(/id="anima-regenerate-btn"/.test(html), 'anima-regenerate-btn must exist');
+  assertTrue(/id="anima-result-meta-info"/.test(html), 'anima-result-meta-info must exist');
+});
+
+test('Slice 2.3: src/app.js declares the Anima dom references (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The dom object is a single object literal; check the new keys are present.
+  assertTrue(/animaResultSection: \$/.test(js), 'dom.animaResultSection must be declared');
+  assertTrue(/animaResultPositive: \$/.test(js), 'dom.animaResultPositive must be declared');
+  assertTrue(/animaResultNegative: \$/.test(js), 'dom.animaResultNegative must be declared');
+  assertTrue(/animaResultMetaInfo: \$/.test(js), 'dom.animaResultMetaInfo must be declared');
+  assertTrue(/animaVariantSelector: \$/.test(js), 'dom.animaVariantSelector must be declared');
+  assertTrue(/animaCopyBtn: \$/.test(js), 'dom.animaCopyBtn must be declared');
+  assertTrue(/animaRegenerateBtn: \$/.test(js), 'dom.animaRegenerateBtn must be declared');
+});
+
+test('Slice 2.3: styles.css has the Anima panel + variant selector styles (ADR 0021)', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  assertTrue(/\.anima-variant-selector\s*\{/.test(css), '.anima-variant-selector rule must exist');
+  assertTrue(/\.anima-result-positive/.test(css), '.anima-result-positive rule must exist');
+  assertTrue(/\.anima-result-negative/.test(css), '.anima-result-negative rule must exist');
+});
+
+test('Slice 2.3: __i2pTest exposes the Anima dispatch + result surface (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const hookBlock = js.slice(js.indexOf('window.__i2pTest = {'));
+  assertTrue(/runAnimaGenerate/.test(hookBlock), '__i2pTest must expose runAnimaGenerate');
+  assertTrue(/displayAnimaResult/.test(hookBlock), '__i2pTest must expose displayAnimaResult');
+  assertTrue(/onAnimaVariantChange/.test(hookBlock), '__i2pTest must expose onAnimaVariantChange');
+});
+
+test('Slice 2.3: SPEC §14 names the dispatch + result panel requirements (ADR 0021)', () => {
+  const spec = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/SPEC.md'), 'utf8');
+  // SPEC §14.7 user story #3 names the Anima result panel.
+  assertTrue(/3\. As a user in Anima mode/.test(spec), 'SPEC §14 must have User Story #3');
+  assertTrue(/positive prompt \+ a negative prompt \+ a variant selector/.test(spec),
+    'SPEC §14 User Story #3 must name the Anima result panel components');
+});
+
 // ─── ADR 0018 — actions / mood / lighting re-analysis + curated presets
 
 test('POST /api/actions endpoint is registered (ADR 0018)', () => {
