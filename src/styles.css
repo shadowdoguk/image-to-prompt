@@ -1432,6 +1432,60 @@ body {
   min-width: 220px;
 }
 
+/* Slice 2.1 — ADR 0021 — model-fork selector in the Generate-prompt
+   row. A button-group sits between the picker label and the action
+   buttons so the visual flow is: [Target model] [Z-Image Turbo | Anima]
+   [Aspect ratio] [select] [Re-analyze] [Edit prompt] [Generate].
+   The active button is highlighted via .is-active and aria-pressed. */
+.model-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.model-selector-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+.model-selector-label .label-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.btn-toggle {
+  /* Inherits .btn-secondary shape; the .is-active flag applies accent
+     treatment so the active model is unmistakably visible. */
+  cursor: pointer;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-base);
+  color: var(--text-primary);
+  padding: 0.4rem 0.85rem;
+  border-radius: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.btn-toggle:hover:not(:disabled) {
+  background: var(--border-base);
+  border-color: var(--border-strong);
+}
+.btn-toggle.is-active {
+  background: var(--accent, #6366f1);
+  border-color: var(--accent, #6366f1);
+  color: #fff;
+}
+.btn-toggle.is-active:hover {
+  background: var(--accent-hover, #4f46e5);
+  border-color: var(--accent-hover, #4f46e5);
+}
+.btn-toggle:focus-visible {
+  outline: 2px solid var(--accent, #6366f1);
+  outline-offset: 2px;
+}
+
 /* ADR 0019 Issue #15 — 1024-token reminder banner in the chat panel.
    Hidden by default; surfaced when the current prompt hits
    STAGE2_HARD_MAX_WORDS (750 words). Yellow-tinted to mirror the

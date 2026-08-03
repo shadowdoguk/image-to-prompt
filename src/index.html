@@ -125,6 +125,14 @@
           </div>
 
           <div class="step-actions">
+            <div class="model-selector" id="model-selector" role="group" aria-label="Choose target model for the generated prompt">
+              <span class="label model-selector-label">
+                Target model
+                <span class="label-hint">— which contract the prompt should optimize for</span>
+              </span>
+              <button type="button" class="btn-toggle" data-model="zimage_turbo" aria-pressed="true">Z-Image Turbo</button>
+              <button type="button" class="btn-toggle" data-model="anima" aria-pressed="false">Anima</button>
+            </div>
             <label for="aspect-ratio-select" class="label aspect-ratio-label">
               Aspect ratio
               <span class="label-hint">— targets the InvokeAI resolution the prompt should describe</span>

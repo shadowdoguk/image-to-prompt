@@ -47,7 +47,13 @@
     chatSessions: [],           // ADR 0011 — all chat sessions, newest first
     chatSessionId: null,        // ADR 0011 — id of the session anchored to the current generated prompt
     chatIsSending: false,       // ADR 0011 — true while waiting on /api/chat/sessions/:id/messages
-    selectedAspectRatio: ''     // ADR 0019 Issue #15 — '' means "auto / no preference"
+    selectedAspectRatio: '',    // ADR 0019 Issue #15 — '' means "auto / no preference"
+    // Slice 2.1 — ADR 0021 — the model-fork. Pre-Generate model picker
+    // chooses which contract runs (Z-Image Turbo or Anima). Anima mode
+    // exposes a variant selector (Base / Aesthetic / Turbo). Both fields
+    // are persisted (localStorage) and mirrored in the URL (?model=...&variant=...).
+    model: 'zimage_turbo',       // 'zimage_turbo' | 'anima'
+    animaVariant: 'base'         // 'base' | 'aesthetic' | 'turbo' (only meaningful when model === 'anima')
   };
 
   // ADR 0019 Issue #15 — count words in the current prompt and toggle the
@@ -94,6 +100,7 @@
     editStage2PromptBtn: $('edit-stage2-prompt-btn'),
     generatePromptBtn: $('generate-prompt-btn'),
     aspectRatioSelect: $('aspect-ratio-select'),
+    modelSelector: $('model-selector'),  // Slice 2.1 — ADR 0021 — pre-Generate model picker
 
     resultSection: $('step-result'),
     resultPrompt: $('result-prompt'),
@@ -1781,6 +1788,137 @@
       state.selectedAspectRatio = dom.aspectRatioSelect.value || '';
     });
   }
+
+  // ─── Slice 2.1 — ADR 0021 — model-fork selector ────────────────────
+  // The pre-Generate model picker. Two siblings: Z-Image Turbo (default,
+  // existing behavior) and Anima. Persisted in localStorage, mirrored in
+  // the URL (?model=anima&variant=turbo). The dispatch + chat branching
+  // land in Slices 2.3 + 2.4; this slice ships only the state plumbing
+  // + the UI control. Deletion test: delete this block and the app
+  // behaves as before (Z-Image Turbo only).
+  const ALLOWED_MODELS = ['zimage_turbo', 'anima'];
+  const ALLOWED_ANIMA_VARIANTS = ['base', 'aesthetic', 'turbo'];
+  const MODEL_STORAGE_KEY = 'i2p.state.model';
+  const VARIANT_STORAGE_KEY = 'i2p.state.animaVariant';
+
+  const validateModel = (raw) => {
+    return ALLOWED_MODELS.includes(raw) ? raw : 'zimage_turbo';
+  };
+  const validateVariant = (raw) => {
+    return ALLOWED_ANIMA_VARIANTS.includes(raw) ? raw : 'base';
+  };
+
+  const writeStateToLocalStorage = () => {
+    try {
+      localStorage.setItem(MODEL_STORAGE_KEY, state.model);
+      localStorage.setItem(VARIANT_STORAGE_KEY, state.animaVariant);
+    } catch (_) {
+      // localStorage may be unavailable (private mode, quota, etc.). The
+      // app continues with in-memory state. Not a user-visible error.
+    }
+  };
+
+  const readStateFromLocalStorage = () => {
+    try {
+      const m = localStorage.getItem(MODEL_STORAGE_KEY);
+      const v = localStorage.getItem(VARIANT_STORAGE_KEY);
+      if (m !== null) state.model = validateModel(m);
+      if (v !== null) state.animaVariant = validateVariant(v);
+    } catch (_) {
+      // Same as above — silent fallback to defaults.
+    }
+  };
+
+  const syncStateToURL = () => {
+    try {
+      const url = new URL(window.location.href);
+      if (state.model === 'zimage_turbo') {
+        url.searchParams.delete('model');
+      } else {
+        url.searchParams.set('model', state.model);
+      }
+      if (state.model === 'anima' && state.animaVariant !== 'base') {
+        url.searchParams.set('variant', state.animaVariant);
+      } else {
+        url.searchParams.delete('variant');
+      }
+      window.history.replaceState(null, '', url.toString());
+    } catch (_) {
+      // history.replaceState / URL parsing may fail; the in-memory state
+      // is still authoritative for the current session.
+    }
+  };
+
+  const readStateFromURL = () => {
+    try {
+      const url = new URL(window.location.href);
+      const m = url.searchParams.get('model');
+      const v = url.searchParams.get('variant');
+      if (m !== null) state.model = validateModel(m);
+      if (v !== null) state.animaVariant = validateVariant(v);
+    } catch (_) {
+      // Silently fall back to defaults.
+    }
+  };
+
+  /**
+   * Restore state at app boot. Precedence (highest first):
+   *   1. URL query string (?model=anima&variant=turbo)
+   *   2. localStorage (last-used value)
+   *   3. Hard-coded defaults (state initialised at the top of init())
+   *
+   * Order matters: URL overrides localStorage, which overrides defaults.
+   * After hydration, the URL is canonicalised (deletes redundant params)
+   * and localStorage is updated to mirror the resolved state.
+   */
+  const restoreStateFromUrlOrStorage = () => {
+    // 1. Pull defaults (state already initialised at the top).
+    // 2. Apply localStorage on top.
+    readStateFromLocalStorage();
+    // 3. Apply URL on top of that.
+    readStateFromURL();
+    // 4. Persist the resolved state back to localStorage so next boot
+    //    sees the same value, and rewrite the URL so it stays in sync.
+    writeStateToLocalStorage();
+    syncStateToURL();
+  };
+
+  /**
+   * Render the model picker (a button group). The Anima variant selector
+   * is rendered separately (Slice 2.3 puts it in the result panel).
+   * Here we only render the two-way picker.
+   */
+  const renderModelSelector = () => {
+    if (!dom.modelSelector) return;
+    const buttons = dom.modelSelector.querySelectorAll('[data-model]');
+    buttons.forEach((btn) => {
+      const isActive = btn.dataset.model === state.model;
+      btn.classList.toggle('is-active', isActive);
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+  };
+
+  const onModelChange = (nextModel) => {
+    const validated = validateModel(nextModel);
+    if (validated === state.model) return;
+    state.model = validated;
+    writeStateToLocalStorage();
+    syncStateToURL();
+    renderModelSelector();
+    // Future slices (2.3 + 2.4) will branch here: the result panel
+    // re-renders, the chat session ends, the dispatch routes to the
+    // right endpoint. For Slice 2.1 we only prove the state plumbing.
+  };
+
+  if (dom.modelSelector) {
+    dom.modelSelector.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-model]');
+      if (!btn) return;
+      onModelChange(btn.dataset.model);
+    });
+  }
+
+  // ─── Wire up model selector end ──────────────────────────────────────
 
   // Directives counter
   dom.directivesInput.addEventListener('input', () => {
@@ -4799,6 +4937,12 @@
 // ─── Initialize ────────────────────────────────────────────────────────
 
   const init = async () => {
+    // Slice 2.1 — ADR 0021 — restore model + variant state from URL or localStorage.
+    // Runs first so the model picker reflects the right initial value before
+    // any UI is rendered. State precedence: URL > localStorage > defaults.
+    restoreStateFromUrlOrStorage();
+    renderModelSelector();
+
     // Load field palette
     try {
       const health = await apiCall('/api/health');
@@ -4838,7 +4982,19 @@
           populateCameraAngleWithAI,
           populateSubjectWithAI,
           MOOD_PRESETS,
-          LIGHTING_PRESETS
+          LIGHTING_PRESETS,
+          // Slice 2.1 — ADR 0021 — model-fork surface
+          ALLOWED_MODELS,
+          ALLOWED_ANIMA_VARIANTS,
+          validateModel,
+          validateVariant,
+          readStateFromLocalStorage,
+          writeStateToLocalStorage,
+          readStateFromURL,
+          syncStateToURL,
+          restoreStateFromUrlOrStorage,
+          renderModelSelector,
+          onModelChange
         };
       }
     } catch (_) {

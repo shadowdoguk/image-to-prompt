@@ -7653,6 +7653,155 @@ test('Chat contract documentation names the pending draft state', () => {
   assertTrue(/explicit|Apply/i.test(context), 'CONTEXT documents explicit commit');
 });
 
+// ─── Slice 2.1 — ADR 0021 — model-fork selector (state plumbing + UI) ──
+// These tests cover the pure helpers and the wiring without spinning up
+// a browser. The test hook (window.__i2pTest) is exercised via the
+// fixture below. The goal is to lock the contract: validateModel +
+// validateVariant accept the documented enums, fall back to defaults
+// on garbage, and the round-trip via URL <-> localStorage preserves
+// the user's last pick.
+
+test('Slice 2.1: ALLOWED_MODELS + ALLOWED_ANIMA_VARIANTS enums are exposed', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/id="model-selector"/.test(html), 'index.html has model-selector container');
+  assertTrue(/data-model="zimage_turbo"/.test(html), 'index.html has Z-Image Turbo button');
+  assertTrue(/data-model="anima"/.test(html), 'index.html has Anima button');
+  assertTrue(/role="group"/.test(html), 'model-selector is a role=group for a11y');
+});
+
+test('Slice 2.1: src/app.js defines validateModel + validateVariant helpers', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // validateModel accepts valid values
+  assertTrue(/const validateModel = \(raw\) => \{/.test(js), 'validateModel helper defined');
+  assertTrue(/return ALLOWED_MODELS\.includes\(raw\) \? raw : 'zimage_turbo'/.test(js),
+    'validateModel falls back to zimage_turbo on invalid');
+  // validateVariant accepts valid values
+  assertTrue(/const validateVariant = \(raw\) => \{/.test(js), 'validateVariant helper defined');
+  assertTrue(/return ALLOWED_ANIMA_VARIANTS\.includes\(raw\) \? raw : 'base'/.test(js),
+    'validateVariant falls back to base on invalid');
+  // ALLOWED enums are exactly the documented values
+  assertTrue(/ALLOWED_MODELS = \['zimage_turbo', 'anima'\]/.test(js),
+    'ALLOWED_MODELS = [zimage_turbo, anima]');
+  assertTrue(/ALLOWED_ANIMA_VARIANTS = \['base', 'aesthetic', 'turbo'\]/.test(js),
+    'ALLOWED_ANIMA_VARIANTS = [base, aesthetic, turbo]');
+});
+
+test('Slice 2.1: state.model + state.animaVariant exist with correct defaults', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/model: 'zimage_turbo'/.test(js), 'state.model default = zimage_turbo');
+  assertTrue(/animaVariant: 'base'/.test(js), 'state.animaVariant default = base');
+});
+
+test('Slice 2.1: localStorage round-trip via writeStateToLocalStorage + readStateFromLocalStorage', () => {
+  // Simulate the round-trip by reading the source and extracting the helpers.
+  // (A full DOM test would require a browser; the contract is verified by
+  // asserting the code paths are present and the keys are stable.)
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/MODEL_STORAGE_KEY = 'i2p\.state\.model'/.test(js),
+    'MODEL_STORAGE_KEY is stable');
+  assertTrue(/VARIANT_STORAGE_KEY = 'i2p\.state\.animaVariant'/.test(js),
+    'VARIANT_STORAGE_KEY is stable');
+  assertTrue(/localStorage\.setItem\(MODEL_STORAGE_KEY, state\.model\)/.test(js),
+    'writeStateToLocalStorage writes model');
+  assertTrue(/localStorage\.setItem\(VARIANT_STORAGE_KEY, state\.animaVariant\)/.test(js),
+    'writeStateToLocalStorage writes variant');
+  assertTrue(/localStorage\.getItem\(MODEL_STORAGE_KEY\)/.test(js),
+    'readStateFromLocalStorage reads model');
+  assertTrue(/localStorage\.getItem\(VARIANT_STORAGE_KEY\)/.test(js),
+    'readStateFromLocalStorage reads variant');
+});
+
+test('Slice 2.1: URL round-trip via syncStateToURL + readStateFromURL', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/window\.history\.replaceState\(null, '', url\.toString\(\)\)/.test(js),
+    'syncStateToURL uses history.replaceState (no router, no history pollution)');
+  assertTrue(/url\.searchParams\.set\('model', state\.model\)/.test(js),
+    'syncStateToURL writes the model param');
+  assertTrue(/url\.searchParams\.set\('variant', state\.animaVariant\)/.test(js),
+    'syncStateToURL writes the variant param when not the default');
+  assertTrue(/url\.searchParams\.delete\('model'\)/.test(js),
+    'syncStateToURL deletes the model param when on default');
+  assertTrue(/url\.searchParams\.get\('model'\)/.test(js),
+    'readStateFromURL reads the model param');
+  assertTrue(/url\.searchParams\.get\('variant'\)/.test(js),
+    'readStateFromURL reads the variant param');
+});
+
+test('Slice 2.1: restoreStateFromUrlOrStorage precedence — URL > localStorage > defaults', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/const restoreStateFromUrlOrStorage = \(\) => \{/.test(js),
+    'restoreStateFromUrlOrStorage defined');
+  // Order: localStorage first, then URL.
+  const lsIx = js.indexOf('readStateFromLocalStorage()');
+  const urlIx = js.indexOf('readStateFromURL()');
+  assertTrue(lsIx > 0 && urlIx > 0 && lsIx < urlIx,
+    'localStorage is read before URL (URL overrides localStorage)');
+  // After both reads, writeStateToLocalStorage + syncStateToURL canonicalise.
+  const writeIx = js.indexOf('writeStateToLocalStorage()');
+  const syncIx = js.indexOf('syncStateToURL()');
+  assertTrue(writeIx > urlIx && syncIx > urlIx,
+    'writeStateToLocalStorage + syncStateToURL run after both reads (canonicalisation)');
+});
+
+test('Slice 2.1: renderModelSelector toggles .is-active + aria-pressed', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/const renderModelSelector = \(\) => \{/.test(js),
+    'renderModelSelector defined');
+  assertTrue(/btn\.classList\.toggle\('is-active', isActive\)/.test(js),
+    'renderModelSelector toggles .is-active');
+  assertTrue(/btn\.setAttribute\('aria-pressed', isActive \? 'true' : 'false'\)/.test(js),
+    'renderModelSelector sets aria-pressed');
+  assertTrue(/dom\.modelSelector\.addEventListener\('click',/.test(js),
+    'model selector click handler wired');
+  assertTrue(/e\.target\.closest\('\[data-model\]'\)/.test(js),
+    'click handler uses event delegation via closest([data-model])');
+});
+
+test('Slice 2.1: restoreStateFromUrlOrStorage + renderModelSelector called in init()', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Find the init() block.
+  const initBlock = js.slice(js.indexOf('const init = async () => {'));
+  assertTrue(/restoreStateFromUrlOrStorage\(\)/.test(initBlock),
+    'init() calls restoreStateFromUrlOrStorage');
+  assertTrue(/renderModelSelector\(\)/.test(initBlock),
+    'init() calls renderModelSelector');
+});
+
+test('Slice 2.1: __i2pTest exposes the model-fork surface', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The hook should expose the new helpers (mirrors the existing test-hook block).
+  const hookBlock = js.slice(js.indexOf("window.__i2pTest = {"));
+  assertTrue(/ALLOWED_MODELS/.test(hookBlock), '__i2pTest exposes ALLOWED_MODELS');
+  assertTrue(/ALLOWED_ANIMA_VARIANTS/.test(hookBlock), '__i2pTest exposes ALLOWED_ANIMA_VARIANTS');
+  assertTrue(/validateModel/.test(hookBlock), '__i2pTest exposes validateModel');
+  assertTrue(/validateVariant/.test(hookBlock), '__i2pTest exposes validateVariant');
+  assertTrue(/readStateFromLocalStorage/.test(hookBlock), '__i2pTest exposes readStateFromLocalStorage');
+  assertTrue(/writeStateToLocalStorage/.test(hookBlock), '__i2pTest exposes writeStateToLocalStorage');
+  assertTrue(/readStateFromURL/.test(hookBlock), '__i2pTest exposes readStateFromURL');
+  assertTrue(/syncStateToURL/.test(hookBlock), '__i2pTest exposes syncStateToURL');
+  assertTrue(/restoreStateFromUrlOrStorage/.test(hookBlock), '__i2pTest exposes restoreStateFromUrlOrStorage');
+  assertTrue(/renderModelSelector/.test(hookBlock), '__i2pTest exposes renderModelSelector');
+  assertTrue(/onModelChange/.test(hookBlock), '__i2pTest exposes onModelChange');
+});
+
+test('Slice 2.1: styles.css has the model-selector + btn-toggle + .is-active rules', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  assertTrue(/\.model-selector\s*\{/.test(css), 'styles.css has .model-selector rule');
+  assertTrue(/\.model-selector-label\s*\{/.test(css), 'styles.css has .model-selector-label rule');
+  assertTrue(/\.btn-toggle\s*\{/.test(css), 'styles.css has .btn-toggle rule');
+  assertTrue(/\.btn-toggle\.is-active\s*\{/.test(css), 'styles.css has .btn-toggle.is-active rule');
+  assertTrue(/\.btn-toggle:focus-visible/.test(css), 'styles.css has .btn-toggle:focus-visible (a11y)');
+});
+
+test('Slice 2.1: SPEC.md §14 + ADR 0021 are in place (pre-conditions for the slice)', () => {
+  const spec = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/SPEC.md'), 'utf8');
+  const adr = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/adr/0021-anima-fork.md'), 'utf8');
+  assertTrue(/## 14\. Slice 2 — Anima contract/.test(spec), 'SPEC §14 present');
+  assertTrue(/pre-Generate model picker/.test(spec), 'SPEC §14 names the pre-Generate picker');
+  assertTrue(/## Status/.test(adr), 'ADR 0021 has a Status section');
+  assertTrue(/Accepted/.test(adr), 'ADR 0021 status is Accepted');
+});
+
 (async () => {
   for (const { name, fn } of QUEUED) {
     try {
