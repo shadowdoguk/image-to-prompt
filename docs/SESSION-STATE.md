@@ -328,3 +328,23 @@ In Slice 2.4, I branched `buildChatSystemPrompt` (the wrapper) instead of `build
 ### Mood / risk flag
 
 > Session #4 shipped Slice 2 end-to-end. Methodology proven **forks** at the entry point: a pre-Generate model picker chose between two contracts (Z-Image Turbo + Anima), each backed by its own system prompt + dispatch + chat history. The 5 sub-slices + 4 code reviews + 1 aggregate verdict passed. The mid-slice regression (branching the wrong function) was caught by the test suite on the first run — the system works as intended. 373/373 tests green; 10/10 V-checks; syntax OK on both `server.js` and `src/app.js`. `server.js` grew to 7104 lines (well under the 290KB kill criterion). 53 MiniMax credits spent on the Slice 1 demo from the SESSION-STATE issue #2 era (none spent on Slice 2 — the new tests are structural assertions, not live LLM calls). **Slice 2 ships. G5 polish audit is the next gate.**
+
+### G5 outcome (the slice fully ships)
+
+**Gate G5: SHIPPED — 2026-08-03.**
+
+Slice 2 (Anima fork) is fully through Gate G5. Verdict: **PASS** (0 blocking, 8 findings — 5 pre-existing project-level polish debt inherited from Slice 1, 3 Slice 2 nice-to-haves).
+
+- **G5 commit:** `de259bf` (`docs/POLISH-AUDIT-2-anima-fork.md` — 213 lines, 7 sections + sign-off).
+- **Aggregate verdict:** `docs/CODE-REVIEW-2-anima-fork.md` §Slice 2.5 — "Slice 2 ships."
+- **Slice-tracker row added:**
+
+| # | Slice | Blocked by | Status | Commit | Code-review verdict | Context |
+|---|---|---|---|---|---|---|
+| 2 | Anima fork (model-fork + dispatch + chat) | — | ✅ **SHIPPED** | `499f8ac` (G4 pass) → `de259bf` (G5 PASS) | fresh | 5 sub-slices; 4 per-sub-slice reviews + 1 aggregate; 52 net new tests (+15.1%); 1 ADR (0021); 0 regressions |
+
+**Frontier:** empty. Slice 2 fully shipped through Gate G5. The next session picks up at Phase C (continue mode) — pick a polish-triage slice, a per-field AI button, or anything else from the deferred backlog.
+
+### Mood / risk flag (final)
+
+> Session #4 closed the Anima fork. The methodology held: a spec-first design (G1–G3 → 5 sub-slices → 4 per-sub-slice reviews + 1 aggregate → G5 polish audit) cleared every gate with passing verdicts and zero blocking findings. The mid-slice regression (branching the wrong function in Slice 2.4) was caught by the test suite on the first run — a load-bearing test for the methodology. The project is now two-slice-deep (Slice 1 fully shipped pre-session; Slice 2 fully shipped this session). 373/373 tests green; 10/10 V-checks; syntax OK on both `server.js` and `src/app.js`. `server.js` at 7104 lines (well under the 290KB kill criterion). `docs/ANIMA-PROMPTING-MANUAL.md` (902 lines) is the implicit goose-review of the Anima model/repo. **The full project shipped.** Cold-start recovery: read the "How to use this file" section above, then the Session #4 entry, then `docs/CODE-REVIEW-2-anima-fork.md` §Slice 2.5 for the slice-2 aggregate.
