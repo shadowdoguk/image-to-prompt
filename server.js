@@ -5850,13 +5850,29 @@ const validateChatSessionCreate = (body, { presets } = {}) => {
   if (typeof body.preset_id !== 'string' || !body.preset_id.startsWith(PRESET_ID_PREFIX)) {
     return `preset_id must be a string starting with "${PRESET_ID_PREFIX}" (got ${JSON.stringify(body.preset_id)}).`;
   }
-  if (Array.isArray(presets) && !presets.some((p) => p.id === body.preset_id)) {
+  // Slice 2.4 — ADR 0021 — Anima sessions don't need a real preset_id.
+  // The frontend sends a placeholder ('preset_anima_internal') and the
+  // chat session is anchored to the Anima contract, not a Z-Image preset.
+  // The placeholder is the validator's only allowed non-real-preset for
+  // Anima mode. (The placeholder is never used by Z-Image paths.)
+  const isAnimaCreate = body.model === 'anima' && body.preset_id === 'preset_anima_internal';
+  if (Array.isArray(presets) && !isAnimaCreate && !presets.some((p) => p.id === body.preset_id)) {
     return `preset_id "${body.preset_id}" does not match any known preset.`;
   }
 
   if (body.preset_name !== undefined && body.preset_name !== null) {
     if (typeof body.preset_name !== 'string') return 'preset_name must be a string when provided.';
     if (body.preset_name.length > 200) return `preset_name must be 200 characters or fewer (got ${body.preset_name.length}).`;
+  }
+
+  // Slice 2.4 — ADR 0021 — model field. Optional. When provided, must
+  // be one of 'zimage_turbo' or 'anima'. The default for backwards
+  // compatibility is 'zimage_turbo' (existing sessions).
+  if (body.model !== undefined && body.model !== null) {
+    if (typeof body.model !== 'string') return 'model must be a string when provided.';
+    if (!['zimage_turbo', 'anima'].includes(body.model)) {
+      return `model must be one of: zimage_turbo, anima (got ${JSON.stringify(body.model)}).`;
+    }
   }
 
   if (body.run_id !== undefined && body.run_id !== null && body.run_id !== '') {
@@ -6316,6 +6332,53 @@ When Style, Lighting, Color, or Subject is touched, preserve or strengthen:
 Pastel-palette-with-saturated-focal tradition. Do NOT introduce gestural-expressionist vocabulary as a focal feature — energy is optical (saturated colour against muted surround), not kinetic.`;
 
 /**
+ * Slice 2.4 — ADR 0021 — Anima chat constraints block.
+ * Mirrors ZIMAGE_CHAT_CONSTRAINTS_BLOCK above. Appended to the chat
+ * system prompt when the session is anchored to an Anima contract.
+ * The block is a parallel document to the Anima prompt contract
+ * (docs/ANIMA-PROMPTING-MANUAL.md §5, §7) — it tells the chat LLM
+ * how to refine an Anima prompt without breaking the contract.
+ */
+const ANIMA_CHAT_CONSTRAINTS_BLOCK = `
+
+# ANIMA CONTRACT — DOMAIN CONSTRAINTS
+
+The current working prompt is destined for an Anima checkpoint (Base / Aesthetic / Turbo — 2B Qwen-3 text encoder, see docs/ANIMA-PROMPTING-MANUAL.md). Apply on top of the anchor-preservation contract above.
+
+## FORBIDDEN VOCABULARY
+
+- Photorealism terms: "photorealistic", "DSLR", "8K photo", "RAW photo". Anima is anime / illustration / art focused.
+- Long-form text rendering: "with the text '...'", "sign that says '...'". Anima renders single words sometimes; long sentences won't render.
+- Quality-tag dilution: "masterpiece", "best quality", "award winning", "highly detailed" in the negative prompt (they belong in the positive prefix).
+- Z-Image prose vocabulary: "alla prima", "impasto", "palette knife", "pastel palette". Anima is tag-style, not prose.
+- SDXL/FLUX weight syntax: "(keyword:1.3)". Anima has its own weighting (manual §6.9): "(tag:2)" for the equivalent of an SDXL 1.3 weight.
+- Uppercase tags. Tags MUST be lowercase, comma-separated, spaces (not underscores) — except "score_*" / "1girl" / "2girls" which keep underscores.
+- Meta-references to the medium: "the painting", "the image", "the artwork", "the illustration".
+- Aesthetic-judgment words: "beautiful", "striking", "vibrant", "dramatic", "elegant", "majestic", "imposing", "ethereal", "luminous", "bold".
+
+## REQUIRED VOCABULARY
+
+When any field is touched, preserve or strengthen:
+- Tag order: [quality/meta/year/safety] [count] [character] [series] [artist] [general tags]. Section order is fixed; within each section, tag order is arbitrary.
+- "masterpiece, best quality, score_7, safe, " prefix on Base / Turbo. On Aesthetic, drop "score_7".
+- Artist tags MUST be prefixed with "@" (e.g. "@big chungus"). Without "@", the effect is weak.
+- Negative prefix: "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration" on Base / Turbo. On Aesthetic, drop the score_* entries.
+- Dataset tags on line 1 if the image is non-anime: "ye-pop" (LAION-POP) or "deviantart" (DeviantArt). Line 2 is alt-text (ye-pop) or title (deviantart).
+- Multi-character scenes: each character gets a name + hair + eyes + outfit cluster. Name first, then describe.
+
+## VARIANT RULES
+
+- Base: full prefix "masterpiece, best quality, score_7, safe, "; negative uses score_1/2/3.
+- Aesthetic: drop "score_7" from positive; drop "score_1, score_2, score_3" from negative. The model is fine-tuned on high-quality images.
+- Turbo: same as Base — the prompt is identical; what differs is the sampling config (CFG 1, 8-12 steps).
+
+## LENGTH
+Positive: 60 chars minimum schema floor; 50-200 tags typical. Negative: 20 chars minimum; 8-15 items typical. Both comma-separated tag lists, NEVER prose paragraphs.
+
+## STYLE-SCHOOL ANCHOR
+Anima is anime / illustration / non-photorealistic. Default to Danbooru-style tags. For non-anime, lead with the dataset tag (ye-pop / deviantart) on line 1.`;
+
+/**
  * Build the chat system prompt for a given session at a given turn.
  * Interpolation of the three context blocks (original prompt, current
  * prompt, analysis snapshot) happens here so the constant
@@ -6369,6 +6432,7 @@ const buildChatSystemPromptVariant = ({
   hasPending,
   analysis,
   isZImageSession,
+  isAnimaSession,
   includeAnalysis,
   trimWorking,
   trimOriginal
@@ -6414,9 +6478,17 @@ ${displayedPending}
 ${analysis}`
     : '';
 
+  // Slice 2.4 — ADR 0021 — Anima dispatch (parallel to the Z-Image
+  // branch). The two contracts are mutually exclusive in practice (a
+  // session is anchored to one model), but the code is shaped so
+  // neither / either / both produces a sensible system prompt.
+  let constraintsBlock = '';
+  if (isZImageSession) constraintsBlock = ZIMAGE_CHAT_CONSTRAINTS_BLOCK;
+  else if (isAnimaSession) constraintsBlock = ANIMA_CHAT_CONSTRAINTS_BLOCK;
+
   return `${DEFAULT_CHAT_SYSTEM_PROMPT}
 
-# SESSION CONTEXT${promptBlocks}${pendingBlock}${analysisBlock}${isZImageSession ? ZIMAGE_CHAT_CONSTRAINTS_BLOCK : ''}`;
+# SESSION CONTEXT${promptBlocks}${pendingBlock}${analysisBlock}${constraintsBlock}`;
 };
 
 const buildChatSystemPrompt = (session) => {
@@ -6432,6 +6504,11 @@ const buildChatSystemPrompt = (session) => {
     : '(no analysis snapshot was captured for this session)';
   const isZImageSession = sessionObj && typeof sessionObj.preset_id === 'string'
     && ZIMAGE_PRESET_IDS.has(sessionObj.preset_id);
+  // Slice 2.4 — ADR 0021 — Anima dispatch. Mutually exclusive with
+  // Z-Image in practice (a session is anchored to one model), but the
+  // code is shaped so neither / either / both produces a sensible system prompt.
+  const isAnimaSession = sessionObj && typeof sessionObj.model === 'string'
+    && sessionObj.model === 'anima';
   const build = (options) => buildChatSystemPromptVariant({
     original,
     current,
@@ -6439,6 +6516,7 @@ const buildChatSystemPrompt = (session) => {
     hasPending,
     analysis,
     isZImageSession,
+    isAnimaSession,
     ...options
   });
 
@@ -6509,6 +6587,13 @@ app.post('/api/chat/sessions', (req, res) => {
       preset_id: body.preset_id,
       preset_name: typeof body.preset_name === 'string' ? body.preset_name : '',
       run_id: typeof body.run_id === 'string' ? body.run_id : null,
+      // Slice 2.4 — ADR 0021 — model field. Defaults to 'zimage_turbo'
+      // for backwards compatibility (existing sessions). The frontend
+      // sends 'anima' for Anima-mode sessions so the chat system prompt
+      // can dispatch to the Anima constraints block.
+      model: typeof body.model === 'string' && ['zimage_turbo', 'anima'].includes(body.model)
+        ? body.model
+        : 'zimage_turbo',
       title: buildChatTitle(body.prompt),
       original_prompt: body.prompt,
       current_prompt: body.prompt,

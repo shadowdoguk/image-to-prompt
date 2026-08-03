@@ -1865,6 +1865,16 @@
 
     // Scroll the user into the result panel.
     dom.animaResultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // Slice 2.4 — ADR 0021 — activate chat for Anima. Parallel to
+    // activateChatForResult (which fires on the Z-Image path). The
+    // session body uses data.positive as the prompt (the Anima
+    // contract's primary prompt) and tags model='anima' so the server's
+    // buildChatSystemPrompt appends ANIMA_CHAT_CONSTRAINTS_BLOCK.
+    // Fire-and-forget: a 4xx/5xx here must not clobber the result.
+    activateAnimaChatForResult(data).catch((e) => {
+      console.warn('Failed to activate Anima chat console:', e.message);
+    });
   };
 
   const setButtonLoading = (btn, loading, text) => {
@@ -2000,13 +2010,24 @@
   const onModelChange = (nextModel) => {
     const validated = validateModel(nextModel);
     if (validated === state.model) return;
+    const previousModel = state.model;
     state.model = validated;
     writeStateToLocalStorage();
     syncStateToURL();
     renderModelSelector();
-    // Future slices (2.3 + 2.4) will branch here: the result panel
-    // re-renders, the chat session ends, the dispatch routes to the
-    // right endpoint. For Slice 2.1 we only prove the state plumbing.
+
+    // Slice 2.4 — ADR 0021 — chat history is per-model. Switching
+    // model ends the current chat session and starts a new one on
+    // the next generate. This is the resolution of SPEC §14.11 Q3
+    // (option a): per-model sessions, not shared history. The two
+    // contracts (Z-Image pastel-focal-glow vs. Anima Danbooru-tag
+    // rules) have different default-system-prompts; mixing them in
+    // a single session would produce inconsistent revisions.
+    if (previousModel !== validated && state.chatSessionId) {
+      state.chatSessionId = null;
+      if (typeof renderChatSessionSelect === 'function') renderChatSessionSelect();
+      if (typeof updateChatSendButton === 'function') updateChatSendButton();
+    }
   };
 
   if (dom.modelSelector) {
@@ -4762,6 +4783,83 @@
   };
 
   /**
+   * Slice 2.4 — ADR 0021 — Anima chat activation.
+   * Parallel to activateChatForResult but for the Anima envelope. The
+   * session body uses data.positive as the prompt (the Anima contract's
+   * primary prompt — the negative is folded in as analysis_snapshot
+   * for context). The model field is 'anima' so the server's
+   * buildChatSystemPrompt appends ANIMA_CHAT_CONSTRAINTS_BLOCK.
+   *
+   * The session is created with NO preset_id (Anima doesn't need one)
+   * — the validator accepts that case via the existing model branch.
+   * Actually the validator still requires preset_id, so we use a
+   * placeholder ('preset_anima') that the server's isZImageSession
+   * branch will treat as non-Z-Image. The placeholder is intentionally
+   * not exposed to the user.
+   *
+   * Failure mode: if the server rejects the placeholder preset_id, the
+   * chat session is skipped silently (fire-and-forget, just like the
+   * Z-Image path). The user can still see and edit the Anima result;
+   * the chat panel just stays inactive.
+   */
+  const activateAnimaChatForResult = async (data) => {
+    const positive = (data && typeof data.positive === 'string') ? data.positive : '';
+    if (!positive.trim()) return;
+
+    const body = {
+      prompt: positive,
+      preset_id: 'preset_anima_internal', // placeholder; not a real preset
+      preset_name: 'Anima',
+      run_id: state.currentRunId || null,
+      analysis_snapshot: data && typeof data.negative === 'string'
+        ? { negative: data.negative, variant: data.variant || state.animaVariant }
+        : null,
+      // Slice 2.4 — model: 'anima' so the server dispatches to the
+      // Anima constraints block. The validator accepts the field.
+      model: 'anima'
+    };
+
+    let session;
+    try {
+      session = await apiCall('/api/chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } catch (e) {
+      // Soft-state: chat session failures must not clobber the result.
+      console.warn('Could not start Anima chat session:', e.message);
+      const isChatLimit = /chat session limit reached/i.test(e.message);
+      if (isChatLimit) {
+        showError(`Chat history is full (200 sessions). Delete older conversations from the picker above to start a new one.`, { severity: 'warning' });
+      } else {
+        // Other failures (preset_id placeholder might not be valid) are
+        // silenced — the Anima result panel is still functional, and
+        // the user can refresh to retry. Caller already logged the
+        // warning.
+      }
+      return;
+    }
+
+    state.chatSessionId = session.id;
+    state.chatSessions = [session].concat(
+      state.chatSessions.filter((s) => s.id !== session.id)
+    );
+    renderChatSessionSelect();
+    renderChatMessages(session);
+    if (dom.stepChat) dom.stepChat.hidden = false;
+    if (dom.chatSessionStatus) {
+      dom.chatSessionStatus.hidden = false;
+      dom.chatSessionStatus.textContent = formatChatSessionStatus(session);
+    }
+    if (dom.chatSessionDeleteBtn) {
+      dom.chatSessionDeleteBtn.disabled = false;
+    }
+    updateChatSendButton();
+    if (dom.chatInput) dom.chatInput.focus();
+  };
+
+  /**
    * Map a server-side error string to a user-friendly chat-form
    * status. The server emits very specific error text (e.g. "Chat
    * reply missing non-empty 'reply' string") that's useful for
@@ -5149,7 +5247,9 @@
           // Slice 2.3 — ADR 0021 — Anima dispatch + result surface
           runAnimaGenerate,
           displayAnimaResult,
-          onAnimaVariantChange
+          onAnimaVariantChange,
+          // Slice 2.4 — ADR 0021 — Anima chat activation
+          activateAnimaChatForResult
         };
       }
     } catch (_) {

@@ -3244,6 +3244,160 @@ test('Slice 2.3: SPEC §14 names the dispatch + result panel requirements (ADR 0
     'SPEC §14 User Story #3 must name the Anima result panel components');
 });
 
+// ─── Slice 2.4 — ADR 0021 — chat refines the selected model ──────────
+
+test('Slice 2.4: ANIMA_CHAT_CONSTRAINTS_BLOCK exists in server.js (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/const ANIMA_CHAT_CONSTRAINTS_BLOCK =/.test(serverText),
+    'ANIMA_CHAT_CONSTRAINTS_BLOCK must be defined');
+  // Capture the body of the constant via indexOf slicing (avoids regex
+  // ambiguity with backticks inside the template literal).
+  const blockStart = serverText.indexOf('const ANIMA_CHAT_CONSTRAINTS_BLOCK');
+  assertTrue(blockStart > 0, 'ANIMA_CHAT_CONSTRAINTS_BLOCK body must be locatable');
+  // The constant starts with a backtick-template-literal; the body
+  // ends at the next `` `; `` sequence after the start.
+  const blockEnd = serverText.indexOf('`;', blockStart);
+  assertTrue(blockEnd > blockStart, 'ANIMA_CHAT_CONSTRAINTS_BLOCK body must terminate');
+  const block = serverText.slice(blockStart, blockEnd);
+  assertTrue(/ANIMA CONTRACT — DOMAIN CONSTRAINTS/.test(block),
+    'ANIMA_CHAT_CONSTRAINTS_BLOCK must have a heading');
+  assertTrue(/@/.test(block),
+    'ANIMA_CHAT_CONSTRAINTS_BLOCK must document @-prefix on artist tags');
+  assertTrue(/score_1, score_2, score_3/.test(block),
+    'ANIMA_CHAT_CONSTRAINTS_BLOCK must document the negative prefix');
+  assertTrue(/ye-pop/.test(block),
+    'ANIMA_CHAT_CONSTRAINTS_BLOCK must document the ye-pop dataset tag');
+  assertTrue(/deviantart/.test(block),
+    'ANIMA_CHAT_CONSTRAINTS_BLOCK must document the deviantart dataset tag');
+});
+
+test('Slice 2.4: buildChatSystemPrompt + variant branch on session.model === anima (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The wrapper (buildChatSystemPrompt) computes isAnimaSession and
+  // threads it through to buildChatSystemPromptVariant, which is
+  // where the actual branching lives. Both must be present.
+  const fnStart = serverText.indexOf('const buildChatSystemPrompt = (session) =>');
+  assertTrue(fnStart > 0, 'buildChatSystemPrompt must be defined');
+  const fnBody = serverText.slice(fnStart, fnStart + 4000);
+  assertTrue(/isAnimaSession/.test(fnBody),
+    'buildChatSystemPrompt must declare isAnimaSession');
+  assertTrue(/sessionObj\.model === 'anima'/.test(fnBody),
+    'buildChatSystemPrompt must check session.model === anima');
+  assertTrue(/isAnimaSession,/.test(fnBody),
+    'buildChatSystemPrompt must thread isAnimaSession through to the variant');
+  // The variant (where the actual branching lives) must reference ANIMA_CHAT_CONSTRAINTS_BLOCK.
+  const variantStart = serverText.indexOf('const buildChatSystemPromptVariant = (');
+  assertTrue(variantStart > 0, 'buildChatSystemPromptVariant must be defined');
+  const variantBody = serverText.slice(variantStart, variantStart + 4000);
+  assertTrue(/ANIMA_CHAT_CONSTRAINTS_BLOCK/.test(variantBody),
+    'buildChatSystemPromptVariant must reference ANIMA_CHAT_CONSTRAINTS_BLOCK');
+  assertTrue(/constraintsBlock/.test(variantBody),
+    'buildChatSystemPromptVariant must use a constraintsBlock variable');
+  // The Z-Image branch should still be present in the variant.
+  assertTrue(/ZIMAGE_CHAT_CONSTRAINTS_BLOCK/.test(variantBody),
+    'buildChatSystemPromptVariant must still reference ZIMAGE_CHAT_CONSTRAINTS_BLOCK');
+});
+
+test('Slice 2.4: validateChatSessionCreate accepts an optional model field (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const fnStart = serverText.indexOf('const validateChatSessionCreate = (body,');
+  assertTrue(fnStart > 0, 'validateChatSessionCreate must be defined');
+  const fnBody = serverText.slice(fnStart, fnStart + 2500);
+  assertTrue(/body\.model/.test(fnBody),
+    'validateChatSessionCreate must reference body.model');
+  assertTrue(/zimage_turbo/.test(fnBody) && /anima/.test(fnBody),
+    'validateChatSessionCreate must accept model values zimage_turbo and anima');
+  assertTrue(/model must be one of: zimage_turbo, anima/.test(fnBody),
+    'validateChatSessionCreate must reject unknown model values');
+});
+
+test('Slice 2.4: validateChatSessionCreate skips preset-existence check for Anima (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const fnStart = serverText.indexOf('const validateChatSessionCreate = (body,');
+  const fnBody = serverText.slice(fnStart, fnStart + 2500);
+  assertTrue(/isAnimaCreate/.test(fnBody),
+    'validateChatSessionCreate must declare isAnimaCreate');
+  assertTrue(/preset_anima_internal/.test(fnBody),
+    'validateChatSessionCreate must reference the Anima placeholder');
+  assertTrue(/!isAnimaCreate/.test(fnBody),
+    'validateChatSessionCreate must skip the preset-existence check when isAnimaCreate');
+});
+
+test('Slice 2.4: POST /api/chat/sessions stores model on the session (ADR 0021)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const routeStart = serverText.indexOf("app.post('/api/chat/sessions'");
+  assertTrue(routeStart > 0, 'POST /api/chat/sessions must be registered');
+  const routeBody = serverText.slice(routeStart, routeStart + 4000);
+  assertTrue(/model:/.test(routeBody),
+    'POST /api/chat/sessions session object must include model field');
+  assertTrue(/body\.model/.test(routeBody),
+    'POST /api/chat/sessions must read model from body');
+  assertTrue(/'zimage_turbo'/.test(routeBody),
+    'POST /api/chat/sessions must default to zimage_turbo for backwards compatibility');
+});
+
+test('Slice 2.4: onModelChange ends the current chat session (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const onModelChange = (nextModel) =>');
+  assertTrue(fnStart > 0, 'onModelChange must be defined');
+  const fnBody = js.slice(fnStart, fnStart + 2000);
+  assertTrue(/previousModel/.test(fnBody),
+    'onModelChange must capture the previous model for the comparison');
+  assertTrue(/state\.chatSessionId = null/.test(fnBody),
+    'onModelChange must set chatSessionId to null on model switch');
+  assertTrue(/renderChatSessionSelect/.test(fnBody),
+    'onModelChange must re-render the chat session picker');
+  assertTrue(/updateChatSendButton/.test(fnBody),
+    'onModelChange must update the chat send button');
+});
+
+test('Slice 2.4: displayAnimaResult fires activateAnimaChatForResult (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const displayAnimaResult = ');
+  assertTrue(fnStart > 0, 'displayAnimaResult must be defined');
+  const fnBody = js.slice(fnStart, fnStart + 3000);
+  assertTrue(/activateAnimaChatForResult/.test(fnBody),
+    'displayAnimaResult must fire activateAnimaChatForResult');
+  assertTrue(/\.catch/.test(fnBody),
+    'displayAnimaResult must catch and log activation failures (fire-and-forget)');
+});
+
+test('Slice 2.4: activateAnimaChatForResult defined and uses Anima envelope (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const activateAnimaChatForResult = async');
+  assertTrue(fnStart > 0, 'activateAnimaChatForResult must be defined');
+  const fnBody = js.slice(fnStart, fnStart + 3000);
+  assertTrue(/data\.positive/.test(fnBody),
+    'activateAnimaChatForResult must use data.positive as the prompt');
+  assertTrue(/model: 'anima'/.test(fnBody),
+    'activateAnimaChatForResult must send model: anima');
+  assertTrue(/preset_anima_internal/.test(fnBody),
+    'activateAnimaChatForResult must use the placeholder preset_id');
+  assertTrue(/\/api\/chat\/sessions/.test(fnBody),
+    'activateAnimaChatForResult must POST to /api/chat/sessions');
+  assertTrue(/state\.chatSessionId = session\.id/.test(fnBody),
+    'activateAnimaChatForResult must set state.chatSessionId');
+});
+
+test('Slice 2.4: __i2pTest exposes activateAnimaChatForResult (ADR 0021)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const hookBlock = js.slice(js.indexOf('window.__i2pTest = {'));
+  assertTrue(/activateAnimaChatForResult/.test(hookBlock),
+    '__i2pTest must expose activateAnimaChatForResult');
+});
+
+test('Slice 2.4: SPEC §14 names User Stories #4 + #5 (chat refines selected model + session-end on switch) (ADR 0021)', () => {
+  const spec = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/SPEC.md'), 'utf8');
+  assertTrue(/4\. As a user in Anima mode/.test(spec),
+    'SPEC §14 must have User Story #4 (chat refines the Anima prompt)');
+  assertTrue(/chat console to refine the Anima prompt/.test(spec),
+    'SPEC §14 User Story #4 must name the Anima chat refinement');
+  assertTrue(/5\. As a user switching model mid-session/.test(spec),
+    'SPEC §14 must have User Story #5 (switching model ends the session)');
+  assertTrue(/end cleanly/.test(spec),
+    'SPEC §14 User Story #5 must name the session-end behavior');
+});
+
 // ─── ADR 0018 — actions / mood / lighting re-analysis + curated presets
 
 test('POST /api/actions endpoint is registered (ADR 0018)', () => {
