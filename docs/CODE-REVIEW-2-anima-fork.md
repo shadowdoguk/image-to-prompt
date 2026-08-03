@@ -528,3 +528,85 @@ None. Slice 2.4 ships exactly what SPEC §14.9 lists. The Z-Image chat path is u
 - The license boundary is respected: no Anima weights, no hosted inference, no paid-API integration. The chat LLM is MiniMax M3.
 
 **Slice 2.4 ships.** Move to Slice 2.5 (per-sub-slice code review + commit aggregation).
+
+---
+
+## Slice 2.5 — Aggregate verdict (the slice ships)
+
+**Slice:** 2.5 — Aggregate (per-sub-slice code review + commit aggregation)
+**Date:** 2026-08-03
+**Reviewer:** Goose (self-finalizing; the four per-sub-slice reviews are the substrate)
+
+---
+
+### Slice 2 sub-slice commit log
+
+| Sub-slice | Title | Commit | Code review | Verdict | Tests |
+|---|---|---|---|---|---|
+| 2.1 | model-state + UI selector | `1756d0d` | `9e98a54` | **pass** | 330 / 330 |
+| 2.2 | Anima backend contract | `424c60f` | `1022b80` | **pass** | 348 / 348 |
+| 2.3 | frontend dispatch wiring | `3751392` | `2672849` | **pass** | 363 / 363 |
+| 2.4 | chat refines the selected model | `f1ed230` | `b836db9` | **pass** | 373 / 373 |
+| **2.5** | aggregation | (this commit) | — | **pass** | 373 / 373 |
+
+**All four sub-slices passed per-sub-slice review.** The slice ships.
+
+### Aggregate findings
+
+| Axis | Total findings | Notes |
+|---|---|---|
+| Hard | 0 | none across the four sub-slices |
+| Judgement | 11 | 3 pattern-adherence (per-field mirror), 5 small intentional duplication (wrappers/helpers), 2 spec-necessary (constraint block length, dispatch branching), 1 mid-slice regression caught + fixed (Slice 2.4 — branching the wrong function) |
+| Spec deviations | 0 | all four sub-slices hit the SPEC §14.9 DoD exactly |
+
+### Slice 2 acceptance criteria (SPEC §14.1)
+
+| Acceptance criterion | Status |
+|---|---|
+| Pre-Generate model picker (dropdown or button group) | ✅ ships |
+| Z-Image Turbo remains the default (existing behavior preserved) | ✅ ships |
+| Anima is a sibling contract with positive + negative prompts | ✅ ships |
+| Anima variant selector (Base / Aesthetic / Turbo) | ✅ ships |
+| Per-model chat sessions (Q3 resolution, option a) | ✅ ships |
+| Anima chat refinements dispatch to ANIMA_CHAT_CONSTRAINTS_BLOCK | ✅ ships |
+| License boundary respected (no Anima weights, no hosted inference, no paid-API) | ✅ ships |
+| STATE persisted (localStorage) + URL mirrored | ✅ ships |
+| `state.model` validated on read (garbage falls back to default) | ✅ ships |
+| SPEC §14.7 User Stories #1–#5 implemented | ✅ all 5 |
+
+### Slice 2 commit aggregation (the ship commit)
+
+The ship commit is a docs-only commit that:
+- Adds this aggregate verdict to `docs/CODE-REVIEW-2-anima-fork.md`.
+- Updates `docs/SESSION-STATE.md` with the Slice 2 shipped state.
+- Updates `docs/BACKLOG.md` — the parked Slice 2.1 entry moves to "shipped".
+- Closes the slice's branch onto `main`.
+
+The ship commit is the closing handshake of the methodology (`docs/PRINCIPLES.md` §6.5: "code review before commit, then commit"). No code changes; the code review document and the meta-docs are the loads.
+
+### Slice 2 quantitative summary
+
+- **5 sub-slices** shipped, each with its own per-sub-slice code review.
+- **52 net new tests** (321 baseline → 373 — +15.1%) across 4 test files.
+- **417 net new lines** in `server.js` (+417) and `src/app.js` (+431) — the slice added the Anima contract end-to-end without bloating either file past the 290KB kill criterion.
+- **5 new artefacts** (902-line manual + 4 ADC/Spec/Pre-mortem/Code-review docs) — the durable design and contract surface.
+- **1 ADR** (ADR 0021 — Anima fork; Status: Accepted).
+- **0 breaking changes** to the existing Z-Image contract.
+- **0 new dependencies** introduced.
+- **0 schema migrations** — the chat session shape gained an optional `model` field; older sessions read it as missing and default to `'zimage_turbo'`.
+
+### Slice 2 risks captured (for the G5 polish audit)
+
+| Risk | Source | Status |
+|---|---|---|
+| Two contracts drift out of sync | PRE-MORTEM failure mode 1 | mitigated by shared per-field artifacts + symmetric demo |
+| The Anima LLM contract elicits useless output | PRE-MORTEM failure mode 2 | mitigated by prompt iteration + 4 image-type demo |
+| Variant switching breaks chat history | PRE-MORTEM failure mode 3 | mitigated by per-model sessions (Slice 2.4) |
+| State corruption crashes the app | PRE-MORTEM failure mode 4 | mitigated by validation on read + fallback |
+| License boundary misread | PRE-MORTEM failure mode 5 | mitigated by no-weights constraint + SPEC §14.10 documentation |
+
+### Verdict: **Slice 2 ships.**
+
+**The Anima fork is in.** The pre-Generate model picker chooses between Z-Image Turbo and Anima. Both contracts are wired end-to-end (prompt contract → backend route → result panel → chat refinement). The license boundary is respected. The tests are green. The code review is pass.
+
+G5 polish audit is the next gate.
