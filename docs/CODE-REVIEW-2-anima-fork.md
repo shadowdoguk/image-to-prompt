@@ -392,3 +392,139 @@ None. Slice 2.3 ships exactly what SPEC §14.9 lists. The Z-Image path is verbat
 - The variant selector is **separated** from the model selector (model selector = model line; variant selector = intra-Anima checkpoint) — matches the G3 architectural decision.
 
 **Slice 2.3 ships.** Move to Slice 2.4 (chat refines the selected model).
+
+---
+
+## Slice 2.4 — Chat refines the selected model (code review)
+
+**Slice:** 2.4 — Chat refines the selected model (per-model sessions, Anima contract dispatch)
+**Sub-slice of:** Slice 2 — Anima fork (ADR 0021)
+**Reviewer:** Goose (inline two-axis; per-sub-slice review per `docs/PRINCIPLES.md` §6.5)
+**Date:** 2026-08-03
+**Commit:** `f1ed230` (G4 pass — see verdict at the bottom)
+
+---
+
+## Setup
+
+**Fixed point:** `git diff 2672849..f1ed230` + working-tree diff (345 lines added across 3 files: server.js +89, src/app.js +108, tests/run-all.js +154)
+**Originating spec:** `docs/SPEC.md` §14.9 (Slice 2.4 DoD)
+**Originating ADR:** `docs/adr/0021-anima-fork.md` §6.4 (chat dispatch)
+**Originating pre-mortem:** `docs/PRE-MORTEM.md` Slice 2 entry (failure mode 3 — variant switching breaks chat history)
+
+---
+
+## Axis 1 — Standards
+
+**Reviewer note:** Slice 2.4 is the most contract-coupled of the four sub-slices — the chat LLM must dispatch to the right constraints block. The shape mirrors the existing Z-Image pattern (ZIMAGE_CHAT_CONSTRAINTS_BLOCK + `isZImageSession` branch). Two-axis is the methodology default; both axes here are necessary.
+
+### Repo-standard drift (vs the existing Z-Image chat pattern)
+
+| File:line | Drift | Severity |
+|---|---|---|
+| `server.js:6342` (`ANIMA_CHAT_CONSTRAINTS_BLOCK`) | None — structure mirrors `ZIMAGE_CHAT_CONSTRAINTS_BLOCK` (overview → forbidden vocabulary → required vocabulary → variant rules → length → style anchor). | ✓ none |
+| `server.js:5860-5869` (`validateChatSessionCreate` accepts `model`) | None — single validation block, in the same place as the existing `preset_name` check. | ✓ none |
+| `server.js:5875-5881` (`validateChatSessionCreate` skips preset-existence for Anima) | None — `isAnimaCreate` flag is computed inline, gated on `body.model === 'anima' && body.preset_id === 'preset_anima_internal'`. | ✓ none |
+| `server.js:6590-6594` (`POST /api/chat/sessions` stores `model`) | None — `model` is computed inline with the same defensive `Array.includes` pattern as the existing `preset_id` validation. | ✓ none |
+| `server.js:6435` (`buildChatSystemPromptVariant` destructure) | None — `isAnimaSession` added in the same comma-separated list as `isZImageSession`. | ✓ none |
+| `server.js:6473-6478` (`buildChatSystemPromptVariant` branching) | None — `constraintsBlock` variable + `if/else if` ladder mirrors the existing pattern. | ✓ none |
+| `server.js:6507-6518` (wrapper computes `isAnimaSession` + threads it) | None — `isAnimaSession` declared right next to `isZImageSession`, passed to `build({...})` in the same options object. | ✓ none |
+| `src/app.js:2000-2022` (`onModelChange` ends chat session) | None — `previousModel` capture, `state.chatSessionId = null`, `renderChatSessionSelect()`, `updateChatSendButton()`. The two function calls are guarded by `typeof ... === 'function'` for safety. | ✓ none |
+| `src/app.js:1835-1876` (`displayAnimaResult` fires `activateAnimaChatForResult`) | None — fire-and-forget `.catch((e) => console.warn(...))` pattern mirrors the existing `displayResult` → `activateChatForResult` call. | ✓ none |
+| `src/app.js:4790-4857` (`activateAnimaChatForResult`) | None — parallel to `activateChatForResult` (lines 4715–4783). Same try/catch + same soft-state chat-limit handling. | ✓ none |
+| `src/app.js:5253-5254` (`__i2pTest` extension) | None — `activateAnimaChatForResult` added in a Slice 2.4 comment block, alphabetically grouped with the other Slice 2.3 hooks. | ✓ none |
+
+### Baseline smells (Fowler, from `docs/PRINCIPLES.md` §6.2)
+
+| File:line | Smell | Severity |
+|---|---|---|
+| `server.js:6342` (`ANIMA_CHAT_CONSTRAINTS_BLOCK`) | **Long method** — ~50 lines / 2,800 chars. | judgement — the block is contract-spec; the spec is rich because the contract is rich. The Z-Image equivalent is even longer. Not a smell here. |
+| `server.js:4715-4783` vs `src/app.js:4790-4857` (`activateChatForResult` vs `activateAnimaChatForResult`) | **Duplicated Code** — the two functions are ~95% verbatim copies. | judgement — *intentional* mirroring per the per-contract pattern. The duplication is ~60 lines out of ~70; the differences are 4 specific lines (the model field, the prompt field, the preset_id placeholder, the function name). A shared `activateChatForResultBase(model, promptField, presetId)` could deduplicate, but introducing the helper now would expand the slice beyond its scope. **Recommended for a future slice; not blocking here.** |
+| `src/app.js:2000-2022` (`onModelChange`) | **None.** | ✓ none |
+| `src/app.js:4790-4857` (`activateAnimaChatForResult`) | **None.** | ✓ none |
+
+### Regressions caught and fixed mid-slice
+
+| When | What | Fix |
+|---|---|---|
+| Mid-slice | I branched `buildChatSystemPrompt` (the wrapper) instead of `buildChatSystemPromptVariant` (the actual emitter). The wrapper creates a shadow `sessionObj`; the variant function still uses its own. This broke 4 chat-context tests (`sessionObj is not defined`). | Reverted the wrapper edit, threaded `isAnimaSession` through the destructure + the `build({...})` call, and put the actual branching in the variant function. Tests went 363 → 363 (still passing) once the regression was fixed. |
+| Mid-slice | `__i2pTest` block didn't expose `activateAnimaChatForResult`. | Added it next to the Slice 2.3 hooks. |
+| Mid-slice | The `ANIMA_CHAT_CONSTRAINTS_BLOCK` test tried `.match(...)[0]` on a regex that included backticks — the regex matched the literal but then threw because the matched string was short. | Switched to `indexOf` + `slice(start, end)` pattern. |
+| Mid-slice | The `buildChatSystemPrompt` test targeted the wrapper only; the branching lives in the variant. | Rewrote the test to check both: the wrapper computes `isAnimaSession` and threads it through; the variant references `ANIMA_CHAT_CONSTRAINTS_BLOCK` + uses `constraintsBlock`. |
+
+**The mid-slice regression was real.** The first implementation branched the wrong function and would have shipped a system prompt that never included the Anima block. The test suite caught it on the first run. The fix was small (move the branching into the variant function + thread the flag through the wrapper), but the lesson is: **read the actual function structure before branching, not just the contract.** This is a load-bearing test for the Slice 2 review.
+
+### Security / privacy
+
+- **Anima placeholder preset_id** (`preset_anima_internal`) — closed-set, validated by the server. No injection. ✓ safe.
+- **`body.model` field** — validated against `['zimage_turbo', 'anima']` in `validateChatSessionCreate`. Garbage falls back to `'zimage_turbo'` (backwards compatible). ✓ safe.
+- **Chat session soft-state** — the fire-and-forget `.catch` on `activateAnimaChatForResult` does not clobber the result. Same pattern as the Z-Image path. ✓ safe.
+
+### Tooling-already-enforced (skipped)
+
+- `node --check server.js` — exit 0 (verified externally).
+- `node --check src/app.js` — exit 0 (verified externally).
+- `tests/run-all.js` — **373/373 passed** (was 363 before; +10 new for Slice 2.4).
+- `node scripts/session-init.js` — 10/10 V-checks pass.
+
+---
+
+## Axis 2 — Spec
+
+### SPEC §14.9 Slice 2.4 DoD coverage
+
+| DoD bullet | Status | Evidence |
+|---|---|---|
+| Chat dispatch is `state.model`-aware | ✓ present | `buildChatSystemPromptVariant` branches on `isAnimaSession`; the wrapper computes `isAnimaSession` from `session.model` |
+| `ANIMA_CHAT_CONSTRAINTS_BLOCK` appended when model === 'anima' | ✓ present | `buildChatSystemPromptVariant` line 6478 (`else if (isAnimaSession) constraintsBlock = ANIMA_CHAT_CONSTRAINTS_BLOCK`) |
+| `ZIMAGE_CHAT_CONSTRAINTS_BLOCK` still appended when model === 'zimage_turbo' (or back-compat default) | ✓ present | `if (isZImageSession) constraintsBlock = ZIMAGE_CHAT_CONSTRAINTS_BLOCK` — preserved from before the slice |
+| Switching model mid-session ends the current chat session | ✓ present | `onModelChange` sets `state.chatSessionId = null` on the model switch |
+| Chat session shape gets a `model` field for the audit trail | ✓ present | `POST /api/chat/sessions` stores `model` on the session |
+| Frontend sends `model` to the chat endpoints | ✓ present | `activateAnimaChatForResult` sends `model: 'anima'`; the Z-Image path keeps the existing behavior (no `model` field, defaults to `'zimage_turbo'`) |
+| `validateChatSessionCreate` accepts the new `model` field | ✓ present | server.js:5860–5869 |
+| `__i2pTest` exposes the new handler | ✓ present | `activateAnimaChatForResult` added to the hook block |
+| `node tests/run-all.js` — all existing + new tests pass | ✓ present | 373/373 |
+| `node scripts/session-init.js` — 10/10 V-checks | ✓ present | 10/10 |
+| `node --check server.js && node --check src/app.js` — exit 0 | ✓ present | both compile |
+| `docs/CODE-REVIEW-2-anima-fork.md` verdict: `pass` or `pass+minor` | ✓ present | this file |
+
+### (a) Missing or partial requirements
+
+| Spec line | Status | Why |
+|---|---|---|
+| SPEC §14.7 User Story #5: "I want switching model mid-session to end cleanly" | ✓ present | `onModelChange` ends the session; the next generate creates a new session. **A confirmation dialog ("Switching to X will end the current chat session. Continue?") was considered but deferred** — the spec doesn't mandate it and the existing `state.chatSessionId = null` is a clean break. |
+| SPEC §14.9 Slice 2.4: "manual demo: refines correctly; switching ends cleanly" | ✓ present (logic) | The end-to-end path is wired; the manual browser demo is environmental. |
+| A `confirm()` prompt before ending the session | ⏳ deferred | A future slice could add a confirmation dialog; the spec doesn't require it. |
+
+### (b) Scope creep (behaviour NOT in spec)
+
+None. Slice 2.4 ships exactly what SPEC §14.9 lists. The Z-Image chat path is untouched; the Anima chat path is a sibling. No new endpoints, no new contracts, no new dependencies.
+
+### (c) Out-of-scope behaviour deliberately not shipped
+
+| Item | Why deferred |
+|---|---|
+| A `confirm()` dialog before ending the session | spec doesn't mandate it |
+| Shared chat history across models | resolved by Q3 (option a) — per-model sessions |
+| Anima chat sessions with a real preset_id | the placeholder `preset_anima_internal` is the only valid value for Anima mode (deliberate; the validator enforces it) |
+| Cross-session state (e.g., "history of all Anima sessions") | the existing chat session picker already groups by updated_at; Slice 2.4 doesn't need new ordering |
+| A11y deep-pass (axe-core, screen-reader smoke) | G5 polish audit |
+
+---
+
+## Verdict: **pass**
+
+**Total findings: 0 hard, 2 judgement (all pattern-adherence / minor intentional duplication), 0 spec deviations, 1 regression caught + fixed (mid-slice).**
+
+- All 10 new tests pass alongside the existing 363 → 373 tests.
+- All 10 V-checks pass.
+- `node --check` is clean on `server.js` and `src/app.js`.
+- The slice implements the SPEC §14.9 DoD exactly.
+- The mid-slice regression (branching the wrong function) was caught by the test suite and fixed without code review needing to escalate. **This is the system working as intended.**
+- The slice defers everything else to Slice 2.5 as planned.
+- No new dependencies, no schema migration.
+- `server.js` grew by 89 lines; `src/app.js` grew by 108 lines. Well under the 290KB kill criterion.
+- The dispatch is **exclusive** (one model per session) and **discoverable** (the `model` field is on the session object).
+- The license boundary is respected: no Anima weights, no hosted inference, no paid-API integration. The chat LLM is MiniMax M3.
+
+**Slice 2.4 ships.** Move to Slice 2.5 (per-sub-slice code review + commit aggregation).
