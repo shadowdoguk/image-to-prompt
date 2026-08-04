@@ -25,18 +25,42 @@ const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE_BYTES || '10485760', 10
 // Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
-const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL || 'https://api.minimaxi.chat/v1';
-const MINIMAX_MODEL = process.env.MINIMAX_MODEL || 'MiniMax-Text-01';
+// Kilo AI Gateway — OpenAI-compatible API gateway to 500+ models.
+// Replaces direct Kilo Code API integration (ADR 0022).
+const KILO_API_KEY = process.env.KILO_API_KEY;
+const KILO_BASE_URL = process.env.KILO_BASE_URL || 'https://api.kilo.ai/api/gateway';
+
+// Hardcoded model list for the LLM model selector (SPEC §15.8).
+// Default is Kilo Code (user's familiar baseline).
+const ALLOWED_LLM_MODELS = [
+  'minimax/minimax-m3',
+  'openai/gpt-5.6-luna',
+  'google/gemini-3.1-pro-preview',
+  'google/gemini-3.5-flash',
+  'nvidia/nemotron-3-ultra-550b-a55b',
+  'x-ai/grok-4.3'
+];
+const DEFAULT_LLM_MODEL = 'minimax/minimax-m3';
 
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'];
 
-const minimaxConfigured = Boolean(
-  MINIMAX_API_KEY &&
-  MINIMAX_API_KEY !== 'your-minimax-api-key-here' &&
-  MINIMAX_API_KEY.startsWith('sk-')
+const kiloConfigured = Boolean(
+  KILO_API_KEY &&
+  KILO_API_KEY !== 'your-kilo-api-key-here' &&
+  KILO_API_KEY.length > 10
 );
+
+/**
+ * Resolve and validate the LLM model from a request body.
+ * Returns the validated model ID or the default.
+ * @param {object} body - req.body from the route handler
+ * @returns {string} validated model ID
+ */
+const resolveModel = (body) => {
+  const raw = body && body.llmModel ? String(body.llmModel) : DEFAULT_LLM_MODEL;
+  return ALLOWED_LLM_MODELS.includes(raw) ? raw : DEFAULT_LLM_MODEL;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Field palette (single source of truth for Stage 1 schema + edit UI)
@@ -207,7 +231,7 @@ const MAX_STAGE2_TOKENS = 960;
 // 150-300 words, hard ceiling 750 words / 1024 tokens, minimum
 // effective 80 words. Below 80 the output goes generic; above ~400
 // diminishing returns kick in. Used by `measureStage2Length` + the
-// length-check + retry orchestration in `callMiniMaxStage2`.
+// length-check + retry orchestration in `callKiloStage2`.
 const STAGE2_SWEET_SPOT_MIN = 150;
 const STAGE2_SWEET_SPOT_MAX = 300;
 const STAGE2_HARD_MAX_WORDS = 750;
@@ -257,7 +281,7 @@ const classifyStage2Length = (text) => {
  *   - `description` (appended to the Stage 1 system prompt via
  *     `buildFieldFormatOverridePrompt` so the LLM sees the per-field contract
  *     for every field that has a hint. This text is NOT sent in the JSON Schema
- *     because the MiniMax M3 API rejects schema `description` strings over
+ *     because the Kilo Code API rejects schema `description` strings over
  *     200 characters with error code 2013 — verified live 2026-06-22.)
  *
  * ADR 0003: `subject` is the canonical case — the rest of the palette uses the
@@ -2085,7 +2109,7 @@ const FIELD_INPUT_MIN_LENGTH = {
  * `FIELD_FORMAT_HINTS` (ADR 0003) take precedence over the input-type default.
  *
  * NOTE: per-field `description` strings from `FIELD_FORMAT_HINTS` are NOT sent
- * in the schema — the MiniMax M3 API rejects schema `description` over 200
+ * in the schema — the Kilo Code API rejects schema `description` over 200
  * characters (error code 2013, verified live 2026-06-22). The same text is
  * delivered to the LLM via `buildFieldFormatOverridePrompt` appended to the
  * Stage 1 system prompt instead.
@@ -2124,7 +2148,7 @@ const buildStage1Schema = (fieldNames) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MiniMax M3 API integration
+// Kilo Code API integration
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -2152,9 +2176,9 @@ const validateAnalysisLengths = (parsed, fieldNames) => {
   return violations;
 };
 
-const callMiniMaxStage1 = async (imageDataUri, stage1SystemPrompt, fieldNames) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloStage1 = async (imageDataUri, stage1SystemPrompt, fieldNames, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const schema = buildStage1Schema(fieldNames);
@@ -2174,15 +2198,15 @@ Respond ONLY with the JSON object — no prose, no markdown, no commentary.`;
     const timeout = setTimeout(() => controller.abort(), 60000);
 
     try {
-      const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+      const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${MINIMAX_API_KEY}`
+          'Authorization': `Bearer ${KILO_API_KEY}`
         },
         signal: controller.signal,
         body: JSON.stringify({
-          model: MINIMAX_MODEL,
+          model: model,
           max_tokens: 1500,
           temperature: 0.4,
           messages: [
@@ -2209,15 +2233,15 @@ Respond ONLY with the JSON object — no prose, no markdown, no commentary.`;
       clearTimeout(timeout);
 
       if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-      if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+      if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`MiniMax M3 Stage 1 error (${response.status}): ${errorText.substring(0, 200)}`);
+        throw new Error(`Kilo Code Stage 1 error (${response.status}): ${errorText.substring(0, 200)}`);
       }
 
       const result = await response.json();
       const content = result.choices?.[0]?.message?.content;
-      if (!content) throw new Error('MiniMax M3 returned an empty response.');
+      if (!content) throw new Error('Kilo Code returned an empty response.');
 
       let parsed;
       const trimmed = content.trim();
@@ -2309,9 +2333,9 @@ Respond ONLY with the JSON object — no prose, no markdown, no commentary.`;
  * Guarantees these fields are populated with focused, dedicated analysis
  * (rather than hoping the main Stage 1 prompt covers them).
  */
-const callMiniMaxOrientationAnalysis = async (imageDataUri, fieldsNeeded) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured.');
+const callKiloOrientationAnalysis = async (imageDataUri, fieldsNeeded, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured.');
   }
 
   const needOrientation = fieldsNeeded.includes('subject_orientation');
@@ -2387,15 +2411,15 @@ Mandatory sub-elements to address (when applicable):
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 2000,
         temperature: 0.3,
         messages: [
@@ -2648,9 +2672,9 @@ The "camera_angle" value MUST comprehensively address every one of the following
  * cost without changing the outcome. The schema `minLength: 20` enforces
  * the floor at the API level.
  */
-const callMiniMaxCameraAngleAnalysis = async (imageDataUri) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloCameraAngleAnalysis = async (imageDataUri, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const systemPrompt = DEFAULT_CAMERA_ANGLE_PROMPT;
@@ -2659,15 +2683,15 @@ const callMiniMaxCameraAngleAnalysis = async (imageDataUri) => {
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 600,
         temperature: 0.3,
         messages: [
@@ -2701,15 +2725,15 @@ const callMiniMaxCameraAngleAnalysis = async (imageDataUri) => {
     clearTimeout(timeout);
 
     if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax M3 camera-angle analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      throw new Error(`Kilo Code camera-angle analysis error (${response.status}): ${errorText.substring(0, 200)}`);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+    if (!content) throw new Error('Kilo Code returned an empty response.');
 
     let parsed;
     const trimmed = content.trim();
@@ -3030,6 +3054,7 @@ You respond with a SINGLE JSON object with exactly two keys: "positive" and "neg
 # POSITIVE PROMPT RULES
 
 - Use LOWERCASE tags. Use COMMAS to separate tags. Use SPACES (not underscores) inside tags. The ONLY tags that keep underscores are "score_1" through "score_9" and "1girl" / "1boy" / "1other" and "2girls" / "3girls" counters.
+- When a tag differs between Danbooru and Gelbooru, prefer the Gelbooru version (the Qwen-3 text encoder was trained with Gelbooru-favored tagging conventions).
 - Tag order: [quality/meta/year/safety] [count] [character] [series] [artist] [general tags]. Within each section, tag order is arbitrary. The section order is NOT arbitrary.
 - The "artist" section tags MUST be prefixed with "@" (e.g. "@big chungus"). The effect is weak without the @.
 - Quality tags: lead with "masterpiece, best quality, score_7, safe, " for Base / Turbo. For Aesthetic, drop "score_7" but keep "masterpiece, best quality, safe, ".
@@ -3037,7 +3062,7 @@ You respond with a SINGLE JSON object with exactly two keys: "positive" and "neg
 - Meta tags: "highres", "absurdres", "anime screenshot", etc.
 - Safety tags: "safe" / "sensitive" / "nsfw" / "explicit" — exactly one.
 - Multi-character: each character gets a cluster of name + hair + eyes + outfit. Name the character, then describe their appearance.
-- If the image is NON-ANIME (e.g. an oil painting, a digital render, a photograph), start the positive prompt with a dataset tag on line 1: "ye-pop" (LAION-POP non-anime artistic) or "deviantart" (DeviantArt non-anime artistic). Line 2 is the alt-text (ye-pop) or title (deviantart). Line 3+ is the caption.
+- If the image is NON-ANIME (e.g. an oil painting, a digital render, a photograph), begin the positive string with the dataset tag first: "ye-pop," (LAION-POP non-anime artistic) or "deviantart," (DeviantArt non-anime artistic). Follow immediately with the alt-text (ye-pop) or title (deviantart), then the caption — all comma-separated in the flat positive string. The user will add literal newlines when pasting into ComfyUI.
 - For non-anime: do NOT use anime-specific tags (1girl, score_*, masterpiece). Use generic style vocabulary (oil painting, digital render, abstract, etc.) and the dataset tag.
 
 # NEGATIVE PROMPT RULES
@@ -3067,6 +3092,20 @@ NEVER ask for multi-word text rendering — single words sometimes work, short p
 - Both sides are tag lists. NEVER write prose paragraphs.
 - Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.
 
+# COVERAGE CATEGORIES
+
+The positive prompt MUST cover at least these six categories when each is visible in the image. Mirror the Z-Image Turbo 14-field analysis (subject, subject_orientation, actions, mood, composition, texture, style, lighting, era, camera_angle, artistic_medium, depth_of_field, contrast, colors) where applicable, expressed as Anima tags. Missing categories are a bug — see issue #23.
+
+- CAMERA ANGLE — pick the single best-fit tag from this vocabulary:
+  "looking at viewer", "portrait", "upper body", "cowboy shot", "full body", "from side", "from behind", "from above", "from below", "wide shot", "close-up", "profile". Use one tag, not several — overlapping camera tags dilute the signal.
+- MOOD / EXPRESSION — at least one tag describing the subject's expression or affect when discernible. Vocabulary: "smile", "gentle smile", "open mouth", "closed eyes", "serious", "sad", "angry", "happy", "flustered", "blush". Skip only if the subject's face is fully occluded.
+- LIGHTING — at least one tag describing the dominant lighting condition. Vocabulary: "soft lighting", "hard lighting", "rim lighting", "backlighting", "sunlight", "indoor lighting", "outdoor lighting", "studio lighting", "dramatic shadows", "dappled sunlight", "moonlight", "candlelight", "neon". If lighting is unclear, default to "soft lighting" — never omit this category.
+- POSTURE / ACTION — at least one tag describing how the subject is positioned or what they are doing. Vocabulary: "standing", "sitting", "lying", "walking", "running", "leaning", "crossed arms", "hand on hip", "holding", "pointing". Skip only if the subject is fully static AND no body parts are visible.
+- COMPOSITION / FRAMING — at least one tag describing the framing context when applicable. Vocabulary: "solo", "duo", "group", "crowd", "outdoors", "indoors", "white background", "simple background", "detailed background".
+- ERA / TIME OF DAY — at least one tag describing the temporal setting when discernible. Vocabulary: "year 2025", "year 2024", "newest", "recent", "early", "mid", "old", "day", "night", "sunset", "sunrise", "golden hour".
+
+Do NOT invent tags for categories that are genuinely not present in the image (e.g. no era tag if the image is a pure character portrait on white background — "year 2025" would be misleading). The rule is "cover what's there", not "always emit all six".
+
 # STYLE (when the subject is non-anime)
 
 - Use natural-language style vocabulary for non-anime subjects ("oil painting", "digital render", "abstract", "impressionist", "muted palette", "soft brushwork", "gallery lighting").
@@ -3080,10 +3119,10 @@ NEVER ask for multi-word text rendering — single words sometimes work, short p
 - The artist tag, if used, must be "@" prefixed.`;
 
 /**
- * Slice 2.2 — callMiniMaxAnimaAnalysis.
+ * Slice 2.2 — callKiloAnimaAnalysis.
  * Returns { positive, negative } (the Anima contract, two-output shape).
  *
- * Mirrors the per-field pattern (callMiniMaxTextureAnalysis et al):
+ * Mirrors the per-field pattern (callKiloTextureAnalysis et al):
  *  - single-attempt LLM call
  *  - 60-second AbortController timeout
  *  - schema builder inline, length floors enforced
@@ -3094,9 +3133,9 @@ NEVER ask for multi-word text rendering — single words sometimes work, short p
  * controls how the LLM shapes the prompt — see DEFAULT_ANIMA_PROMPT
  * "VARIANT RULES" section.
  */
-const callMiniMaxAnimaAnalysis = async (imageDataUri, variant) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloAnimaAnalysis = async (imageDataUri, variant, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const allowedVariants = ['base', 'aesthetic', 'turbo'];
@@ -3109,15 +3148,15 @@ const callMiniMaxAnimaAnalysis = async (imageDataUri, variant) => {
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 1000,
         temperature: 0.3,
         messages: [
@@ -3152,15 +3191,15 @@ const callMiniMaxAnimaAnalysis = async (imageDataUri, variant) => {
     clearTimeout(timeout);
 
     if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax M3 anima analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      throw new Error(`Kilo Code anima analysis error (${response.status}): ${errorText.substring(0, 200)}`);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+    if (!content) throw new Error('Kilo Code returned an empty response.');
 
     let parsed;
     const trimmed = content.trim();
@@ -3207,13 +3246,13 @@ const callMiniMaxAnimaAnalysis = async (imageDataUri, variant) => {
 /**
  * Stage 1.A — dedicated actions-only re-analysis.
  * Runs ONLY for `POST /api/actions` (ADR 0018). Independent of the active
- * preset. Mirrors `callMiniMaxCameraAngleAnalysis` (ADR 0008): single-
+ * preset. Mirrors `callKiloCameraAngleAnalysis` (ADR 0008): single-
  * attempt, schema builder inline, 60-second timeout, file-path cleanup
  * on both success and error paths (handled by the route wrapper).
  */
-const callMiniMaxActionsAnalysis = async (imageDataUri) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloActionsAnalysis = async (imageDataUri, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const systemPrompt = DEFAULT_ACTIONS_PROMPT;
@@ -3222,15 +3261,15 @@ const callMiniMaxActionsAnalysis = async (imageDataUri) => {
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 600,
         temperature: 0.3,
         messages: [
@@ -3264,15 +3303,15 @@ const callMiniMaxActionsAnalysis = async (imageDataUri) => {
     clearTimeout(timeout);
 
     if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax M3 actions analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      throw new Error(`Kilo Code actions analysis error (${response.status}): ${errorText.substring(0, 200)}`);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+    if (!content) throw new Error('Kilo Code returned an empty response.');
 
     let parsed;
     const trimmed = content.trim();
@@ -3316,12 +3355,12 @@ const callMiniMaxActionsAnalysis = async (imageDataUri) => {
 /**
  * Stage 1.M — dedicated mood-only re-analysis.
  * Runs ONLY for `POST /api/mood` (ADR 0018). Independent of the active
- * preset. Mirrors `callMiniMaxActionsAnalysis` — single-attempt, schema
+ * preset. Mirrors `callKiloActionsAnalysis` — single-attempt, schema
  * builder inline, 60-second timeout.
  */
-const callMiniMaxMoodAnalysis = async (imageDataUri) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloMoodAnalysis = async (imageDataUri, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const systemPrompt = DEFAULT_MOOD_PROMPT;
@@ -3330,15 +3369,15 @@ const callMiniMaxMoodAnalysis = async (imageDataUri) => {
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 600,
         temperature: 0.3,
         messages: [
@@ -3372,15 +3411,15 @@ const callMiniMaxMoodAnalysis = async (imageDataUri) => {
     clearTimeout(timeout);
 
     if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax M3 mood analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      throw new Error(`Kilo Code mood analysis error (${response.status}): ${errorText.substring(0, 200)}`);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+    if (!content) throw new Error('Kilo Code returned an empty response.');
 
     let parsed;
     const trimmed = content.trim();
@@ -3424,13 +3463,13 @@ const callMiniMaxMoodAnalysis = async (imageDataUri) => {
 /**
  * Stage 1.L — dedicated lighting-only re-analysis.
  * Runs ONLY for `POST /api/lighting` (ADR 0018). Independent of the
- * active preset. Mirrors `callMiniMaxCameraAngleAnalysis` (ADR 0008):
+ * active preset. Mirrors `callKiloCameraAngleAnalysis` (ADR 0008):
  * single-attempt, schema builder inline, 60-second timeout, 20-char
  * schema floor (above the generic 15-char `text` floor).
  */
-const callMiniMaxLightingAnalysis = async (imageDataUri) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloLightingAnalysis = async (imageDataUri, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const systemPrompt = DEFAULT_LIGHTING_PROMPT;
@@ -3439,15 +3478,15 @@ const callMiniMaxLightingAnalysis = async (imageDataUri) => {
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 600,
         temperature: 0.3,
         messages: [
@@ -3481,15 +3520,15 @@ const callMiniMaxLightingAnalysis = async (imageDataUri) => {
     clearTimeout(timeout);
 
     if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax M3 lighting analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      throw new Error(`Kilo Code lighting analysis error (${response.status}): ${errorText.substring(0, 200)}`);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+    if (!content) throw new Error('Kilo Code returned an empty response.');
 
     let parsed;
     const trimmed = content.trim();
@@ -3556,9 +3595,9 @@ const callMiniMaxLightingAnalysis = async (imageDataUri) => {
  * `texture` field gets the AI button only, no curated chips (mirror
  * ADR 0018 §1 reasoning for `actions`).
  */
-const callMiniMaxTextureAnalysis = async (imageDataUri) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloTextureAnalysis = async (imageDataUri, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const systemPrompt = DEFAULT_TEXTURE_PROMPT;
@@ -3567,15 +3606,15 @@ const callMiniMaxTextureAnalysis = async (imageDataUri) => {
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 600,
         temperature: 0.3,
         messages: [
@@ -3609,15 +3648,15 @@ const callMiniMaxTextureAnalysis = async (imageDataUri) => {
     clearTimeout(timeout);
 
     if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax M3 texture analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      throw new Error(`Kilo Code texture analysis error (${response.status}): ${errorText.substring(0, 200)}`);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+    if (!content) throw new Error('Kilo Code returned an empty response.');
 
     let parsed;
     const trimmed = content.trim();
@@ -3658,9 +3697,9 @@ const callMiniMaxTextureAnalysis = async (imageDataUri) => {
   }
 };
 
-const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloSubjectAnalysis = async (imageDataUri, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const systemPrompt = readSubjectPrompt();
@@ -3669,15 +3708,15 @@ const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 1500,
         temperature: 0.4,
         messages: [
@@ -3711,15 +3750,15 @@ const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
     clearTimeout(timeout);
 
     if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax M3 subject analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      throw new Error(`Kilo Code subject analysis error (${response.status}): ${errorText.substring(0, 200)}`);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    if (!content) throw new Error('MiniMax M3 returned an empty response.');
+    if (!content) throw new Error('Kilo Code returned an empty response.');
 
     let parsed;
     const trimmed = content.trim();
@@ -3763,7 +3802,7 @@ const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
 
 /**
  * Pure helper: assemble the user-message envelope sent to the Stage 2
- * LLM. Extracted from callMiniMaxStage2 so the ADR 0017 budget-block
+ * LLM. Extracted from callKiloStage2 so the ADR 0017 budget-block
  * inclusion logic is unit-testable without spinning up the server or
  * mocking the MiniMax HTTP call.
  *
@@ -3785,7 +3824,7 @@ const callMiniMaxSubjectAnalysis = async (imageDataUri) => {
  * @param {string} directives - free-form user directives (Stage 2 input)
  * @param {object|null} palette - applied palette (ADR 0017)
  * @param {object} opts - optional flags; { isZImage: boolean }
- * @returns {object} the envelope object (callMiniMaxStage2 JSON-stringifies it)
+ * @returns {object} the envelope object (callKiloStage2 JSON-stringifies it)
  */
 const buildStage2Envelope = (analysis, directives, palette = null, opts = {}) => {
   const envelope = { analysis, directives: directives || '' };
@@ -3804,9 +3843,9 @@ const buildStage2Envelope = (analysis, directives, palette = null, opts = {}) =>
   return envelope;
 };
 
-const callMiniMaxStage2 = async (analysis, directives, stage2SystemPrompt, palette = null, opts = {}) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloStage2 = async (analysis, directives, stage2SystemPrompt, palette = null, opts = {}, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const envelope = buildStage2Envelope(analysis, directives, palette, opts);
@@ -3815,15 +3854,15 @@ const callMiniMaxStage2 = async (analysis, directives, stage2SystemPrompt, palet
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: MAX_STAGE2_TOKENS,
         temperature: 0.7,
         messages: [
@@ -3841,15 +3880,15 @@ ${JSON.stringify(envelope, null, 2)}`
     clearTimeout(timeout);
 
     if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`MiniMax M3 Stage 2 error (${response.status}): ${errorText.substring(0, 200)}`);
+      throw new Error(`Kilo Code Stage 2 error (${response.status}): ${errorText.substring(0, 200)}`);
     }
 
     const result = await response.json();
     const content = result.choices?.[0]?.message?.content;
-    if (!content || typeof content !== 'string') throw new Error('MiniMax M3 returned an empty response.');
+    if (!content || typeof content !== 'string') throw new Error('Kilo Code returned an empty response.');
     return content.trim();
   } catch (error) {
     clearTimeout(timeout);
@@ -3861,7 +3900,7 @@ ${JSON.stringify(envelope, null, 2)}`
 /**
  * ADR 0019 — Stage 2 orchestrator with retry-and-warn for length.
  *
- * Wraps `callMiniMaxStage2` with the guide §3 + §10 length contract:
+ * Wraps `callKiloStage2` with the guide §3 + §10 length contract:
  *   - sweet spot 150-300 words
  *   - hard ceiling 750 words (1024 tokens at the encoder)
  *   - minimum effective 80 words
@@ -3881,7 +3920,8 @@ ${JSON.stringify(envelope, null, 2)}`
  */
 const generateStage2WithLengthCheck = async (analysis, directives, stage2SystemPrompt, palette = null, opts = {}) => {
   const enableLengthRetry = opts.enableLengthRetry === true;
-  const first = await callMiniMaxStage2(analysis, directives, stage2SystemPrompt, palette, opts);
+  const model = opts.model || DEFAULT_LLM_MODEL;
+  const first = await callKiloStage2(analysis, directives, stage2SystemPrompt, palette, opts, model);
   const firstWordCount = countStage2Words(first);
   const firstClass = classifyStage2Length(first);
   if (!enableLengthRetry || firstClass === 'sweet_spot') {
@@ -3902,7 +3942,7 @@ const generateStage2WithLengthCheck = async (analysis, directives, stage2SystemP
     return 'Your previous reply was ' + firstWordCount + ' words — over the 750-word hard ceiling (1024 tokens at the encoder). Please rewrite, condensing to 150-300 words while keeping all six blocks intact.';
   })();
   const retryDirectives = (directives ? directives + '\n\n' : '') + reinforcementSuffix;
-  const second = await callMiniMaxStage2(analysis, retryDirectives, stage2SystemPrompt, palette, opts);
+  const second = await callKiloStage2(analysis, retryDirectives, stage2SystemPrompt, palette, opts, model);
   const secondWordCount = countStage2Words(second);
   const secondClass = classifyStage2Length(second);
   return {
@@ -3927,8 +3967,8 @@ app.get('/api/health', (req, res) => {
     success: true,
     data: {
       status: 'ok',
-      provider: 'minimax-m3',
-      configured: minimaxConfigured,
+      provider: 'kilo-code',
+      configured: kiloConfigured,
       field_palette: FIELD_PALETTE
     }
   });
@@ -4187,9 +4227,9 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
       return res.status(404).json({ success: false, error: `Preset "${presetId}" not found.` });
     }
 
-    if (!minimaxConfigured) {
+    if (!kiloConfigured) {
       fs.unlinkSync(filePath);
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
@@ -4224,7 +4264,9 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
         '\n\nA saved palette override is active. Do NOT extract colors — they will be supplied externally. Leave colors out of the response.';
     }
 
-    const analysis = await callMiniMaxStage1(imageDataUri, effectiveStage1Prompt, effectiveFields);
+    const llmModel = resolveModel(req.body);
+
+    const analysis = await callKiloStage1(imageDataUri, effectiveStage1Prompt, effectiveFields, llmModel);
 
     if (appliedPalette) {
       applyPaletteToAnalysis(analysis, appliedPalette);
@@ -4233,7 +4275,7 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
     // Stage 1.5: dedicated orientation/activity analysis (runs only if those fields selected)
     const orientationFields = ['subject_orientation', 'actions'].filter((f) => preset.stage1_fields.includes(f));
     if (orientationFields.length > 0) {
-      const orientationResult = await callMiniMaxOrientationAnalysis(imageDataUri, orientationFields);
+      const orientationResult = await callKiloOrientationAnalysis(imageDataUri, orientationFields, llmModel);
       if (orientationResult.subject_orientation) {
         analysis.subject_orientation = orientationResult.subject_orientation;
       }
@@ -4251,7 +4293,7 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
       preset_name: preset.name,
       analysis,
       requested_fields: preset.stage1_fields,
-      model: MINIMAX_MODEL
+      model: model
     };
     if (appliedPalette) {
       responseData.palette_id = appliedPalette.id;
@@ -4283,13 +4325,14 @@ app.post('/api/subject', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
     filePath = req.file.path;
 
-    if (!minimaxConfigured) {
+    if (!kiloConfigured) {
       fs.unlinkSync(filePath);
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const subject = await callMiniMaxSubjectAnalysis(imageDataUri);
+    const llmModel = resolveModel(req.body);
+    const subject = await callKiloSubjectAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4298,7 +4341,7 @@ app.post('/api/subject', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         subject,
-        model: MINIMAX_MODEL
+        model: model
       }
     });
   } catch (error) {
@@ -4328,13 +4371,14 @@ app.post('/api/camera-angle', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
     filePath = req.file.path;
 
-    if (!minimaxConfigured) {
+    if (!kiloConfigured) {
       fs.unlinkSync(filePath);
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const cameraAngle = await callMiniMaxCameraAngleAnalysis(imageDataUri);
+    const llmModel = resolveModel(req.body);
+    const cameraAngle = await callKiloCameraAngleAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4343,7 +4387,7 @@ app.post('/api/camera-angle', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         camera_angle: cameraAngle,
-        model: MINIMAX_MODEL
+        model: model
       }
     });
   } catch (error) {
@@ -4373,13 +4417,14 @@ app.post('/api/actions', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
     filePath = req.file.path;
 
-    if (!minimaxConfigured) {
+    if (!kiloConfigured) {
       fs.unlinkSync(filePath);
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const actions = await callMiniMaxActionsAnalysis(imageDataUri);
+    const llmModel = resolveModel(req.body);
+    const actions = await callKiloActionsAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4388,7 +4433,7 @@ app.post('/api/actions', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         actions,
-        model: MINIMAX_MODEL
+        model: model
       }
     });
   } catch (error) {
@@ -4415,13 +4460,14 @@ app.post('/api/mood', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
     filePath = req.file.path;
 
-    if (!minimaxConfigured) {
+    if (!kiloConfigured) {
       fs.unlinkSync(filePath);
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const mood = await callMiniMaxMoodAnalysis(imageDataUri);
+    const llmModel = resolveModel(req.body);
+    const mood = await callKiloMoodAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4430,7 +4476,7 @@ app.post('/api/mood', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         mood,
-        model: MINIMAX_MODEL
+        model: model
       }
     });
   } catch (error) {
@@ -4457,13 +4503,14 @@ app.post('/api/lighting', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
     filePath = req.file.path;
 
-    if (!minimaxConfigured) {
+    if (!kiloConfigured) {
       fs.unlinkSync(filePath);
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const lighting = await callMiniMaxLightingAnalysis(imageDataUri);
+    const llmModel = resolveModel(req.body);
+    const lighting = await callKiloLightingAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4472,7 +4519,7 @@ app.post('/api/lighting', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         lighting,
-        model: MINIMAX_MODEL
+        model: model
       }
     });
   } catch (error) {
@@ -4499,13 +4546,14 @@ app.post('/api/texture', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
     filePath = req.file.path;
 
-    if (!minimaxConfigured) {
+    if (!kiloConfigured) {
       fs.unlinkSync(filePath);
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const texture = await callMiniMaxTextureAnalysis(imageDataUri);
+    const llmModel = resolveModel(req.body);
+    const texture = await callKiloTextureAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4514,7 +4562,7 @@ app.post('/api/texture', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         texture,
-        model: MINIMAX_MODEL
+        model: model
       }
     });
   } catch (error) {
@@ -4551,9 +4599,9 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
     if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
     filePath = req.file.path;
 
-    if (!minimaxConfigured) {
+    if (!kiloConfigured) {
       fs.unlinkSync(filePath);
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const variant = (req.body && typeof req.body.variant === 'string') ? req.body.variant : 'base';
@@ -4561,7 +4609,8 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
     const variantPrompt = allowedVariants.includes(variant) ? variant : 'base';
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const result = await callMiniMaxAnimaAnalysis(imageDataUri, variantPrompt);
+    const llmModel = resolveModel(req.body);
+    const result = await callKiloAnimaAnalysis(imageDataUri, variantPrompt, llmModel);
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4572,7 +4621,7 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
         positive: result.positive,
         negative: result.negative,
         variant: variantPrompt,
-        model: MINIMAX_MODEL
+        model: model
       }
     });
   } catch (error) {
@@ -4788,7 +4837,7 @@ app.post('/api/generate-prompt', async (req, res) => {
 
     // ADR 0014 — optional paletteId in the request body. When provided,
     // the server looks up the palette (404 if missing) and passes it
-    // into callMiniMaxStage2 so a deterministic color-budget block can
+    // into callKiloStage2 so a deterministic color-budget block can
     // be appended to the LLM user message. After Stage 2 returns, the
     // server measures the LLM output against the palette and surfaces
     // `distribution_metrics` in the response envelope so the Phase 4
@@ -4812,8 +4861,8 @@ app.post('/api/generate-prompt', async (req, res) => {
     const preset = presets.find((p) => p.id === presetId);
     if (!preset) return res.status(404).json({ success: false, error: `Preset "${presetId}" not found.` });
 
-    if (!minimaxConfigured) {
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+    if (!kiloConfigured) {
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     // ADR 0019 — preset-aware palette emission + length-check retry.
@@ -4834,12 +4883,13 @@ app.post('/api/generate-prompt', async (req, res) => {
     // proportion. The user-typed directives remain authoritative; we
     // prepend only when aspectRatio is set.
     const composedDirectives = aspectRatioDirective + (directives || '');
+    const llmModel = resolveModel(body);
     const stage2Result = await generateStage2WithLengthCheck(
       analysis,
       composedDirectives,
       effectivePrompt,
       appliedPalette,
-      { isZImagePreset, enableLengthRetry: isZImagePreset }
+      { isZImagePreset, enableLengthRetry: isZImagePreset, model: llmModel }
     );
     const finalPrompt = stage2Result.prompt;
     const lengthCheck = stage2Result.length_check;
@@ -4856,7 +4906,7 @@ app.post('/api/generate-prompt', async (req, res) => {
       preset_id: preset.id,
       preset_name: preset.name,
       prompt: finalPrompt,
-      model: MINIMAX_MODEL
+      model: llmModel
     };
     if (appliedPalette) {
       responseData.palette_id = appliedPalette.id;
@@ -5919,7 +5969,7 @@ const validateChatMessage = (body) => {
 /**
  * Pure helper: extract a `{ reply, suggested_prompt }` object from the
  * raw model output. Mirrors the Stage 1 JSON extraction logic in
- * `callMiniMaxStage1`: tries direct parse first, then a markdown
+ * `callKiloStage1`: tries direct parse first, then a markdown
  * fenced block, then balanced-brace extraction.
  *
  * TOTAL function: always returns a valid `{ reply, suggested_prompt }`
@@ -5997,10 +6047,10 @@ const extractChatReply = (raw) => {
   }
 
   // Unwrap the schema-name wrapper if the model returned its response
-  // nested under the json_schema name key. The MiniMax M3 model
+  // nested under the json_schema name key. The Kilo Code model
   // commonly does this (verified live 2026-06-23 — Stage 1 already
   // has the same unwrap; chat was missing it). Mirrors the logic in
-  // `callMiniMaxStage1` and `callMiniMaxSubjectAnalysis`.
+  // `callKiloStage1` and `callKiloSubjectAnalysis`.
   if (parsed.chat_reply && typeof parsed.chat_reply === 'object' && !Array.isArray(parsed.chat_reply)) {
     parsed = parsed.chat_reply;
   }
@@ -6043,14 +6093,14 @@ const extractChatReply = (raw) => {
 };
 
 /**
- * Call MiniMax M3 with the chat system prompt + conversation history
+ * Call Kilo Code with the chat system prompt + conversation history
  * and return the parsed `{ reply, suggested_prompt }`. JSON-schema
  * enforced at the API level: `suggested_prompt` is always a string
  * (empty string "" means "no revision this turn" — `extractChatReply`
  * coerces empty to null).
  *
  * Why a plain string instead of `type: ["string", "null"]`: the
- * MiniMax M3 JSON-schema validator rejects union-typed properties
+ * Kilo Code JSON-schema validator rejects union-typed properties
  * with error 400 "Mismatch type string with value array at index
  * 11233" (verified live 2026-06-23). Using a single string type with
  * the convention "empty == no revision" sidesteps the validator and
@@ -6071,7 +6121,7 @@ const extractChatReply = (raw) => {
  * envelope always fits without truncation. Output truncation mid-JSON
  * was a known cause of "missing reply" before this fix.
  *
- * Mirrors the structure of `callMiniMaxSubjectAnalysis` but with the
+ * Mirrors the structure of `callKiloSubjectAnalysis` but with the
  * chat system prompt and a different schema.
  */
 const CHAT_MAX_RETRIES = 2;
@@ -6100,9 +6150,9 @@ const buildPreservationReinforcement = (original, revised, userRequest) => {
   );
 };
 
-const callMiniMaxChat = async (systemPrompt, messages, options = {}) => {
-  if (!minimaxConfigured) {
-    throw new Error('MiniMax M3 API is not configured. Set MINIMAX_API_KEY in your .env file.');
+const callKiloChat = async (systemPrompt, messages, options = {}, model = DEFAULT_LLM_MODEL) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
   const { currentPrompt, lastUserRequest } = options;
@@ -6117,7 +6167,7 @@ const callMiniMaxChat = async (systemPrompt, messages, options = {}) => {
   let openaiMessages = baseOpenaiMessages;
   let lastReason = null;
   for (let attempt = 0; attempt <= CHAT_MAX_RETRIES; attempt++) {
-    const result = await callMiniMaxChatOnce(openaiMessages);
+    const result = await callKiloChatOnce(openaiMessages, model);
     if (result.ok) {
       // Anchor-preservation gate (ADR 0012). When the model produced a
       // non-empty `suggested_prompt`, run the deterministic validator
@@ -6203,20 +6253,20 @@ const callMiniMaxChat = async (systemPrompt, messages, options = {}) => {
  * Separated from the retry loop so the loop can call it cleanly and
  * the per-attempt logic is testable on its own.
  */
-const callMiniMaxChatOnce = async (openaiMessages) => {
+const callKiloChatOnce = async (openaiMessages, model = DEFAULT_LLM_MODEL) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
 
   try {
-    const response = await fetch(`${MINIMAX_BASE_URL}/chat/completions`, {
+    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+        'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
       body: JSON.stringify({
-        model: MINIMAX_MODEL,
+        model: model,
         max_tokens: 2400,
         temperature: 0.5,
         messages: openaiMessages,
@@ -6245,11 +6295,11 @@ const callMiniMaxChatOnce = async (openaiMessages) => {
       return { ok: false, fatal: true, error: new Error('Rate limit exceeded. Please try again in a moment.') };
     }
     if (response.status === 401 || response.status === 403) {
-      return { ok: false, fatal: true, error: new Error('API authentication failed. Check your MINIMAX_API_KEY.') };
+      return { ok: false, fatal: true, error: new Error('API authentication failed. Check your KILO_API_KEY.') };
     }
     if (!response.ok) {
       const errorText = await response.text();
-      return { ok: false, fatal: true, error: new Error(`MiniMax M3 chat error (${response.status}): ${errorText.substring(0, 200)}`) };
+      return { ok: false, fatal: true, error: new Error(`Kilo Code chat error (${response.status}): ${errorText.substring(0, 200)}`) };
     }
 
     const result = await response.json();
@@ -6360,10 +6410,11 @@ The current working prompt is destined for an Anima checkpoint (Base / Aesthetic
 
 When any field is touched, preserve or strengthen:
 - Tag order: [quality/meta/year/safety] [count] [character] [series] [artist] [general tags]. Section order is fixed; within each section, tag order is arbitrary.
+- Danbooru/Gelbooru conflicts: when a tag differs between Danbooru and Gelbooru, prefer the Gelbooru version.
 - "masterpiece, best quality, score_7, safe, " prefix on Base / Turbo. On Aesthetic, drop "score_7".
 - Artist tags MUST be prefixed with "@" (e.g. "@big chungus"). Without "@", the effect is weak.
 - Negative prefix: "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration" on Base / Turbo. On Aesthetic, drop the score_* entries.
-- Dataset tags on line 1 if the image is non-anime: "ye-pop" (LAION-POP) or "deviantart" (DeviantArt). Line 2 is alt-text (ye-pop) or title (deviantart).
+- Dataset tag first in the positive string if the image is non-anime: "ye-pop," (LAION-POP) or "deviantart," (DeviantArt). Followed by alt-text (ye-pop) or title (deviantart), then the caption — all comma-separated. User adds newlines when pasting into ComfyUI.
 - Multi-character scenes: each character gets a name + hair + eyes + outfit cluster. Name first, then describe.
 
 ## VARIANT RULES
@@ -6653,7 +6704,7 @@ app.get('/api/chat/sessions/:id', (req, res) => {
 
 /**
  * `POST /api/chat/sessions/:id/messages` — append a user message to a
- * session, call MiniMax M3 with the full history, append the assistant
+ * session, call Kilo Code with the full history, append the assistant
  * reply, persist. Returns the updated session.
  */
 app.post('/api/chat/sessions/:id/messages', async (req, res) => {
@@ -6664,8 +6715,8 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     const validationError = validateChatMessage(req.body);
     if (validationError) return res.status(400).json({ success: false, error: validationError });
 
-    if (!minimaxConfigured) {
-      return res.status(503).json({ success: false, error: 'MiniMax M3 API key not configured.' });
+    if (!kiloConfigured) {
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
     }
 
     const sessions = readChatSessions();
@@ -6719,10 +6770,11 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     const activePrompt = session.pending_prompt || session.current_prompt;
     let parsedReply;
     try {
-      parsedReply = await callMiniMaxChat(context.systemPrompt, context.messages, {
+      const llmModel = resolveModel(req.body);
+      parsedReply = await callKiloChat(context.systemPrompt, context.messages, {
         currentPrompt: activePrompt,
         lastUserRequest: userMessage.content
-      });
+      }, llmModel);
     } catch (err) {
       // Roll back the user message so the failed attempt doesn't leave
       // a "ghost" turn in the history.
@@ -6863,13 +6915,17 @@ if (require.main === module) {
   app.listen(PORT, () => {
     ensureDataFileExists();
     console.log(`Image-to-Prompt server running on http://localhost:${PORT}`);
-    console.log(`MiniMax M3 configured: ${minimaxConfigured}`);
-    if (!minimaxConfigured) console.log('  ⚠️  Set MINIMAX_API_KEY in .env to enable generation.');
+    console.log(`Kilo Code configured: ${kiloConfigured}`);
+    if (!kiloConfigured) console.log('  ⚠️  Set KILO_API_KEY in .env to enable generation.');
   });
 }
 
 module.exports = {
   app,
+  // ADR 0022 — Kilo Code provider migration
+  DEFAULT_LLM_MODEL,
+  ALLOWED_LLM_MODELS,
+  resolveModel,
   // ADR 0019 Issue #15 — aspect-ratio picker
   VALID_ASPECT_RATIOS,
   ASPECT_RATIO_LABEL,
@@ -6900,16 +6956,18 @@ module.exports = {
   readSubjectPrompt,
   writeSubjectPrompt,
   validateSubjectPrompt,
-  callMiniMaxSubjectAnalysis,
-  callMiniMaxCameraAngleAnalysis,
+  callKiloStage1,
+  callKiloStage2,
+  callKiloSubjectAnalysis,
+  callKiloCameraAngleAnalysis,
   // ADR 0018 — actions / mood / lighting re-analysis helpers
-  callMiniMaxActionsAnalysis,
-  callMiniMaxMoodAnalysis,
-  callMiniMaxLightingAnalysis,
+  callKiloActionsAnalysis,
+  callKiloMoodAnalysis,
+  callKiloLightingAnalysis,
   // Slice 1 — texture re-analysis helper (App Build methodology, pattern-mirrors ADR 0018)
-  callMiniMaxTextureAnalysis,
+  callKiloTextureAnalysis,
   // Slice 2.2 — ADR 0021 — Anima prompt contract helper (two-output)
-  callMiniMaxAnimaAnalysis,
+  callKiloAnimaAnalysis,
   generatePaletteId,
   generateRunId,
   readPalettes,

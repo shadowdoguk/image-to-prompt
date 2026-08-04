@@ -94,3 +94,30 @@ Verification commands run in the worktree (post-Slice-2 implementation):
 4. **PRE-MORTEM §"Failure mode 8" anticipated a related but distinct outcome.** The pre-mortem warned about variant switching mid-session (Base → Aesthetic) breaking the chat anchor. The bug we hit is different: everything within a single Anima session worked, but the **apply step** didn't propagate to the visible UI. The two issues share a root cause — chat-side state desync from display-side state — but the failure mode was not predicted because it required looking at the *apply* path, not just the *generate* path. Update the pre-mortem to flag apply-path drift as a third category.
 
 **Resolution path.** Issue #22 fixed in this commit. The fix to `applyChatRevision` is the only code change required.
+
+## Consequences (2026-08-04) — coverage categories sharpening in `DEFAULT_ANIMA_PROMPT`
+
+**Issue:** [`#23`](https://github.com/shadowdoguk/image-to-prompt/issues/23) — "Anima prompt generation omits camera angle, mood, lighting, and posture tags."
+
+**What the user observed.** A handful of Anima generations on varied subject matter produced `positive` tag lists that covered `subject`, `count`, `quality`, `safety`, `style`, and a handful of general tags — but consistently omitted the camera-angle, mood, lighting, and posture tags that the manual's worked examples (§7, §9, §17 of `docs/ANIMA-PROMPTING-MANUAL.md`) treat as expected. The Z-Image Turbo path on the same image captured all four families in `state.currentAnalysis` (per ADR 0018's per-field analysis contract). The Anima path was only sending the image bytes to the LLM, with no instruction to mirror those families into the tag output.
+
+**Root cause.** `DEFAULT_ANIMA_PROMPT` (Slice 2.2, server.js:3050+) is a comprehensive style-and-format brief: lowercase, comma-separated, Gelbooru-favored, quality-prefix, forbidden vocabulary. It documents *output shape* in depth. It documents *output content* only via examples embedded in the prompt and via the manual — but the worked examples were not enumerated as required categories. The LLM, given a format brief plus a few worked examples, treated the categories as illustrative rather than mandatory, and the 60-character `minLength` floor on `positive` was satisfied by subject + style + count tags alone.
+
+**Resolution path.** Issue #23 fixed in this commit. One section added to `DEFAULT_ANIMA_PROMPT` (no other code paths touched):
+
+- New `# COVERAGE CATEGORIES` section enumerates six tag families — camera angle, mood/expression, lighting, posture/action, composition/framing, era/time-of-day — each with the canonical vocabulary to use (mirroring the manual's worked-example vocabulary). The section explicitly states "missing categories are a bug — see issue #23" so future regressions trace back.
+- The section also states the **negative** form of the rule ("Do NOT invent tags for categories that are genuinely not present") so the LLM does not over-correct and emit misleading tags (e.g. `year 2025` on a pure character portrait on white background). The principle is "cover what's there," not "always emit all six."
+- New file `scripts/smoke/anima-coverage-categories.js` — 7 static-source assertions that the section header exists and each of the four originally-reported categories (camera, mood, lighting, posture) is enumerated with at least one canonical tag, plus the traceability check that references `#23`. Mirrors `scripts/smoke/anima-chat-apply-sync.js` and `scripts/smoke/palette-stale-id-guard.js` patterns.
+- `POST /api/anima`, `callKiloAnimaAnalysis`, `state.animaResult`, `displayAnimaResult` all untouched. The fix lives entirely in the LLM-facing system prompt — the smallest possible diff.
+
+**Lessons.**
+
+1. **Format briefs and coverage briefs are different documents.** The Slice 2.2 prompt was a format brief ("write lowercase tags, separate with commas"). It is now also a coverage brief ("when camera angle is visible, emit `looking at viewer`/`portrait`; when mood is visible, emit `gentle smile`; etc."). Future provider-specific prompt contracts should be authored with both halves present from the start — coverage first, then format.
+2. **The 60-character `minLength` floor was a guard against empty output, not a coverage guard.** Schema length floors do not enforce semantic coverage. The fix is the prompt, not the schema.
+3. **The manual (`docs/ANIMA-PROMPTING-MANUAL.md`) is the source of truth for what "Anima-shaped output" means.** The manual's worked examples were the right artifact to mine for coverage vocabulary — that's where `looking at viewer`, `gentle smile`, `soft lighting`, `standing`, `indoors`, `day` came from. Future prompt edits should treat the manual as the contract and the prompt as a derivable subset.
+4. **Issue #22's lesson ("apply-path drift") is mirrored here as "generate-path coverage drift."** Both are state-shape-vs-display-shape mismatches: #22 was a sync failure at the apply step (state updated, UI didn't), #23 was a generation-side semantic gap (UI rendered exactly what the LLM produced, but the LLM wasn't told to produce coverage). The two issues share a category — the visible UI can drift from the contract — and warrant a consolidated PRE-MORTEM entry at the next polish-triage pass.
+
+**Follow-ups (out of scope, parked).**
+
+- Subjectively measure generated prompts against the manual's worked-example tag list to quantify the fix (would require a small evaluation harness and is overkill for a single prompt edit; defer to Slice 2.5+ if any user-visible regression is reported).
+- A small "Anima coverage badge" in the result panel (e.g. "✓ camera + mood + lighting + posture") would make the contract self-documenting to the user. Parked in `docs/BACKLOG.md` — not in scope for a bug fix.

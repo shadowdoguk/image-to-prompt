@@ -70,6 +70,7 @@ Items the user marked as "stretch" at gate G2. Parked by definition; revisit at 
 
 | 2026-08-03 | Appended: Slice 2.1 (Anima fork) + Q3 re-opened | Session #3 — research + G1–G3 design approved; implementation stopped at user's choice (Option A revert) |
 | 2026-08-03 | Appended: Slice 2.1 SHIPPED | Session #4 — Slice 2.1 (and the rest of Slice 2) shipped end-to-end. The parked item above is now closed. Per AGENTS.md "corrections are new entries, never edits," the parked entry is preserved as-is; this entry is the cross-reference. |
+| 2026-08-04 | Appended: Anima coverage gap (camera/mood/lighting/posture), issue #23 filed | Session #8 — bug reported by user, filed as issue #23 (`bug`, `runtime`). Fix parked pending user direction: in-session fix vs. next-slice pass. Issue body fully populated with repro, root-cause hypothesis, suggested fix area, acceptance criteria. |
 
 ---
 
@@ -84,3 +85,17 @@ Parked items that have since shipped. The original Parked-items entry is preserv
 - **Aggregate verdict:** `docs/CODE-REVIEW-2-anima-fork.md` §Slice 2.5 — "Slice 2 ships."
 - **Tests:** 373 / 373 passing (was 321 baseline; +52 net new tests).
 - **Quantitative:** 5 sub-slices shipped, 1 ADR (0021) accepted, 5 new docs (1 manual + 4 design docs), 1 aggregate code review, 0 regressions, 0 new dependencies, 0 schema migrations.
+
+### Item: Anima coverage gap — camera / mood / lighting / posture tags missing from `positive` output
+
+- **Origin:** Session #8 (2026-08-04). User reported: "when an Anima prompt is generated it omits the camera angle, mood, lighting, and posture of the subject." Filed as issue [#23](https://github.com/shadowdoguk/image-to-prompt/issues/23), label `bug`, class `runtime`.
+- **Why parked (decision pending):** The fix is bounded — one constant edit (`DEFAULT_ANIMA_PROMPT` in `server.js:3050-3117`) plus one new smoke file (`scripts/smoke/anima-coverage-categories.js`). It mirrors the precedent of issues #1 (stale palette), #20 (chat-limit UX), #22 (Anima chat-apply sync) — all three were fixed in-session as small, single-seam changes with no slice plan. AGENTS.md "What you must ask before doing" requires a slice plan only when "new code that touches more than one module" is involved. This fix touches two modules (`server.js` constant + new smoke file), so it falls in a grey zone. **Awaiting user direction** before implementing.
+- **Why the bug exists (root cause hypothesis):** `DEFAULT_ANIMA_PROMPT` specifies output *format* (lowercase, comma-separated, quality prefix, variant rules, forbidden vocabulary) but does not enumerate *coverage categories* — the categories the LLM should hit. The Anima manual's worked examples (`docs/ANIMA-PROMPTING-MANUAL.md` §9, §17) always include camera, mood, lighting, and posture tags, so the LLM is missing the explicit prompt hint to cover those categories. The Z-Image Turbo path captures all four in `state.currentAnalysis` but the Anima endpoint ignores those fields entirely (`callKiloAnimaAnalysis` reads only the image, not the analysis snapshot).
+- **Suggested fix (smallest diff):**
+  1. Add a "COVERAGE CATEGORIES" section to `DEFAULT_ANIMA_PROMPT` enumerating: subject/character, camera/shot (e.g. `looking at viewer`, `portrait`, `upper body`), mood/emotion (e.g. `smile`, `gentle smile`), lighting (e.g. `soft lighting`, `indoor`, `day`), posture/action (e.g. `standing`, `sitting`). Mirror the tag vocabulary from `docs/ANIMA-PROMPTING-MANUAL.md` §7.6 + §17.
+  2. (Optional, more invasive) Thread `state.currentAnalysis.camera_angle`, `mood`, `lighting`, `actions` into the Anima endpoint's user prompt as a coverage hint. Skipped unless the prompt-only fix is insufficient.
+  3. Add `scripts/smoke/anima-coverage-categories.js` — 7 static-source assertions: (a) the constant has a "COVERAGE" section, (b) camera tokens present, (c) mood tokens present, (d) lighting tokens present, (e) posture tokens present, (f) the helper signature is unchanged, (g) the response envelope is unchanged.
+  4. Append "Consequences (2026-08-04)" section to ADR 0021 documenting the prompt-coverage sharpening.
+- **To un-park, we'd need:** user OK on (i) in-session fix (mirror issue #22 precedent) vs. (ii) defer to next-slice planning pass. Estimated cost: ~30 minutes, 1 commit, 1 ADR append, ~80 lines of new smoke code.
+- **Estimated impact if pursued:** **LOW–MEDIUM** — qualitative UX win, no contract change, no architectural commitment. The Anima manual already documents that the model supports these tag categories; the fix sharpens the prompt to nudge the LLM toward covering them.
+- **Issue:** [#23](https://github.com/shadowdoguk/image-to-prompt/issues/23).
