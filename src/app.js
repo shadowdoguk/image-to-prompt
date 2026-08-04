@@ -5025,9 +5025,21 @@
 
   /**
    * Apply handler. POSTs to the apply endpoint, then updates the live
-   * result prompt text (Step 4) and the session's current_prompt on
-   * the client. The result prompt is what the user copies out, so it
-   * must reflect the latest applied revision without a refresh.
+   * result prompt — both the Z-Image panel (`<p id="result-prompt">`)
+   * and the Anima panel (`#anima-result-positive` textarea) — and
+   * mirrors the new value into the corresponding state slices. The
+   * result prompt is what the user copies out, so it must reflect the
+   * latest applied revision without a refresh.
+   *
+   * Slice 2.3 / 2.4 — ADR 0021 — the Anima fork split the single
+   * Z-Image result panel into two textareas (positive + negative),
+   * with their own state slice (`state.animaResult`). The original
+   * apply handler only updated `state.finalPrompt` + `dom.resultPrompt`,
+   * which are the Z-Image panel's render targets; in Anima mode
+   * `dom.resultPrompt` is hidden, so the Anima textarea stayed on the
+   * original prompt while the chat session said "Applied". Branches
+   * on `state.model === 'anima'` to mirror the apply into the right
+   * panel. Regression test: scripts/smoke/anima-chat-apply-sync.js.
    */
   const applyChatRevision = async (messageId, suggestedPrompt) => {
     if (!state.chatSessionId || !messageId) return;
@@ -5035,15 +5047,34 @@
       const updated = await apiCall(`/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}/apply/${encodeURIComponent(messageId)}`, {
         method: 'POST'
       });
-      // Update the live result prompt text. This is the user-visible
-      // "working prompt" — Step 4's <p id="result-prompt">. Apply
-      // doesn't regenerate through Stage 2; the chat revision IS the
-      // new prompt the user wants to copy.
-      state.finalPrompt = updated.current_prompt;
-      dom.resultPrompt.textContent = updated.current_prompt;
+      // Mirror the new current_prompt into the model-specific result
+      // panel. Apply doesn't regenerate through Stage 2; the chat
+      // revision IS the new prompt the user wants to copy.
+      if (state.model === 'anima' && state.animaResult) {
+        // Anima branch — write into the positive textarea and the
+        // animaResult state slice. The negative prompt is unchanged
+        // by chat refinements (chat refines only the positive side;
+        // the negative is a static recommended vocabulary).
+        state.animaResult = {
+          ...state.animaResult,
+          positive: updated.current_prompt
+        };
+        if (dom.animaResultPositive) {
+          dom.animaResultPositive.value = updated.current_prompt;
+        }
+      } else {
+        // Z-Image branch — update the live result prompt text. This
+        // is the user-visible "working prompt" — Step 4's
+        // <p id="result-prompt">.
+        state.finalPrompt = updated.current_prompt;
+        dom.resultPrompt.textContent = updated.current_prompt;
+      }
       // ADR 0019 Issue #15 — re-evaluate the 1024-token reminder
       // banner after a chat Apply. Apply edits can grow the prompt
       // past the ceiling; the banner is the user's only signal.
+      // Note: the banner currently reads state.finalPrompt only; in
+      // Anima mode it stays quiet. Acknowledged limitation; ADR 0021
+      // consequence note + future ADR if it becomes user-visible.
       updateTokenReminderBanner();
       // Splice the updated session into local state.
       const idx = state.chatSessions.findIndex((s) => s.id === updated.id);

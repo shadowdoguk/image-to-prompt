@@ -1,6 +1,6 @@
 # SESSION-STATE.md — image-to-prompt
 
-**Last updated:** 2026-07-29 at end of session #1
+**Last updated:** 2026-08-04 at end of Session #7 (Anima chat-apply sync bug, issue #22 fixed)
 
 ---
 
@@ -385,3 +385,31 @@ The bug was a one-block pattern violation: `runAnimaGenerate` reached outside th
 
 ### Mood / risk flag (post-bug-fix)
 > Bug shipped (UX track, no architectural commitment). 374/374 tests green; 10/10 V-checks; syntax OK. No new architectural debt. The fix is a one-block edit, no ADR required. **The Anima fork is now bug-free for the drag-drop path.** Cold-start recovery is unchanged — read the Session #4 entry + the Slice 2.5 aggregate verdict + this bug-fix follow-up entry.
+
+## Session #7 — 2026-08-04 (Anima chat-apply sync bug, issue #22)
+
+### What was asked
+Diagnose and fix the bug: "Refine via chat 'Apply' is not working in anima mode." User observation: clicking the chat console's Apply button in Anima mode updates the chat status but the Anima result panel (positive + negative textareas) stays on the original prompt.
+
+### What landed (delivered, durable)
+- **Issue filed:** https://github.com/shadowdoguk/image-to-prompt/issues/22 — `bug`. Body populated with the full bug template (summary, class `runtime`, repro steps, expected, actual, environment, logs, suggested fix area, acceptance criteria).
+- **Smoke test:** `scripts/smoke/anima-chat-apply-sync.js` (new, 124 lines). Static-source regression armor — mirrors `scripts/smoke/palette-stale-id-guard.js`. 7 checks: apply handler branches on `state.model === 'anima'`, writes to `dom.animaResultPositive.value`, updates `state.animaResult.positive`, Z-Image branch still writes to `state.finalPrompt` + `dom.resultPrompt.textContent`, `updateTokenReminderBanner()` still called, explanatory comment present.
+- **Fix:** `src/app.js` `applyChatRevision` (around line 5032). Added a `state.model === 'anima' && state.animaResult` branch that mirrors the applied `current_prompt` into `state.animaResult.positive` and `dom.animaResultPositive.value`. The Z-Image branch is the `else` leg. Anima negative prompt is intentionally untouched (chat refines only the positive side; the negative is a static recommended vocabulary per the Anima contract).
+- **ADR consequence note:** `docs/adr/0021-anima-fork.md` — appended (not edited) a "Consequences (2026-08-04)" section documenting the missed sync branch, the static-source smoke pattern, the lesson about state-slice-mirroring, and the acknowledged `updateTokenReminderBanner()` limitation (still reads `state.finalPrompt` only — would warrant a follow-up ADR if it becomes user-visible).
+- **Regression armor:** the smoke test was run **before** the fix (4 FAIL / 3 PASS) to confirm the assertions target the bug, then **after** the fix (7 PASS / 0 FAIL). All other smoke tests + the full 395-test suite + session-init 10/10 still pass.
+
+### What was decided but not built (parked)
+- **`updateTokenReminderBanner()` in Anima mode.** The banner currently reads `state.finalPrompt` only; in Anima mode it stays silent after an apply. Acknowledged in the consequence note. If a user-visible regression is reported, follow-up ADR.
+- **PRE-MORTEM §"Failure mode 8" should flag apply-path drift as a third category.** The pre-mortem captured variant-switching drift and Z-Image/Anima vocabulary drift but not the apply-path drift we shipped. Out of scope for this fix; flagged for the next polish-triage pass.
+
+### Files changed this session (uncommitted at end of session)
+- `src/app.js` (+31 / −7 around `applyChatRevision`)
+- `scripts/smoke/anima-chat-apply-sync.js` (new, 124 lines)
+- `docs/adr/0021-anima-fork.md` (append-only — "Consequences (2026-08-04)" section)
+- `docs/SESSION-STATE.md` (this entry)
+
+### Issue
+https://github.com/shadowdoguk/image-to-prompt/issues/22 — label `bug`. Resolution: `node scripts/smoke/anima-chat-apply-sync.js` exits 0; chat Apply now writes the applied prompt into the Anima textarea.
+
+### Mood / risk flag
+> Reachable bug shipped yesterday (Slice 2.4) — chat was over-promising and the UI was under-delivering. Caught immediately on the first user try. Fix is the smallest diff possible (one branch + one comment); regression armor is a static-source smoke that mirrors the existing pattern. **No slice work touched** — issue #22 is a one-shot fix. Slice 4 / polish-triage decision (Session #5) still pending. Kill criteria unchanged: `server.js` ~7,150 lines, test suite 395/395, `session-init` 10/10.

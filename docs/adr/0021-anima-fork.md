@@ -79,3 +79,18 @@ Verification commands run in the worktree (post-Slice-2 implementation):
 - `docs/adr/0018-populate-with-ai-actions-mood-lighting.md` — the per-field pattern that the Anima backend contract (helper + route + default prompt) mirrors
 - `https://huggingface.co/circlestone-labs/Anima` — primary source for the Anima model card
 - `docs/ANIMA-PROMPTING-MANUAL.md` §16 — the license boundary in plain English
+
+## Consequences (2026-08-04) — chat Apply: missed Anima sync branch
+
+**Issue:** [`#22`](https://github.com/shadowdoguk/image-to-prompt/issues/22) — "Refine via chat 'Apply' does not update Anima result panel."
+
+**What shipped in Slice 2.4 that triggered the bug.** Slice 2.4 added the Anima chat activation (`activateAnimaChatForResult`) and the `model: 'anima'` dispatch so the chat server-side constraints block (`ANIMA_CHAT_CONSTRAINTS_BLOCK`) fires for Anima-mode sessions. The session was correctly anchored on `data.positive` and the chat UI worked end-to-end (suggested_prompt proposals, Apply badge, status messages). One piece was missed: the **client-side apply handler** (`applyChatRevision` in `src/app.js`) only updated `state.finalPrompt` + `dom.resultPrompt.textContent` — the Z-Image result panel's render targets. In Anima mode, `dom.resultPrompt` is hidden (`displayAnimaResult` sets `dom.resultSection.hidden = true`) and the visible UI is `dom.animaResultPositive` (textarea) backed by `state.animaResult.positive`. The chat revision applied correctly server-side, the chat panel showed "Applied," but the Anima textarea continued to display the original prompt.
+
+**Lessons.**
+
+1. **State slices parallel to UI elements must be mirrored at every mutation point.** The fork introduced `state.animaResult` as a parallel to `state.finalPrompt`, but the apply handler was written against the original Z-Image state. The fix is a `state.model === 'anima'` branch that mirrors the change into `state.animaResult.positive` + `dom.animaResultPositive.value`. The Z-Image branch remains the `else` leg.
+2. **The token-reminder banner is still Z-Image-only.** `updateTokenReminderBanner()` reads `state.finalPrompt` only. In Anima mode it stays quiet after an apply. This is an acknowledged limitation; if a user-visible regression is reported, it would warrant a follow-up ADR (reading `state.animaResult?.positive` when `state.model === 'anima'`). Not in scope for this fix.
+3. **Static-source smoke regression armor.** New file `scripts/smoke/anima-chat-apply-sync.js` — 7 checks, all pass. The smoke mirrors the `palette-stale-id-guard.js` pattern: pure source-string inspection, no server/LLM dependency. Checks (a) the apply handler branches on `state.model === 'anima'`, (b) writes to `dom.animaResultPositive.value`, (c) updates `state.animaResult.positive`, (d) the Z-Image branch still writes to `state.finalPrompt` + `dom.resultPrompt.textContent` (regression armor), (e) `updateTokenReminderBanner()` is still re-evaluated, (f) an explanatory comment is present.
+4. **PRE-MORTEM §"Failure mode 8" anticipated a related but distinct outcome.** The pre-mortem warned about variant switching mid-session (Base → Aesthetic) breaking the chat anchor. The bug we hit is different: everything within a single Anima session worked, but the **apply step** didn't propagate to the visible UI. The two issues share a root cause — chat-side state desync from display-side state — but the failure mode was not predicted because it required looking at the *apply* path, not just the *generate* path. Update the pre-mortem to flag apply-path drift as a third category.
+
+**Resolution path.** Issue #22 fixed in this commit. The fix to `applyChatRevision` is the only code change required.
