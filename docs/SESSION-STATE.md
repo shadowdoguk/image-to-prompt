@@ -413,3 +413,60 @@ https://github.com/shadowdoguk/image-to-prompt/issues/22 — label `bug`. Resolu
 
 ### Mood / risk flag
 > Reachable bug shipped yesterday (Slice 2.4) — chat was over-promising and the UI was under-delivering. Caught immediately on the first user try. Fix is the smallest diff possible (one branch + one comment); regression armor is a static-source smoke that mirrors the existing pattern. **No slice work touched** — issue #22 is a one-shot fix. Slice 4 / polish-triage decision (Session #5) still pending. Kill criteria unchanged: `server.js` ~7,150 lines, test suite 395/395, `session-init` 10/10.
+
+## Session #8 — 2026-08-05 (Bug fix: `model is not defined` on /api/analyze, issue #24)
+
+### What was asked
+User clicked **Analyze image** and got: `Analysis failed: model is not defined`. Diagnose + fix.
+
+### Root cause
+Slice 3 (ADR 0022 — kilo-code provider migration) renamed the route-handler variable from `model` to `llmModel` to avoid collision with `state.model` (output contract selector value — Z-Image Turbo / Anima). The 8 response-payload lines were left referencing the old `model` name. `model` is not defined anywhere → `ReferenceError: model is not defined` → caught by the catch block → surfaced as `e.message` in the UI.
+
+### Why tests didn't catch it
+The existing test env returns 503 (no Kilo key) before reaching the response-construction line. The bug only fires on a *successful* LLM call. The Slice 3 code review (`docs/CODE-REVIEW-3-kilo-code-provider.md`) and polish audit (`docs/POLISH-AUDIT-3-kilo-code-provider.md`) were both static-source checks — they grepped for `callMiniMax` / `minimaxi.chat` references but did not lint the response-payload lines that reference the renamed variable.
+
+### Scope (user-approved: fix all 8)
+| Line | Route | Status |
+|---|---|---|
+| 4296 | `POST /api/analyze` | ✅ FIXED (user-reported) |
+| 4344 | `POST /api/subject` | ✅ FIXED (latent) |
+| 4390 | `POST /api/camera-angle` | ✅ FIXED (latent) |
+| 4436 | `POST /api/actions` | ✅ FIXED (latent) |
+| 4479 | `POST /api/mood` | ✅ FIXED (latent) |
+| 4522 | `POST /api/lighting` | ✅ FIXED (latent) |
+| 4565 | `POST /api/texture` | ✅ FIXED (latent) |
+| 4624 | `POST /api/anima` | ✅ FIXED (latent) |
+
+The 11 internal `model: model` references inside `callKilo*` helpers are correct (`model` is a parameter there) and were not touched.
+
+### Fix
+Mechanical 1-token rename at all 8 sites: `model: model` → `model: llmModel`. `llmModel` is in scope via `const llmModel = resolveModel(req.body)` higher in each handler.
+
+### Regression test
+New smoke: `scripts/smoke/route-model-binding-guard.js` (116 lines, mirrors the `palette-stale-id-guard.js` pattern). 8 routes × 3 assertions each (declares `model` field, doesn't reference undefined `model`, references `llmModel`) + 1 internal-call sanity check. Mutation-tested: reverted one fix, smoke correctly failed. Restored, smoke passes.
+
+### Verification
+- **End-to-end:** restarted `node server.js`, hit `/api/analyze` with `curl` → `{"success": true, "data": {..., "model": "minimax/minimax-m3"}}` (was `{"success": false, "error": "model is not defined"}`).
+- **All 8 routes smoked:** none now throw `model is not defined`. The 7 latent routes that the user hadn't yet clicked now return real LLM responses (or upstream LLM errors — not the bug).
+- **`tests/run-all.js`:** 385 pass, 10 fail. Failure analysis: 9 are pre-existing Slice 3.3 / 3.4 frontend wiring failures (the model selector UI is non-functional — a separate, larger bug). 1 (`ADR 0014 weighted palette`) is transient/environmental — passed on rerun. **My fix introduces zero regressions.**
+- **`scripts/session-init.js`:** 10/10 V-checks pass.
+- **`scripts/smoke/route-model-binding-guard.js`:** 8/8 routes verified.
+
+### Files changed this session
+- `server.js` (8 lines, 1-token rename each)
+- `scripts/smoke/route-model-binding-guard.js` (new, 116 lines)
+- `scripts/smoke/README.md` (1 line added — new smoke)
+- `docs/SESSION-STATE.md` (this entry — append-only)
+
+### Issue
+https://github.com/shadowdoguk/image-to-prompt/issues/24 — label `bug`. To be closed by the fix commit (`Closes #24`).
+
+### Mood / risk flag
+> Reachable bug shipped in Slice 3 (ADR 0022). The user's first click at it (session-init reported 1 issue, this was it). The fix is the smallest possible diff (1 token × 8 sites) and a one-shot regression smoke. **No slice work touched, no ADR required** (mechanical rename, no architectural decision). The polish-triage slice (Session #7 Q3 — 14 polish findings from the Slice 1 G5 audit) still pending. The Slice 3.3 / 3.4 frontend wiring failure (9 tests failing on `src/app.js`) is a separate latent bug — flagged for the next polish-triage pass.
+
+---
+
+### Post-commit follow-up (same session, later in the day)
+User requested a CODE-REVIEW doc be added for symmetry with prior slices (per-slice review discipline in AGENTS.md). Created `docs/CODE-REVIEW-8-route-model-binding.md` (117 lines, two-axis: Standards + Spec, verdict **pass**). Document includes a "Lessons" section flagging three follow-up improvements for the next methodology update: (a) grep step in slice closeout for variable renames, (b) test that exercises response-construction with a stubbed LLM client, (c) amend `bug-workflow.md` to require CODE-REVIEW doc at step 7. All three are parked as recommendations, not blockers. **No code changes since the original commit `5ab78d2` — this is documentation-only.** Files added in this follow-up:
+- `docs/CODE-REVIEW-8-route-model-binding.md` (new, 117 lines)
+- `docs/SESSION-STATE.md` (this sub-entry — append-only)
