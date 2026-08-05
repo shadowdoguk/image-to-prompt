@@ -4293,7 +4293,7 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
       preset_name: preset.name,
       analysis,
       requested_fields: preset.stage1_fields,
-      model: model
+      model: llmModel
     };
     if (appliedPalette) {
       responseData.palette_id = appliedPalette.id;
@@ -4341,7 +4341,7 @@ app.post('/api/subject', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         subject,
-        model: model
+        model: llmModel
       }
     });
   } catch (error) {
@@ -4387,7 +4387,7 @@ app.post('/api/camera-angle', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         camera_angle: cameraAngle,
-        model: model
+        model: llmModel
       }
     });
   } catch (error) {
@@ -4433,7 +4433,7 @@ app.post('/api/actions', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         actions,
-        model: model
+        model: llmModel
       }
     });
   } catch (error) {
@@ -4476,7 +4476,7 @@ app.post('/api/mood', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         mood,
-        model: model
+        model: llmModel
       }
     });
   } catch (error) {
@@ -4519,7 +4519,7 @@ app.post('/api/lighting', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         lighting,
-        model: model
+        model: llmModel
       }
     });
   } catch (error) {
@@ -4562,7 +4562,7 @@ app.post('/api/texture', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         texture,
-        model: model
+        model: llmModel
       }
     });
   } catch (error) {
@@ -4621,7 +4621,7 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
         positive: result.positive,
         negative: result.negative,
         variant: variantPrompt,
-        model: model
+        model: llmModel
       }
     });
   } catch (error) {

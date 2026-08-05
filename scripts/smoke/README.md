@@ -1,3 +1,8 @@
 # Smoke tests
 
 - `node scripts/smoke/chat-conversational-smoke.js` — exercise conversational draft endpoints (create session, discussion, proposal, `apply it`) against an in-process server with `chat/completions` mocked via `global.fetch`.
+- `node scripts/smoke/palette-stale-id-guard.js` — static-source check that the analyze handler revalidates `selectedPaletteId` against `state.palettes` before forwarding to `/api/analyze` (regression guard for `Palette <id> not found`).
+- `node scripts/smoke/anima-chat-apply-sync.js` — verify that refining the Anima branch via chat and clicking "Apply it" writes the revised prompt to the Anima result panel (regression guard for the Anima chat-apply sync bug).
+- `node scripts/smoke/anima-coverage-categories.js` — verify that the Anima contract prompt includes the coverage categories (camera angle, mood, lighting, posture) so generated prompts are not missing those tags.
+- `node scripts/smoke/chat-limit-guardrail-smoke.js` — verify the 200-session cap surfaces as a warning, not a fatal error.
+- `node scripts/smoke/route-model-binding-guard.js` — static-source check that all 8 vision-LLM route handlers (`/api/analyze`, `/api/subject`, `/api/camera-angle`, `/api/actions`, `/api/mood`, `/api/lighting`, `/api/texture`, `/api/anima`) reference `llmModel` (not the undefined `model`) in their response payload (regression guard for `Analysis failed: model is not defined`).
