@@ -3144,62 +3144,92 @@ const callKiloAnimaAnalysis = async (imageDataUri, variant, model = DEFAULT_LLM_
   const systemPrompt = DEFAULT_ANIMA_PROMPT;
   const userPrompt = `Analyse the image and respond with the JSON object containing only "positive" and "negative" — both lowercase comma-separated tag lists for the Anima model. VARIANT = ${variantPrompt}.`;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
+  // Issue #25 — flaky LLM behavior: `minimax/minimax-m3` occasionally
+  // returns HTTP 200 with `finish_reason: "stop"` and `content: ""` on
+  // non-anime images where it is uncertain about the dataset-tag choice
+  // (ye-pop vs deviantart). One automatic retry with identical params
+  // is enough to recover in the observed cases; a second failure
+  // surfaces the diagnostic so the user sees why.
+  //
+  // The retry is bounded to ONE attempt because doubling the LLM cost
+  // on every call is too expensive for the common path. It only
+  // retries on empty content (the LLM bailed) — `finish_reason: "length"`
+  // is real truncation and a retry with the same prompt won't help.
+  const fetchBody = JSON.stringify({
+    model: model,
+    max_tokens: 1000,
+    temperature: 0.3,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: userPrompt },
+          { type: 'image_url', image_url: { url: imageDataUri } }
+        ]
+      }
+    ],
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'anima_prompt_contract',
+        strict: true,
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            positive: { type: 'string', minLength: 60 },
+            negative: { type: 'string', minLength: 20 }
+          },
+          required: ['positive', 'negative']
+        }
+      }
+    }
+  });
+
+  const doFetch = async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    try {
+      const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${KILO_API_KEY}`
+        },
+        signal: controller.signal,
+        body: fetchBody
+      });
+
+      clearTimeout(timeout);
+
+      if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+      if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Kilo Code anima analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      }
+
+      return await response.json();
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
+    }
+  };
 
   try {
-    const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${KILO_API_KEY}`
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: model,
-        max_tokens: 1000,
-        temperature: 0.3,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: userPrompt },
-              { type: 'image_url', image_url: { url: imageDataUri } }
-            ]
-          }
-        ],
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'anima_prompt_contract',
-            strict: true,
-            schema: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                positive: { type: 'string', minLength: 60 },
-                negative: { type: 'string', minLength: 20 }
-              },
-              required: ['positive', 'negative']
-            }
-          }
-        }
-      })
-    });
-
-    clearTimeout(timeout);
-
-    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
-    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Kilo Code anima analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+    let result = await doFetch();
+    let content = result.choices?.[0]?.message?.content;
+    let finishReason = result.choices?.[0]?.finish_reason;
+    // Issue #25 — one retry on empty content (NOT on length truncation).
+    if (!content && finishReason !== 'length') {
+      result = await doFetch();
+      content = result.choices?.[0]?.message?.content;
+      finishReason = result.choices?.[0]?.finish_reason;
     }
-
-    const result = await response.json();
-    const content = result.choices?.[0]?.message?.content;
-    if (!content) throw new Error('Kilo Code returned an empty response.');
+    if (!content) {
+      throw new Error(`Kilo Code returned an empty response (finish_reason: ${finishReason || 'unknown'}).`);
+    }
 
     let parsed;
     const trimmed = content.trim();
@@ -3237,7 +3267,10 @@ const callKiloAnimaAnalysis = async (imageDataUri, variant, model = DEFAULT_LLM_
 
     return { positive: parsed.positive, negative: parsed.negative };
   } catch (error) {
-    clearTimeout(timeout);
+    // Issue #25 — the AbortController / timeout live inside `doFetch`
+    // and are cleared there on both success and error. The outer catch
+    // only needs to translate AbortError into the same friendly
+    // timeout message the rest of the codebase uses.
     if (error.name === 'AbortError') throw new Error('Anima analysis request timed out after 60 seconds.');
     throw error;
   }

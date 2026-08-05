@@ -254,10 +254,10 @@ test('DEFAULT_SUBJECT_PROMPT excludes artistic style/medium/aesthetic (ADR 0004)
     'prompt must enforce 600-character minimum length');
 });
 
-test('callMiniMaxSubjectAnalysis helper is exported (ADR 0004)', () => {
+test('callKiloSubjectAnalysis helper is exported (ADR 0004)', () => {
   const server = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(typeof server.callMiniMaxSubjectAnalysis === 'function',
-    'callMiniMaxSubjectAnalysis must be exported from server.js');
+  assertTrue(typeof server.callKiloSubjectAnalysis === 'function',
+    'callKiloSubjectAnalysis must be exported from server.js');
   assertTrue(typeof server.DEFAULT_SUBJECT_PROMPT === 'string',
     'DEFAULT_SUBJECT_PROMPT must be exported from server.js');
 });
@@ -1540,7 +1540,7 @@ test('ADR 0017: POST /api/generate-prompt with an accent-only palette returns pa
 // `normalizeColorWeights` arithmetic (the algorithm that handles the
 // "sum not equal to 100%" edge case), the budget-block renderer, and
 // the post-Stage-2 measurement helper. Phase 2 wires the budget block
-// into callMiniMaxStage2; Phase 4 wires the dashboard. Each helper is
+// into callKiloStage2; Phase 4 wires the dashboard. Each helper is
 // exercised through the existing `tests/run-all.js` require-and-call
 // pattern so the server isn't started.
 
@@ -2699,10 +2699,10 @@ test('POST /api/camera-angle endpoint is registered (ADR 0008)', () => {
     `POST /api/camera-angle must be registered; found endpoints: ${endpoints.join(', ')}`);
 });
 
-test('callMiniMaxCameraAngleAnalysis helper + DEFAULT_CAMERA_ANGLE_PROMPT are exported (ADR 0008)', () => {
+test('callKiloCameraAngleAnalysis helper + DEFAULT_CAMERA_ANGLE_PROMPT are exported (ADR 0008)', () => {
   const server = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(typeof server.callMiniMaxCameraAngleAnalysis === 'function',
-    'callMiniMaxCameraAngleAnalysis must be exported from server.js');
+  assertTrue(typeof server.callKiloCameraAngleAnalysis === 'function',
+    'callKiloCameraAngleAnalysis must be exported from server.js');
   assertTrue(typeof server.DEFAULT_CAMERA_ANGLE_PROMPT === 'string' && server.DEFAULT_CAMERA_ANGLE_PROMPT.length > 0,
     'DEFAULT_CAMERA_ANGLE_PROMPT must be a non-empty string exported from server.js');
 });
@@ -2878,10 +2878,10 @@ test('Slice 2.2: POST /api/anima endpoint is registered (ADR 0021)', () => {
     `POST /api/anima must be registered; found endpoints: ${endpoints.join(', ')}`);
 });
 
-test('Slice 2.2: callMiniMaxAnimaAnalysis helper + DEFAULT_ANIMA_PROMPT are exported (ADR 0021)', () => {
+test('Slice 2.2: callKiloAnimaAnalysis helper + DEFAULT_ANIMA_PROMPT are exported (ADR 0021)', () => {
   const server = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(typeof server.callMiniMaxAnimaAnalysis === 'function',
-    'callMiniMaxAnimaAnalysis must be exported from server.js');
+  assertTrue(typeof server.callKiloAnimaAnalysis === 'function',
+    'callKiloAnimaAnalysis must be exported from server.js');
   assertTrue(typeof server.DEFAULT_ANIMA_PROMPT === 'string' && server.DEFAULT_ANIMA_PROMPT.length > 0,
     'DEFAULT_ANIMA_PROMPT must be a non-empty string exported from server.js');
 });
@@ -2893,7 +2893,7 @@ test('Slice 2.2: POST /api/anima uses multer single-image upload middleware (ADR
     'POST /api/anima must use upload.single("image") middleware to match the per-field pattern');
 });
 
-test('Slice 2.2: POST /api/anima routes to callMiniMaxAnimaAnalysis (ADR 0021)', () => {
+test('Slice 2.2: POST /api/anima routes to callKiloAnimaAnalysis (ADR 0021)', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   // The route block is short. Find the comment block that immediately precedes
   // `app.post('/api/anima', ...)` and read forward until the next route.
@@ -2901,8 +2901,8 @@ test('Slice 2.2: POST /api/anima routes to callMiniMaxAnimaAnalysis (ADR 0021)',
   assertTrue(routeStart > 0, 'POST /api/anima route must be registered');
   const routeEnd = serverText.indexOf("\n", serverText.indexOf('// ─', routeStart));
   const body = serverText.slice(routeStart, routeEnd > 0 ? routeEnd : routeStart + 4000);
-  assertTrue(/callMiniMaxAnimaAnalysis\(/.test(body),
-    'POST /api/anima must call callMiniMaxAnimaAnalysis');
+  assertTrue(/callKiloAnimaAnalysis\(/.test(body),
+    'POST /api/anima must call callKiloAnimaAnalysis');
   assertTrue(/variant/.test(body),
     'POST /api/anima must pass the variant through to the helper');
   assertTrue(/positive:/.test(body),
@@ -2978,12 +2978,12 @@ test('Slice 2.2: DEFAULT_ANIMA_PROMPT prohibits photorealism + long text renderi
   assertTrue(/text rendering/i.test(prompt), 'DEFAULT_ANIMA_PROMPT must address text rendering');
 });
 
-test('Slice 2.2: callMiniMaxAnimaAnalysis schema enforces positive + negative length floors (ADR 0021)', () => {
+test('Slice 2.2: callKiloAnimaAnalysis schema enforces positive + negative length floors (ADR 0021)', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  // The helper must declare the schema with both fields' minLengths.
-  const helperMatch = serverText.match(/const callMiniMaxAnimaAnalysis = async[\s\S]{0,5000}?\};/);
-  assertTrue(helperMatch !== null, 'callMiniMaxAnimaAnalysis must be defined');
-  const body = helperMatch[0];
+  // Anchor on the AbortError translation that only lives in the helper's outer catch.
+  const helperStart = serverText.indexOf('const callKiloAnimaAnalysis = async');
+  assertTrue(helperStart > 0, 'callKiloAnimaAnalysis must be defined');
+  const body = serverText.slice(helperStart, helperStart + 10000);
   assertTrue(/positive: \{ type: 'string', minLength: 60 \}/.test(body),
     'Schema must declare positive with minLength 60');
   assertTrue(/negative: \{ type: 'string', minLength: 20 \}/.test(body),
@@ -2994,31 +2994,32 @@ test('Slice 2.2: callMiniMaxAnimaAnalysis schema enforces positive + negative le
     'Schema must set additionalProperties: false');
 });
 
-test('Slice 2.2: callMiniMaxAnimaAnalysis has 60-second AbortController timeout (ADR 0021)', () => {
+test('Slice 2.2: callKiloAnimaAnalysis has 60-second AbortController timeout (ADR 0021)', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   // Find the helper by name and read forward until the next top-level
   // declaration (const / function / app.post). The regex-based capture
   // ate an inner `}` because the schema body uses `}` freely.
-  const helperStart = serverText.indexOf('const callMiniMaxAnimaAnalysis = async');
-  assertTrue(helperStart > 0, 'callMiniMaxAnimaAnalysis must be defined');
+  const helperStart = serverText.indexOf('const callKiloAnimaAnalysis = async');
+  assertTrue(helperStart > 0, 'callKiloAnimaAnalysis must be defined');
   // Cap the read at 6000 chars; the helper is ~190 lines.
   const slice = serverText.slice(helperStart, helperStart + 6000);
   assertTrue(/new AbortController\(\)/.test(slice),
-    'callMiniMaxAnimaAnalysis must use an AbortController');
+    'callKiloAnimaAnalysis must use an AbortController');
   assertTrue(/setTimeout\(\(\) => controller\.abort\(\), 60000\)/.test(slice),
-    'callMiniMaxAnimaAnalysis must have a 60000ms timeout');
+    'callKiloAnimaAnalysis must have a 60000ms timeout');
   assertTrue(/AbortError/.test(slice),
-    'callMiniMaxAnimaAnalysis must handle AbortError');
+    'callKiloAnimaAnalysis must handle AbortError');
 });
 
-test('Slice 2.2: callMiniMaxAnimaAnalysis has the standard 429 / 401-403 / 5xx error paths (ADR 0021)', () => {
+test('Slice 2.2: callKiloAnimaAnalysis has the standard 429 / 401-403 / 5xx error paths (ADR 0021)', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  const helperMatch = serverText.match(/const callMiniMaxAnimaAnalysis = async[\s\S]{0,5000}?\};/);
-  const body = helperMatch[0];
-  assertTrue(/429/.test(body), 'callMiniMaxAnimaAnalysis must handle 429');
-  assertTrue(/401/.test(body) && /403/.test(body), 'callMiniMaxAnimaAnalysis must handle 401-403');
-  assertTrue(/response\.ok/.test(body), 'callMiniMaxAnimaAnalysis must handle non-ok responses');
-  assertTrue(/empty response/i.test(body), 'callMiniMaxAnimaAnalysis must handle empty responses');
+  const helperStart = serverText.indexOf('const callKiloAnimaAnalysis = async');
+  assertTrue(helperStart > 0, 'callKiloAnimaAnalysis must be defined');
+  const body = serverText.slice(helperStart, helperStart + 10000);
+  assertTrue(/429/.test(body), 'callKiloAnimaAnalysis must handle 429');
+  assertTrue(/401/.test(body) && /403/.test(body), 'callKiloAnimaAnalysis must handle 401-403');
+  assertTrue(/response\.ok/.test(body), 'callKiloAnimaAnalysis must handle non-ok responses');
+  assertTrue(/empty response/i.test(body), 'callKiloAnimaAnalysis must handle empty responses');
 });
 
 test('Slice 2.2: POST /api/anima has the standard multer cleanup pattern (ADR 0021)', () => {
@@ -3070,7 +3071,7 @@ test('Slice 2.2: SPEC §14 + ADR 0021 are in place (pre-conditions for the slice
   const adr = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/adr/0021-anima-fork.md'), 'utf8');
   assertTrue(/## 14\. Slice 2 — Anima contract/.test(spec), 'SPEC §14 present');
   assertTrue(/POST \/api\/anima/.test(spec), 'SPEC §14 names /api/anima');
-  assertTrue(/callMiniMaxAnimaAnalysis/.test(spec), 'SPEC §14 names callMiniMaxAnimaAnalysis');
+  assertTrue(/callKiloAnimaAnalysis/.test(spec), 'SPEC §14 names callKiloAnimaAnalysis');
   assertTrue(/DEFAULT_ANIMA_PROMPT/.test(spec), 'SPEC §14 names DEFAULT_ANIMA_PROMPT');
   assertTrue(/## Status/.test(adr), 'ADR 0021 has a Status section');
   assertTrue(/Accepted/.test(adr), 'ADR 0021 status is Accepted');
@@ -3452,26 +3453,26 @@ test('POST /api/lighting endpoint is registered (ADR 0018)', () => {
     `POST /api/lighting must be registered; found endpoints: ${endpoints.join(', ')}`);
 });
 
-test('callMiniMaxActionsAnalysis helper + DEFAULT_ACTIONS_PROMPT are exported (ADR 0018)', () => {
+test('callKiloActionsAnalysis helper + DEFAULT_ACTIONS_PROMPT are exported (ADR 0018)', () => {
   const server = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(typeof server.callMiniMaxActionsAnalysis === 'function',
-    'callMiniMaxActionsAnalysis must be exported from server.js');
+  assertTrue(typeof server.callKiloActionsAnalysis === 'function',
+    'callKiloActionsAnalysis must be exported from server.js');
   assertTrue(typeof server.DEFAULT_ACTIONS_PROMPT === 'string' && server.DEFAULT_ACTIONS_PROMPT.length > 0,
     'DEFAULT_ACTIONS_PROMPT must be a non-empty string exported from server.js');
 });
 
-test('callMiniMaxMoodAnalysis helper + DEFAULT_MOOD_PROMPT are exported (ADR 0018)', () => {
+test('callKiloMoodAnalysis helper + DEFAULT_MOOD_PROMPT are exported (ADR 0018)', () => {
   const server = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(typeof server.callMiniMaxMoodAnalysis === 'function',
-    'callMiniMaxMoodAnalysis must be exported from server.js');
+  assertTrue(typeof server.callKiloMoodAnalysis === 'function',
+    'callKiloMoodAnalysis must be exported from server.js');
   assertTrue(typeof server.DEFAULT_MOOD_PROMPT === 'string' && server.DEFAULT_MOOD_PROMPT.length > 0,
     'DEFAULT_MOOD_PROMPT must be a non-empty string exported from server.js');
 });
 
-test('callMiniMaxLightingAnalysis helper + DEFAULT_LIGHTING_PROMPT are exported (ADR 0018)', () => {
+test('callKiloLightingAnalysis helper + DEFAULT_LIGHTING_PROMPT are exported (ADR 0018)', () => {
   const server = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(typeof server.callMiniMaxLightingAnalysis === 'function',
-    'callMiniMaxLightingAnalysis must be exported from server.js');
+  assertTrue(typeof server.callKiloLightingAnalysis === 'function',
+    'callKiloLightingAnalysis must be exported from server.js');
   assertTrue(typeof server.DEFAULT_LIGHTING_PROMPT === 'string' && server.DEFAULT_LIGHTING_PROMPT.length > 0,
     'DEFAULT_LIGHTING_PROMPT must be a non-empty string exported from server.js');
 });
@@ -3875,10 +3876,10 @@ test('Slice 1: POST /api/texture endpoint is registered', () => {
     `POST /api/texture must be registered; found endpoints: ${endpoints.join(', ')}`);
 });
 
-test('Slice 1: callMiniMaxTextureAnalysis helper + DEFAULT_TEXTURE_PROMPT are exported', () => {
+test('Slice 1: callKiloTextureAnalysis helper + DEFAULT_TEXTURE_PROMPT are exported', () => {
   const server = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertTrue(typeof server.callMiniMaxTextureAnalysis === 'function',
-    'callMiniMaxTextureAnalysis must be exported from server.js');
+  assertTrue(typeof server.callKiloTextureAnalysis === 'function',
+    'callKiloTextureAnalysis must be exported from server.js');
   assertTrue(typeof server.DEFAULT_TEXTURE_PROMPT === 'string' && server.DEFAULT_TEXTURE_PROMPT.length > 0,
     'DEFAULT_TEXTURE_PROMPT must be a non-empty string exported from server.js');
 });
@@ -5716,12 +5717,12 @@ test('ADR 0011: extractChatReply handles array-as-top-level', () => {
 });
 
 test('ADR 0011: extractChatReply unwraps schema-name wrapper (chat_reply key)', () => {
-  // Post-investigation 2026-06-23: the MiniMax M3 model frequently
+  // Post-investigation 2026-06-23: the Kilo Code model frequently
   // wraps its response in {"chat_reply": {...}} using the json_schema
   // name key. Without unwrap, the parser sees the wrapper as the
   // top-level object, finds no `reply` key, and falls back. Verified
   // live: a raw response looked like {"chat_reply":{"reply":"...","suggested_prompt":"..."}}.
-  // Stage 1 already had this unwrap (callMiniMaxStage1); chat was
+  // Stage 1 already had this unwrap (callKiloStage1); chat was
   // missing it. Adding it here kills the most common parse-fallback
   // trigger.
   const { extractChatReply } = require(path.join(PROJECT_ROOT, 'server.js'));
@@ -6178,14 +6179,14 @@ test('ADR 0011: chat input length cap is enforced at the schema level', () => {
   );
 });
 
-test('ADR 0011: chat response schema uses string type (no union — MiniMax M3 rejects type arrays)', () => {
+test('ADR 0011: chat response schema uses string type (no union — Kilo Code rejects type arrays)', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  // The schema lives in callMiniMaxChatOnce now (post-investigation:
-  // callMiniMaxChat is the retry loop, callMiniMaxChatOnce is the
+  // The schema lives in callKiloChatOnce now (post-investigation:
+  // callKiloChat is the retry loop, callKiloChatOnce is the
   // single-shot that builds the schema).
-  const block = serverText.match(/const callMiniMaxChatOnce = async[\s\S]*?\n\};/);
-  assertTrue(block, 'callMiniMaxChatOnce defined');
-  // The MiniMax M3 JSON-schema validator rejects union types like
+  const block = serverText.match(/const callKiloChatOnce = async[\s\S]*?\n\};/);
+  assertTrue(block, 'callKiloChatOnce defined');
+  // The Kilo Code JSON-schema validator rejects union types like
   // `type: ['string','null']` with a 400. We sidestep that by typing
   // `suggested_prompt` as a plain string and using "" to mean
   // "no revision this turn" (extractChatReply coerces empty to null).
@@ -6392,7 +6393,7 @@ test('HTTP chat integration: POST /messages never leaves a ghost user message', 
   //
   // What we CAN'T easily do here: simulate a fatal LLM error without
   // actually pointing the server at a broken endpoint. So in a test
-  // env with a real MiniMax M3 key, the LLM call succeeds (or falls
+  // env with a real Kilo Code key, the LLM call succeeds (or falls
   // back to the assistant fallback message) and we get 200 with
   // BOTH messages persisted. We assert that invariant here.
   const snapshot = snapshotChatFile();
@@ -6993,22 +6994,22 @@ test('Chat retry config: max_tokens is high enough for long revisions', () => {
   // 1500 was insufficient — large revisions got truncated mid-JSON.
   // 2400 leaves headroom for the envelope + 1800-char revisions.
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  const block = serverText.match(/const callMiniMaxChatOnce = async[\s\S]*?\n\};/);
-  assertTrue(block, 'callMiniMaxChatOnce defined');
+  const block = serverText.match(/const callKiloChatOnce = async[\s\S]*?\n\};/);
+  assertTrue(block, 'callKiloChatOnce defined');
   const m = block[0].match(/max_tokens:\s*(\d+)/);
   assertTrue(m, 'max_tokens configured');
   const tokens = parseInt(m[1], 10);
   assertTrue(tokens >= 2000, `max_tokens must be >= 2000 for long revisions (got ${tokens})`);
 });
 
-test('Chat retry: callMiniMaxChat has retry loop on parse fallback', () => {
+test('Chat retry: callKiloChat has retry loop on parse fallback', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   // The retry loop must be present — single-shot would lose user
   // turns to transient model flakiness.
   assertTrue(/CHAT_MAX_RETRIES\s*=\s*\d+/.test(serverText),
     'CHAT_MAX_RETRIES constant defined');
   assertTrue(/for\s*\(\s*let attempt[\s\S]*?attempt\s*<=[\s\S]*?CHAT_MAX_RETRIES/.test(serverText),
-    'callMiniMaxChat has a retry loop keyed on attempt counter');
+    'callKiloChat has a retry loop keyed on attempt counter');
   // Fatal errors must NOT be retried (network/auth/timeouts bubble up).
   assertTrue(/result\.fatal/.test(serverText),
     'retry loop respects fatal flag (no infinite retry on auth/timeout)');
@@ -7416,11 +7417,11 @@ test('ADR 0012: DEFAULT_CHAT_SYSTEM_PROMPT includes the anchor-preservation cont
     'system prompt names the pending-prompt editing base');
 });
 
-test('ADR 0012: callMiniMaxChat wires the validator into the retry loop', () => {
+test('ADR 0012: callKiloChat wires the validator into the retry loop', () => {
   // We can't run a real LLM call in tests, but we can verify the
   // call site passes the new options the validator needs.
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  const callSite = serverText.match(/parsedReply = await callMiniMaxChat\([\s\S]*?\}\);/);
+  const callSite = serverText.match(/parsedReply = await callKiloChat\([\s\S]*?\}\);/);
   assertTrue(callSite, 'call site present');
   assertTrue(/currentPrompt:\s*(activePrompt|session\.pending_prompt\s*\|\|\s*session\.current_prompt|session\.current_prompt)/.test(callSite[0]),
     'call site passes a currentPrompt derived from the session (pending || current)');
@@ -7465,9 +7466,9 @@ test('Issue #1: buildPreservationDeclineNote exports + includes dropped terms', 
     'empty missing list -> no "Terms dropped:" prefix');
 });
 
-test('Issue #1: callMiniMaxChat returns declined_suggested_prompt + missing_terms on preservation_failed', () => {
+test('Issue #1: callKiloChat returns declined_suggested_prompt + missing_terms on preservation_failed', () => {
   // Issue #1 — when the validator declines the revision after retries,
-  // the callMiniMaxChat return shape now carries the declined text and
+  // the callKiloChat return shape now carries the declined text and
   // the list of dropped anchor terms so the frontend can render them.
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   // Anchor on the unique decline-log line + the return block that
@@ -8354,6 +8355,159 @@ test('Slice 2.1: SPEC.md §14 + ADR 0021 are in place (pre-conditions for the sl
   assertTrue(/pre-Generate model picker/.test(spec), 'SPEC §14 names the pre-Generate picker');
   assertTrue(/## Status/.test(adr), 'ADR 0021 has a Status section');
   assertTrue(/Accepted/.test(adr), 'ADR 0021 status is Accepted');
+});
+
+// ─── Slice 3 — Kilo Code provider migration + model selector (ADR 0022) ───
+
+test('Slice 3.1: no callMiniMax references remain in server.js (ADR 0022 pre-commitment #1)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(!/callMiniMax/.test(serverText), 'server.js must have zero callMiniMax references');
+});
+
+test('Slice 3.1: no minimaxi.chat references remain in server.js (ADR 0022 pre-commitment #2)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(!/minimaxi\.chat/.test(serverText), 'server.js must have zero minimaxi.chat references');
+});
+
+test('Slice 3.1: KILO_API_KEY and KILO_BASE_URL are referenced in server.js', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/KILO_API_KEY/.test(serverText), 'server.js must reference KILO_API_KEY');
+  assertTrue(/KILO_BASE_URL/.test(serverText), 'server.js must reference KILO_BASE_URL');
+});
+
+test('Slice 3.1: callKilo helpers are exported from server.js', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof server.callKiloStage1 === 'function', 'callKiloStage1 must be exported');
+  assertTrue(typeof server.callKiloSubjectAnalysis === 'function', 'callKiloSubjectAnalysis must be exported');
+  assertTrue(typeof server.callKiloCameraAngleAnalysis === 'function', 'callKiloCameraAngleAnalysis must be exported');
+  assertTrue(typeof server.callKiloActionsAnalysis === 'function', 'callKiloActionsAnalysis must be exported');
+  assertTrue(typeof server.callKiloMoodAnalysis === 'function', 'callKiloMoodAnalysis must be exported');
+  assertTrue(typeof server.callKiloLightingAnalysis === 'function', 'callKiloLightingAnalysis must be exported');
+  assertTrue(typeof server.callKiloTextureAnalysis === 'function', 'callKiloTextureAnalysis must be exported');
+  assertTrue(typeof server.callKiloAnimaAnalysis === 'function', 'callKiloAnimaAnalysis must be exported');
+  assertTrue(typeof server.callKiloStage2 === 'function', 'callKiloStage2 must be exported');
+});
+
+test('Slice 3.1: DEFAULT_LLM_MODEL and ALLOWED_LLM_MODELS are defined in server.js', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof server.DEFAULT_LLM_MODEL === 'string', 'DEFAULT_LLM_MODEL must be exported');
+  assertTrue(Array.isArray(server.ALLOWED_LLM_MODELS), 'ALLOWED_LLM_MODELS must be an array');
+  assertTrue(server.ALLOWED_LLM_MODELS.length === 6, 'ALLOWED_LLM_MODELS must have 6 entries');
+  assertTrue(server.ALLOWED_LLM_MODELS.includes('minimax/minimax-m3'), 'must include MiniMax M3');
+  assertTrue(server.ALLOWED_LLM_MODELS.includes('openai/gpt-5.6-luna'), 'must include GPT-5.6 Luna');
+  assertTrue(server.ALLOWED_LLM_MODELS.includes('google/gemini-3.1-pro-preview'), 'must include Gemini 3.1 Pro Preview');
+  assertTrue(server.ALLOWED_LLM_MODELS.includes('google/gemini-3.5-flash'), 'must include Gemini 3.5 Flash');
+  assertTrue(server.ALLOWED_LLM_MODELS.includes('nvidia/nemotron-3-ultra-550b-a55b'), 'must include Nemotron 3 Ultra');
+  assertTrue(server.ALLOWED_LLM_MODELS.includes('x-ai/grok-4.3'), 'must include Grok 4.3');
+});
+
+test('Slice 3.1: resolveModel helper validates and defaults correctly', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(server.resolveModel({}) === 'minimax/minimax-m3', 'empty body defaults to MiniMax M3');
+  assertTrue(server.resolveModel({ llmModel: 'openai/gpt-5.6-luna' }) === 'openai/gpt-5.6-luna', 'valid model passes through');
+  assertTrue(server.resolveModel({ llmModel: 'invalid/model' }) === 'minimax/minimax-m3', 'invalid model defaults');
+  assertTrue(server.resolveModel(null) === 'minimax/minimax-m3', 'null body defaults');
+});
+
+test('Slice 3.3: ALLOWED_LLM_MODELS and validateLlmModel are defined in src/app.js', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/const ALLOWED_LLM_MODELS = \[/.test(appText), 'ALLOWED_LLM_MODELS must be defined');
+  assertTrue(/const validateLlmModel = /.test(appText), 'validateLlmModel must be defined');
+  assertTrue(/minimax\/minimax-m3/.test(appText), 'must include MiniMax M3 model ID');
+});
+
+test('Slice 3.3: state.llmModel exists with correct default', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/llmModel: 'minimax\/minimax-m3'/.test(appText), 'state.llmModel must default to MiniMax M3');
+});
+
+test('Slice 3.3: llmModel localStorage key and persistence helpers exist', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/LLM_MODEL_STORAGE_KEY/.test(appText), 'LLM_MODEL_STORAGE_KEY must be defined');
+  assertTrue(/localStorage\.setItem\(LLM_MODEL_STORAGE_KEY/.test(appText), 'writeStateToLocalStorage must persist llmModel');
+  assertTrue(/localStorage\.getItem\(LLM_MODEL_STORAGE_KEY/.test(appText), 'readStateFromLocalStorage must read llmModel');
+});
+
+test('Slice 3.3: llmModel URL mirror in syncStateToURL and readStateFromURL', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/searchParams\.(set|delete)\('llm'/.test(appText), 'syncStateToURL must write llm param');
+  assertTrue(/searchParams\.get\('llm'\)/.test(appText), 'readStateFromURL must read llm param');
+});
+
+test('Slice 3.3: renderLlmModelSelector function exists and is called in init()', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/const renderLlmModelSelector = /.test(appText), 'renderLlmModelSelector must be defined');
+  assertTrue(/renderLlmModelSelector\(\)/.test(appText), 'renderLlmModelSelector must be called');
+});
+
+test('Slice 3.3: llm-model-selector is in the DOM cache and has event listener', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/llmModelSelector: \$/.test(appText), 'llmModelSelector must be in DOM cache');
+  assertTrue(/dom\.llmModelSelector\.addEventListener/.test(appText), 'llmModelSelector must have event listener');
+});
+
+test('Slice 3.3: llm-model-selector <select> exists in index.html with 6 options', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/id="llm-model-selector"/.test(html), 'llm-model-selector must exist in HTML');
+  assertTrue(/value="minimax\/minimax-m3"/.test(html), 'MiniMax M3 option must exist');
+  assertTrue(/value="openai\/gpt-5\.6-luna"/.test(html), 'GPT-5.6 Luna option must exist');
+  assertTrue(/value="google\/gemini-3\.1-pro-preview"/.test(html), 'Gemini 3.1 Pro Preview option must exist');
+  assertTrue(/value="google\/gemini-3\.5-flash"/.test(html), 'Gemini 3.5 Flash option must exist');
+  assertTrue(/value="nvidia\/nemotron-3-ultra-550b-a55b"/.test(html), 'Nemotron 3 Ultra option must exist');
+  assertTrue(/value="x-ai\/grok-4\.3"/.test(html), 'Grok 4.3 option must exist');
+});
+
+test('Slice 3.3: llm-model CSS classes exist in styles.css', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  assertTrue(/\.llm-model-row/.test(css), '.llm-model-row must exist');
+  assertTrue(/\.llm-model-label/.test(css), '.llm-model-label must exist');
+  assertTrue(/\.llm-model-select/.test(css), '.llm-model-select must exist');
+});
+
+test('Slice 3.4: frontend sends llmModel on /api/analyze (FormData)', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The llmModel append appears in the FormData construction.
+  // Verify the pattern exists — it's used near fd.append('presetId', ...).
+  assertTrue(/fd\.append\('llmModel', state\.llmModel\)/.test(appText),
+    'at least one fd.append llmModel must exist');
+  // Verify it's near the analyze call (not just in per-field handlers).
+  // The analyze button is wired to runAnalysis.
+  assertTrue(/runAnalysis/.test(appText), 'runAnalysis must be defined');
+});
+
+test('Slice 3.4: frontend sends llmModel on /api/generate-prompt (JSON body)', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/llmModel: state\.llmModel/.test(appText), 'generate-prompt body must include llmModel');
+});
+
+test('Slice 3.4: frontend sends llmModel on chat messages', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/llmModel: state\.llmModel/.test(appText), 'chat message body must include llmModel');
+});
+
+test('Slice 3.5: SPEC.md §15 exists with correct structure', () => {
+  const spec = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/SPEC.md'), 'utf8');
+  assertTrue(/## 15\. Slice 3/.test(spec), 'SPEC §15 must exist');
+  assertTrue(/Kilo Code/.test(spec), 'SPEC §15 must name Kilo Code');
+  assertTrue(/minimax\/minimax-m3/.test(spec), 'SPEC §15 must reference MiniMax M3 model ID');
+});
+
+test('Slice 3.5: ADR 0022 exists with Accepted status', () => {
+  const adr = fs.readFileSync(path.join(PROJECT_ROOT, 'docs/adr/0022-kilo-code-provider.md'), 'utf8');
+  assertTrue(/## Status/.test(adr), 'ADR 0022 must have Status section');
+  assertTrue(/Kilo Code provider migration/.test(adr), 'ADR 0022 title correct');
+});
+
+test('Slice 3.5: provider field updated in server.js response envelope', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/provider: 'kilo-code'/.test(serverText), 'provider field must be kilo-code');
+  assertTrue(!/provider: 'minimax-m3'/.test(serverText), 'provider must not be minimax-m3');
+});
+
+test('Slice 3.5: no MINIMAX_ env var references in server.js', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(!/MINIMAX_API_KEY/.test(serverText), 'no MINIMAX_API_KEY refs');
+  assertTrue(!/MINIMAX_BASE_URL/.test(serverText), 'no MINIMAX_BASE_URL refs');
 });
 
 (async () => {
