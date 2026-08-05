@@ -540,3 +540,41 @@ https://github.com/shadowdoguk/image-to-prompt/issues/25 — label `bug`. To be 
 > Slice 3 paperwork/code drift (9 failing tests for `llmModel` UI) still parked. This is the second consecutive session that has hit it as background noise; deserves attention in the next polish-triage pass.
 >
 > Pre-mortem note: **Scope discipline held.** The sibling `callKilo*` helpers are visibly fragile in source review but have no observed failures — fixing them would be speculative work. User-approved Option A keeps the diff tight. If a second model exhibits this in production, that becomes a separate, justified slice.
+
+---
+
+## Session #10 — 2026-08-05 (Slice 3 paperwork closeout — drift discovery made explicit)
+
+### What this session is
+A housekeeping pass to make the slice 3 paperwork honest. **No functional code change.**
+
+### Context
+Sessions #8 and #9 surfaced slice 3 paperwork/code drift: `docs/adr/0022-kilo-code-provider.md`, `docs/CODE-REVIEW-3-kilo-code-provider.md`, and `docs/POLISH-AUDIT-3-kilo-code-provider.md` were authored with verdicts `Accepted`, `pass`, and `PASS — Slice 3 ships` respectively. But the working tree contains 9 failing tests in `tests/run-all.js` Slice 3.3 / 3.4 that prove the wiring is incomplete: `src/app.js` has zero references to `llmModel`, `ALLOWED_LLM_MODELS`, `LLM_MODEL_STORAGE_KEY`, `renderLlmModelSelector`, or the `llm-model-selector` DOM id. The HTML and CSS for the selector exist in `src/index.html` and `src/styles.css`, but no JS controller reads the value. The 11 LLM-call paths and the chat send path don't include `llmModel` in the request body.
+
+### Decision
+Commit the three doc files into the tree *with a SESSION-STATE entry that explicitly flags their verdicts as superseded by the drift discovery*. This makes the paperwork auditable: future readers see the `PASS` verdicts in the docs *and* see this entry that says "those verdicts are inaccurate — here's why, here's what's still owed". It does **not** commit a false positive.
+
+### What was NOT committed this session
+- `scripts/smoke/palette-stale-id-guard.js` — untracked, in tree since session #8. Ran it: **3 of 9 assertions fail** (handler doesn't revalidate `selectedPaletteId`, doesn't clear stale id, no explanatory comment). Same drift pattern — the smoke was written for behavior that was never implemented. **Skip.** Committing a known-failing smoke would violate the discipline in `scripts/smoke/README.md` ("smoke must pass before commit"). Re-evaluated when the slice 3.3/3.4 wiring is actually implemented.
+- `data/chat_sessions.json.bak.20260730-120651` — appears to be a backup of user chat-session state. Not mine to commit; left as-is for the user to review and either restore or `rm`.
+- All other dirty-tree files (CONTEXT.md, README.md, ANIMA-PROMPTING-MANUAL.md, ARCHITECTURE.md, BACKLOG.md, PRE-MORTEM.md, SPEC.md, src/index.html, src/styles.css) — these are slice 3.3/3.4 paperwork and partial UI implementation. They remain parked because committing them without the corresponding `src/app.js` JS controller would deepen the drift, not fix it.
+
+### Files committed this session
+1. `docs/adr/0022-kilo-code-provider.md` (new, 100 lines)
+2. `docs/CODE-REVIEW-3-kilo-code-provider.md` (new, 111 lines)
+3. `docs/POLISH-AUDIT-3-kilo-code-provider.md` (new, 109 lines)
+4. `docs/SESSION-STATE.md` (this entry, append-only)
+
+### What is still owed (next session, slice 3 closeout sub-slice)
+A fresh G1–G5 run for **Slice 3.3 + 3.4 wiring**:
+- Add `state.llmModel`, `ALLOWED_LLM_MODELS`, `LLM_MODEL_STORAGE_KEY`, `state.url.llmModel` (URL mirror) to `src/app.js`. Read/write to localStorage. Sync to/from URL.
+- Add `renderLlmModelSelector()` and wire to `llm-model-selector` DOM element from `src/index.html`.
+- Append `llmModel` to all 11 LLM-call request bodies (8 vision-LLM routes + chat send + generate-prompt).
+- Add `tests/run-all.js` Slice 3.3 / 3.4 assertions (currently missing from the clean tree — the dirty `tests/run-all.js` has them but they were authored for unwritten behavior).
+- Update `docs/SPEC.md` §15 if design has drifted from ADR 0022.
+- Update `docs/POLISH-AUDIT-3-…` once the wiring lands. Mark this Session #10 entry as superseded at that point.
+- Re-evaluate `scripts/smoke/palette-stale-id-guard.js` — it's the regression guard for the same handler logic; commit when the handler exists.
+- Estimated: 2–3 hours focused work, ~3–5 commits.
+
+### Mood / risk flag
+> Slice 3 has now been in drift for two consecutive sessions. The risk is not that the bug exists — the bug is documented and isolated — but that future slices will cite "Slice 3 ships" as a precondition and inherit the missing wiring. The honest fix is a single dedicated session for the wiring sub-slice, not parallel work. **Recommend scheduling it next, before any new slice work begins.**
