@@ -98,3 +98,36 @@ Verification commands (to be run post-implementation):
 - `https://kilo.ai/docs/gateway/authentication` — Kilo Code auth mechanism
 - `docs/adr/0021-anima-fork.md` — the fork pattern this slice parallels (selector upstream of contract)
 - `docs/adr/0018-populate-with-ai-actions-mood-lighting.md` — the per-field pattern that the `buildVisionMessage` helper consolidates
+
+---
+
+## Closeout (2026-09-03 — Session #12)
+
+### Status
+**Accepted → Implemented.** All Slice 3 sub-slices (3.1 server-side migration, 3.2 helper consolidation, 3.3 frontend model selector, 3.4 endpoint wiring, 3.5 cleanup) are shipped.
+
+### Implementation history
+- `2568fad` (2026-08-05): paperwork land + drift-discovery note (server-side wiring only; frontend unwired)
+- `5ab78d2` (2026-08-04): server-side `model: llmModel` binding in 8 route handlers
+- `7a16088` (2026-09-03): chat-recovery refactor (Fix 1–3) — server-side, `buildKiloChatBody`, schema-drop retry
+- `c850101` (2026-09-03): frontend wiring — `state.llmModel`, `ALLOWED_LLM_MODELS`, persistence, URL mirror, `renderLlmModelSelector`, 4-endpoint forwarding
+- `2956fe2` (2026-09-03): paperwork closeout — §15 spec, ARCHITECTURE appendices, PRE-MORTEM, SESSION-STATE #11 + #12
+
+### Verification (post-implementation)
+- `tests/run-all.js`: **402 passed, 0 failed** (was 382/13 pre-Session #11; was 393/9 post-`7a16088`)
+- `scripts/session-init.js`: **10/10 V-checks pass**
+- `node --check server.js && node --check src/app.js`: exit 0
+- `grep -n "callMiniMax" server.js`: 0 results ✓
+- `grep -n "minimaxi.chat" server.js`: 0 results ✓
+- `grep -n "MINIMAX_.*=" server.js`: 0 results ✓
+- **Manual demo (deferred):** see `docs/CODE-REVIEW-10-slice-3-closeout.md` follow-up #2 — visual smoke test deferred to next slice that builds on Slice 3
+- **Code review:** See `docs/CODE-REVIEW-10-slice-3-closeout.md` — verdict: **PASS** (with minor follow-ups)
+
+### Drift-discovery retrospective
+The Slice 3 paperwork was landed in `2568fad` with ship verdicts (Accepted / pass / PASS) but the `src/app.js` JS wiring was missing — a paperwork/code drift that persisted across Sessions #8–#11. The drift was surfaced by `tests/run-all.js` (9 failing Slice 3.3 / 3.4 tests) and persisted by parking the wiring as "background drift" rather than scheduling it as its own sub-slice.
+
+**Lesson:** Slice 3 was too big to be one paper artifact. The five sub-slices (3.1–3.5) should each have had their own G4 review and commit cycle. Future slices with ≥3 sub-seams should consider sub-slice G4 gates.
+
+### What's parked (next session)
+- **Multi-provider slice** (the original user request): tri-provider routing across Kilo Code / MiniMax / Alibaba Cloud. Parked in `docs/BACKLOG.md`. ADR 0023 candidate.
+- **Visual-demo gate** (manual smoke test) — deferred to next slice that builds on Slice 3 per `CODE-REVIEW-10` follow-up #2.
