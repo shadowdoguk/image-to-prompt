@@ -1454,6 +1454,26 @@ body {
   font-size: 0.75rem;
   color: var(--text-muted);
 }
+
+/* ADR 0022 — Kilo Code LLM model selector row */
+.llm-model-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.llm-model-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.llm-model-label .label-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.llm-model-select {
+  min-width: 200px;
+}
 .btn-toggle {
   /* Inherits .btn-secondary shape; the .is-active flag applies accent
      treatment so the active model is unmistakably visible. */

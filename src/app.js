@@ -54,7 +54,15 @@
     // are persisted (localStorage) and mirrored in the URL (?model=...&variant=...).
     model: 'zimage_turbo',       // 'zimage_turbo' | 'anima'
     animaVariant: 'base',        // 'base' | 'aesthetic' | 'turbo' (only meaningful when model === 'anima')
-    animaResult: null            // Slice 2.3 — { positive, negative, variant, model } | null. Parallel to state.finalPrompt but for the Anima contract.
+    animaResult: null,           // Slice 2.3 — { positive, negative, variant, model } | null. Parallel to state.finalPrompt but for the Anima contract.
+    // Slice 3.3 — ADR 0022 — LLM model picker (Kilo Code gateway model id).
+    // The id is a string the Kilo Code API accepts verbatim
+    // (e.g. 'minimax/minimax-m3'). Persisted (localStorage) and
+    // mirrored in the URL (?llm=...). Forwarded to the server on
+    // /api/analyze, /api/generate-prompt, /api/anima, and chat
+    // messages; the server then routes the call through the
+    // configured ALLOWED_LLM_MODELS whitelist (server.js).
+    llmModel: 'minimax/minimax-m3'
   };
 
   // ADR 0019 Issue #15 — count words in the current prompt and toggle the
@@ -102,6 +110,7 @@
     generatePromptBtn: $('generate-prompt-btn'),
     aspectRatioSelect: $('aspect-ratio-select'),
     modelSelector: $('model-selector'),  // Slice 2.1 — ADR 0021 — pre-Generate model picker
+    llmModelSelector: $('llm-model-selector'),  // Slice 3.3 — ADR 0022 — Kilo Code LLM model picker
 
     resultSection: $('step-result'),
     resultPrompt: $('result-prompt'),
@@ -1144,6 +1153,9 @@
     if (state.selectedPaletteId) {
       fd.append('paletteId', state.selectedPaletteId);
     }
+    // Slice 3.4 — ADR 0022 — forward the LLM model so the server
+    // routes /api/analyze through the user's chosen model.
+    fd.append('llmModel', state.llmModel);
 
     try {
       const data = await apiCall('/api/analyze', { method: 'POST', body: fd });
@@ -1711,7 +1723,13 @@
           // has chosen one (square / portrait / landscape / panoramic),
           // forward it to the server so the Stage 2 LLM anchors Block
           // 3 on the chosen canvas proportion.
-          aspectRatio: state.selectedAspectRatio || undefined
+          aspectRatio: state.selectedAspectRatio || undefined,
+          // Slice 3.4 — ADR 0022 — forward the LLM model so the
+          // server routes /api/generate-prompt through the user's
+          // chosen model. The server validates against
+          // ALLOWED_LLM_MODELS; anything not on the whitelist
+          // falls back to the default on the server side too.
+          llmModel: state.llmModel
         })
       });
       state.finalPrompt = data.prompt;
@@ -1759,6 +1777,9 @@
       const fd = new FormData();
       fd.append('image', file);
       fd.append('variant', state.animaVariant);
+      // Slice 3.4 — ADR 0022 — forward the LLM model so the server
+      // routes /api/anima through the user's chosen model.
+      fd.append('llmModel', state.llmModel);
       const data = await apiCall('/api/anima', { method: 'POST', body: fd });
       state.animaResult = {
         positive: data.positive,
@@ -1922,10 +1943,32 @@
     return ALLOWED_ANIMA_VARIANTS.includes(raw) ? raw : 'base';
   };
 
+  // ─── Slice 3.3 — ADR 0022 — LLM model picker (Kilo Code) ─────────────
+  // The 6 model ids exposed in the picker. Mirrored in server.js
+  // ALLOWED_LLM_MODELS so the server validates against the same set
+  // (a typo or stale id falls back to the default on both sides).
+  // Whitelist is the slice's safety property: the server only routes
+  // requests whose llmModel is in this list, so a tampered client
+  // can't smuggle in a different provider or a non-Kilo-Code model.
+  const ALLOWED_LLM_MODELS = [
+    'minimax/minimax-m3',
+    'openai/gpt-5.6-luna',
+    'google/gemini-3.1-pro-preview',
+    'google/gemini-3.5-flash',
+    'nvidia/nemotron-3-ultra-550b-a55b',
+    'x-ai/grok-4.3'
+  ];
+  const LLM_MODEL_STORAGE_KEY = 'i2p.state.llmModel';
+
+  const validateLlmModel = (raw) => {
+    return ALLOWED_LLM_MODELS.includes(raw) ? raw : 'minimax/minimax-m3';
+  };
+
   const writeStateToLocalStorage = () => {
     try {
       localStorage.setItem(MODEL_STORAGE_KEY, state.model);
       localStorage.setItem(VARIANT_STORAGE_KEY, state.animaVariant);
+      localStorage.setItem(LLM_MODEL_STORAGE_KEY, state.llmModel);
     } catch (_) {
       // localStorage may be unavailable (private mode, quota, etc.). The
       // app continues with in-memory state. Not a user-visible error.
@@ -1936,8 +1979,10 @@
     try {
       const m = localStorage.getItem(MODEL_STORAGE_KEY);
       const v = localStorage.getItem(VARIANT_STORAGE_KEY);
+      const l = localStorage.getItem(LLM_MODEL_STORAGE_KEY);
       if (m !== null) state.model = validateModel(m);
       if (v !== null) state.animaVariant = validateVariant(v);
+      if (l !== null) state.llmModel = validateLlmModel(l);
     } catch (_) {
       // Same as above — silent fallback to defaults.
     }
@@ -1956,6 +2001,15 @@
       } else {
         url.searchParams.delete('variant');
       }
+      // Slice 3.3 — ADR 0022 — mirror the LLM model in ?llm=...
+      // so a deep-link to the app lands on the same model the
+      // sender was using. We omit the param when the value is the
+      // default to keep URLs canonical.
+      if (state.llmModel === 'minimax/minimax-m3') {
+        url.searchParams.delete('llm');
+      } else {
+        url.searchParams.set('llm', state.llmModel);
+      }
       window.history.replaceState(null, '', url.toString());
     } catch (_) {
       // history.replaceState / URL parsing may fail; the in-memory state
@@ -1968,8 +2022,10 @@
       const url = new URL(window.location.href);
       const m = url.searchParams.get('model');
       const v = url.searchParams.get('variant');
+      const l = url.searchParams.get('llm');
       if (m !== null) state.model = validateModel(m);
       if (v !== null) state.animaVariant = validateVariant(v);
+      if (l !== null) state.llmModel = validateLlmModel(l);
     } catch (_) {
       // Silently fall back to defaults.
     }
@@ -2040,6 +2096,32 @@
       const btn = e.target.closest('[data-model]');
       if (!btn) return;
       onModelChange(btn.dataset.model);
+    });
+  }
+
+  // ─── Slice 3.3 — ADR 0022 — LLM model selector (native <select>) ──
+  // Renders by reflecting state.llmModel onto the <select>'s value;
+  // the 6 <option> elements are static in index.html so we only need
+  // to set the selected option. Falls back silently if the cached
+  // value isn't in the whitelist (the default then re-asserts itself
+  // via validateLlmModel on next read).
+  const renderLlmModelSelector = () => {
+    if (!dom.llmModelSelector) return;
+    dom.llmModelSelector.value = validateLlmModel(state.llmModel);
+  };
+
+  const onLlmModelChange = (nextModel) => {
+    const validated = validateLlmModel(nextModel);
+    if (validated === state.llmModel) return;
+    state.llmModel = validated;
+    writeStateToLocalStorage();
+    syncStateToURL();
+    renderLlmModelSelector();
+  };
+
+  if (dom.llmModelSelector) {
+    dom.llmModelSelector.addEventListener('change', () => {
+      onLlmModelChange(dom.llmModelSelector.value);
     });
   }
 
@@ -4938,7 +5020,9 @@
       const updated = await apiCall(`/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text })
+        // Slice 3.4 — ADR 0022 — forward the LLM model so the server
+        // routes the chat reply through the user's chosen model.
+        body: JSON.stringify({ content: text, llmModel: state.llmModel })
       });
       const prevSession = state.chatSessions.find((s) => s.id === updated.id);
       const lastMsg = Array.isArray(updated.messages) && updated.messages.length > 0
@@ -5227,6 +5311,10 @@
     // any UI is rendered. State precedence: URL > localStorage > defaults.
     restoreStateFromUrlOrStorage();
     renderModelSelector();
+    // Slice 3.3 — ADR 0022 — render the LLM model <select> against the
+    // resolved state.llmModel (URL > localStorage > default). Same
+    // restoration pass, mirrors the model picker above.
+    renderLlmModelSelector();
 
     // Load field palette
     try {
