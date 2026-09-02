@@ -721,3 +721,75 @@ The wiring sub-slice Sessions #8, #9, #10, #11 kept parking in `BACKLOG.md` as "
 ### Mood / risk flag
 > The four-session drift is closed. The chat assistant works again (Commit 1). The `llmModel` selector UI is wired end-to-end (Commit 2). The paperwork is consistent (Commit 3). **Three sessions ahead of where I would have been if I'd kept parking this.** Future sessions can cite "Slice 3 ships" as a precondition with confidence — no more hidden coupling to a half-landed spec.
 
+
+---
+
+## Session #13 — 2026-09-03 (Slice 4 — Tri-provider routing closeout, Closes #25)
+
+### What this session is
+The multi-provider ask from Session #0 (2026-07-29) — the original "finish the project" target. Lands Slice 4 (Tri-provider routing: Kilo Code / MiniMax / Alibaba DashScope) end-to-end and closes the visual-demo gate deferred from the Slice 3 closeout.
+
+### Commits landed this session
+
+| # | Hash | Type | Subject | Tests |
+|---|---|---|---|---|
+| 5 | `137056d` | feat(slice-4) | tri-provider routing | 421/1 → 422/0 after fix |
+| (inline fix) | (uncommitted) | — | chat handler ternary + deep-link bug fix + 4 more route-handler gates | (included in 422/0) |
+
+(Note: the visual-demo gate exercised a real bug — the LLM model `<select>` did not rebuild its option list on init for non-default providers. Fixed inline.)
+
+### What landed (Slice 4)
+
+**Server (`server.js`):**
+- `ALLOWED_PROVIDERS = ['kilo_code', 'minimax', 'alibaba']`
+- `ALLOWED_LLM_MODELS_BY_PROVIDER` (6 + 1 + 2 models)
+- `isProviderLive(provider)` — Kilo Code always live; MiniMax + Alibaba gated by `${PROVIDER}_LIVE` env var
+- `resolveProviderAndModel(body)` — backwards-compat resolver
+- `callProvider(provider, model, endpoint, args)` — dispatcher with stub-gating
+- 3 adapters: `callKiloAdapter`, `callMiniMaxAdapter`, `callAlibabaAdapter`
+- `buildProviderStub(provider, model, endpoint, args)` — shape-mirrored stubs
+- 9 route handlers + 2 helper call sites updated with provider-dispatch gates
+
+**Frontend (`src/app.js` + `src/index.html` + `src/styles.css`):**
+- `state.provider = 'kilo_code'`
+- `<select id="provider-selector">` upstream of `<select id="llm-model-selector">`
+- URL mirror `?provider=` + localStorage `i2p.state.provider`
+- Per-provider model-list rebuild on provider change AND on init (the deep-link fix)
+- 4 endpoints forward `provider` alongside `llmModel`
+
+**Tests (`tests/run-all.js`):**
+- 20 new Slice 4 tests
+- 3 Slice 3.1/3.5 tests updated (Slice 4 re-introduces MiniMax as a provider)
+- 1 ADR 0012 test updated (chat handler is now ternary-wrapped)
+
+**Paperwork:**
+- `docs/SPEC.md` §16 (G2 spec)
+- `docs/adr/0023-tri-provider-routing.md` (G3 design decision)
+- `docs/ARCHITECTURE.md` Slice 4 appendices C1–C7 (G3 architecture)
+- `docs/PRE-MORTEM.md` Slice 4 risks + pre-commitments (G3)
+- `docs/VISUAL-DEMO-slice-4.md` (G4 visual-demo gate)
+- `docs/CODE-REVIEW-11-slice-4.md` (G4 code review)
+- `docs/POLISH-AUDIT-3-addendum.md` (closes Slice 3 deferred gate)
+- `docs/POLISH-AUDIT-4.md` (G5 polish audit)
+
+### Verification
+- **`tests/run-all.js`:** 422 passed, 0 failed (up from 402/0 post-Slice 3 closeout; +20 tests)
+- **`scripts/session-init.js`:** 10/10 V-checks pass; code_drift = clean
+- **Visual-demo gate:** 8 scenarios verified via chromedevtools (`docs/VISUAL-DEMO-slice-4.md`)
+- **Bug surfaced during gate:** deep-link `?provider=alibaba` did not rebuild model `<select>` options. Fixed inline.
+
+### Files changed this session
+- `server.js` (~280 lines: provider abstraction + 9 route-handler gates)
+- `src/app.js` (~50 lines: state + selector + dispatch + deep-link fix)
+- `src/index.html` (+11 lines: provider `<select>`)
+- `src/styles.css` (+20 lines: provider-row styles)
+- `tests/run-all.js` (+240 lines: 20 Slice 4 tests + 4 updated tests)
+- All `docs/*` paperwork (SPEC §16, ADR 0023, ARCHITECTURE C1–C7, PRE-MORTEM, VISUAL-DEMO, CODE-REVIEW-11, POLISH-AUDIT-3 addendum, POLISH-AUDIT-4)
+- `docs/SESSION-STATE.md` (this entry — append-only)
+
+### Issues
+- **Closes #25** (the original multi-provider ask)
+
+### Mood / risk flag
+> The original user ask from Session #0 lands. Kilo Code is the live default; MiniMax and Alibaba are stubbed behind a one-env-var flip (`MINIMAX_LIVE=1`, `ALIBABA_LIVE=1`) so going live is config-only, not code. The visual-demo gate caught a real bug (deep-link model-list rebuild) that the test suite missed — proving the methodology's G4 step is non-negotiable. **Three slices ahead of where I would have been if I'd kept parking.** No new slices parked; Slice 4 is the closeout.
+

@@ -1978,7 +1978,13 @@
   const LLM_MODEL_STORAGE_KEY = 'i2p.state.llmModel';
 
   const validateLlmModel = (raw) => {
-    return ALLOWED_LLM_MODELS.includes(raw) ? raw : 'minimax/minimax-m3';
+    // Slice 4 — validate against the active provider's model list.
+    // Falls back to the provider's first allowed model if the raw value
+    // is invalid for the current provider (matches the Slice 3.3
+    // helper's behavior for kilo_code, generalized across providers).
+    const providerModels = ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider] || ALLOWED_LLM_MODELS;
+    if (providerModels.includes(raw)) return raw;
+    return providerModels[0];
   };
 
   // ─── Slice 4 — ADR 0023 — Provider picker (Kilo Code / MiniMax / Alibaba) ──
@@ -2154,8 +2160,29 @@
   // ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider] — the previously
   // selected model is preserved if it's valid for the new provider,
   // otherwise it falls back to the new provider's first allowed model.
+  // The rebuild also runs on init() so a deep-link like
+  // /?provider=alibaba lands on Alibaba's model list (not the static
+  // HTML list which only covers kilo_code).
+  const rebuildLlmModelSelectorOptions = () => {
+    if (!dom.llmModelSelector) return;
+    const allowedModels = ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider] || ALLOWED_LLM_MODELS;
+    dom.llmModelSelector.innerHTML = '';
+    for (const modelId of allowedModels) {
+      const opt = document.createElement('option');
+      opt.value = modelId;
+      opt.textContent = modelId;
+      dom.llmModelSelector.appendChild(opt);
+    }
+    // If the current llmModel isn't in the new list, fall back.
+    if (!allowedModels.includes(state.llmModel)) state.llmModel = allowedModels[0];
+  };
+
   const renderProviderSelector = () => {
     if (!dom.providerSelector) return;
+    // First-load deep-link case: state.provider may have been resolved
+    // to a non-default provider by readStateFromURL. The static HTML
+    // only has kilo_code's 6 options — rebuild for the active provider.
+    rebuildLlmModelSelectorOptions();
     dom.providerSelector.value = validateProvider(state.provider);
   };
 
@@ -2164,27 +2191,11 @@
     if (validated === state.provider) return;
     const prevProvider = state.provider;
     state.provider = validated;
-    // Rebuild the model <select>'s option list for the new provider.
-    const allowedModels = ALLOWED_LLM_MODELS_BY_PROVIDER[validated] || [];
-    if (allowedModels.length > 0 && dom.llmModelSelector) {
-      // Wipe existing options and rebuild from the per-provider list.
-      dom.llmModelSelector.innerHTML = '';
-      for (const modelId of allowedModels) {
-        const opt = document.createElement('option');
-        opt.value = modelId;
-        opt.textContent = modelId;
-        dom.llmModelSelector.appendChild(opt);
-      }
-      // If the old model isn't valid for the new provider, fall back
-      // to the new provider's first allowed model.
-      if (!allowedModels.includes(state.llmModel)) state.llmModel = allowedModels[0];
-    }
+    rebuildLlmModelSelectorOptions();
     writeStateToLocalStorage();
     syncStateToURL();
     renderProviderSelector();
     renderLlmModelSelector();
-    // Surface a one-line notice if we silently switched providers
-    // (e.g. localStorage had 'minimax' but server has it as stub).
     if (prevProvider !== validated) {
       console.log(`[provider] switched ${prevProvider} → ${validated}`);
     }

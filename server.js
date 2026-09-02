@@ -148,6 +148,53 @@ const callProvider = async (provider, model, endpoint, args = {}) => {
   }
 };
 
+/**
+ * Slice 4 — gate that returns a provider-specific stub response shape for
+ * non-kilo_code providers. The route handlers call this when the
+ * resolved provider is NOT kilo_code, so the existing callKilo* helpers
+ * (which are kilo_code-specific by design) are bypassed for MiniMax /
+ * Alibaba. Returns one of:
+ *   - { stub: true, analysis: {...} } — for Stage 1 / analyze routes
+ *   - { stub: true, subject: '...' }   — for /api/subject
+ *   - { stub: true, text: '...' }      — for chat-style routes
+ *   - { stub: true, content: '...' }   — generic
+ * The shape mirrors what the corresponding callKilo* helper would have
+ * returned so route handlers can pass the result through unchanged.
+ * @param {string} provider
+ * @param {string} model
+ * @param {string} endpoint - 'stage1' | 'subject' | 'camera' | 'actions' | 'mood' | 'lighting' | 'texture' | 'orientation' | 'anima' | 'generate-prompt' | 'chat'
+ * @param {object} args - endpoint-specific args (e.g. { fields } for stage1)
+ */
+const buildProviderStub = (provider, model, endpoint, args = {}) => {
+  const msg = `[${provider}_stub] ${endpoint} on ${model}`;
+  const base = { stub: true, provider, model, endpoint, content: msg };
+  switch (endpoint) {
+    case 'stage1':
+      // Stage 1 returns an analysis object — populate stub fields
+      // from args.fields (the preset's stage1_fields), so downstream
+      // code (orientation, palette apply) doesn't trip on undefined.
+      const fields = args.fields || [];
+      const analysis = {};
+      for (const f of fields) analysis[f] = msg;
+      return { ...base, analysis };
+    case 'subject':
+    case 'camera':
+    case 'actions':
+    case 'mood':
+    case 'lighting':
+    case 'texture':
+    case 'orientation':
+      return { ...base, [endpoint === 'orientation' ? 'subject_orientation' : endpoint === 'camera' ? 'camera_angle' : endpoint]: msg };
+    case 'anima':
+      return { ...base, positive: msg, negative: msg };
+    case 'chat':
+      return { ...base, reply: msg, suggested_prompt: '' };
+    case 'generate-prompt':
+    default:
+      return { ...base, prompt: msg };
+  }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Field palette (single source of truth for Stage 1 schema + edit UI)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4385,7 +4432,12 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
 
     const { provider, model: llmModel } = resolveProviderAndModel(req.body);
 
-    const analysis = await callKiloStage1(imageDataUri, effectiveStage1Prompt, effectiveFields, llmModel);
+    // Slice 4 — provider dispatch gate. Non-kilo_code providers return a
+    // stub analysis shape so the existing callKilo* helper (which is
+    // kilo_code-specific) is bypassed.
+    const analysis = provider === 'kilo_code'
+      ? await callKiloStage1(imageDataUri, effectiveStage1Prompt, effectiveFields, llmModel)
+      : buildProviderStub(provider, llmModel, 'stage1', { fields: effectiveFields });
 
     if (appliedPalette) {
       applyPaletteToAnalysis(analysis, appliedPalette);
@@ -4394,7 +4446,9 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
     // Stage 1.5: dedicated orientation/activity analysis (runs only if those fields selected)
     const orientationFields = ['subject_orientation', 'actions'].filter((f) => preset.stage1_fields.includes(f));
     if (orientationFields.length > 0) {
-      const orientationResult = await callKiloOrientationAnalysis(imageDataUri, orientationFields, llmModel);
+      const orientationResult = provider === 'kilo_code'
+        ? await callKiloOrientationAnalysis(imageDataUri, orientationFields, llmModel)
+        : buildProviderStub(provider, llmModel, 'orientation', { fields: orientationFields });
       if (orientationResult.subject_orientation) {
         analysis.subject_orientation = orientationResult.subject_orientation;
       }
@@ -4452,7 +4506,9 @@ app.post('/api/subject', upload.single('image'), async (req, res) => {
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
     const { provider, model: llmModel } = resolveProviderAndModel(req.body);
-    const subject = await callKiloSubjectAnalysis(imageDataUri, llmModel);
+    const subject = provider === 'kilo_code'
+      ? await callKiloSubjectAnalysis(imageDataUri, llmModel)
+      : buildProviderStub(provider, llmModel, 'subject').subject;
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4499,7 +4555,9 @@ app.post('/api/camera-angle', upload.single('image'), async (req, res) => {
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
     const { provider, model: llmModel } = resolveProviderAndModel(req.body);
-    const cameraAngle = await callKiloCameraAngleAnalysis(imageDataUri, llmModel);
+    const cameraAngle = provider === 'kilo_code'
+      ? await callKiloCameraAngleAnalysis(imageDataUri, llmModel)
+      : buildProviderStub(provider, llmModel, 'camera').camera_angle;
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4546,7 +4604,9 @@ app.post('/api/actions', upload.single('image'), async (req, res) => {
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
     const { provider, model: llmModel } = resolveProviderAndModel(req.body);
-    const actions = await callKiloActionsAnalysis(imageDataUri, llmModel);
+    const actions = provider === 'kilo_code'
+      ? await callKiloActionsAnalysis(imageDataUri, llmModel)
+      : buildProviderStub(provider, llmModel, 'actions').actions;
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4590,7 +4650,9 @@ app.post('/api/mood', upload.single('image'), async (req, res) => {
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
     const { provider, model: llmModel } = resolveProviderAndModel(req.body);
-    const mood = await callKiloMoodAnalysis(imageDataUri, llmModel);
+    const mood = provider === 'kilo_code'
+      ? await callKiloMoodAnalysis(imageDataUri, llmModel)
+      : buildProviderStub(provider, llmModel, 'mood').mood;
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4634,7 +4696,9 @@ app.post('/api/lighting', upload.single('image'), async (req, res) => {
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
     const { provider, model: llmModel } = resolveProviderAndModel(req.body);
-    const lighting = await callKiloLightingAnalysis(imageDataUri, llmModel);
+    const lighting = provider === 'kilo_code'
+      ? await callKiloLightingAnalysis(imageDataUri, llmModel)
+      : buildProviderStub(provider, llmModel, 'lighting').lighting;
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4678,7 +4742,9 @@ app.post('/api/texture', upload.single('image'), async (req, res) => {
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
     const { provider, model: llmModel } = resolveProviderAndModel(req.body);
-    const texture = await callKiloTextureAnalysis(imageDataUri, llmModel);
+    const texture = provider === 'kilo_code'
+      ? await callKiloTextureAnalysis(imageDataUri, llmModel)
+      : buildProviderStub(provider, llmModel, 'texture').texture;
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -4736,7 +4802,9 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
     const { provider, model: llmModel } = resolveProviderAndModel(req.body);
-    const result = await callKiloAnimaAnalysis(imageDataUri, variantPrompt, llmModel);
+    const result = provider === 'kilo_code'
+      ? await callKiloAnimaAnalysis(imageDataUri, variantPrompt, llmModel)
+      : buildProviderStub(provider, llmModel, 'anima');
 
     fs.unlinkSync(filePath);
     filePath = null;
@@ -5011,13 +5079,20 @@ app.post('/api/generate-prompt', async (req, res) => {
     // prepend only when aspectRatio is set.
     const composedDirectives = aspectRatioDirective + (directives || '');
     const { provider, model: llmModel } = resolveProviderAndModel(body);
-    const stage2Result = await generateStage2WithLengthCheck(
-      analysis,
-      composedDirectives,
-      effectivePrompt,
-      appliedPalette,
-      { isZImagePreset, enableLengthRetry: isZImagePreset, model: llmModel }
-    );
+    // Slice 4 — provider dispatch gate. Non-kilo_code providers get a
+    // stub prompt (length-check orchestration is kilo_code-specific).
+    const stage2Result = provider === 'kilo_code'
+      ? await generateStage2WithLengthCheck(
+          analysis,
+          composedDirectives,
+          effectivePrompt,
+          appliedPalette,
+          { isZImagePreset, enableLengthRetry: isZImagePreset, model: llmModel }
+        )
+      : {
+          prompt: buildProviderStub(provider, llmModel, 'generate-prompt').prompt,
+          length_check: { ok: true, attempts: 1, stub: true, wordCount: 0, classification: 'sweet_spot' }
+        };
     const finalPrompt = stage2Result.prompt;
     const lengthCheck = stage2Result.length_check;
 
@@ -6981,10 +7056,14 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     let parsedReply;
     try {
       const { provider, model: llmModel } = resolveProviderAndModel(req.body);
-      parsedReply = await callKiloChat(context.systemPrompt, context.messages, {
-        currentPrompt: activePrompt,
-        lastUserRequest: userMessage.content
-      }, llmModel);
+      // Slice 4 — provider dispatch gate. Non-kilo_code providers get a
+      // stub chat reply (the schema-drop retry is kilo_code-specific).
+      parsedReply = provider === 'kilo_code'
+        ? await callKiloChat(context.systemPrompt, context.messages, {
+            currentPrompt: activePrompt,
+            lastUserRequest: userMessage.content
+          }, llmModel)
+        : buildProviderStub(provider, llmModel, 'chat');
     } catch (err) {
       // Roll back the user message so the failed attempt doesn't leave
       // a "ghost" turn in the history.

@@ -7424,8 +7424,11 @@ test('ADR 0012: DEFAULT_CHAT_SYSTEM_PROMPT includes the anchor-preservation cont
 test('ADR 0012: callKiloChat wires the validator into the retry loop', () => {
   // We can't run a real LLM call in tests, but we can verify the
   // call site passes the new options the validator needs.
+  // Slice 4 may wrap this in a provider-conditional ternary, so the
+  // regex tolerates either the direct call shape OR a ternary shape
+  // (parsedReply = provider === '...' ? await callKiloChat(...) : stub).
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  const callSite = serverText.match(/parsedReply = await callKiloChat\([\s\S]*?\}\);/);
+  const callSite = serverText.match(/callKiloChat\([\s\S]*?\}\s*,?\s*llmModel\s*\)/);
   assertTrue(callSite, 'call site present');
   assertTrue(/currentPrompt:\s*(activePrompt|session\.pending_prompt\s*\|\|\s*session\.current_prompt|session\.current_prompt)/.test(callSite[0]),
     'call site passes a currentPrompt derived from the session (pending || current)');
