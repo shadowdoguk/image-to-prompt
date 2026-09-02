@@ -6199,8 +6199,34 @@ const callKiloChat = async (systemPrompt, messages, options = {}, model = DEFAUL
 
   let openaiMessages = baseOpenaiMessages;
   let lastReason = null;
+  // When the schema'd request comes back empty, retry once without
+  // the schema so the model can reply in natural language
+  // (Fix 2 — recovery route for models that silently drop content
+  // under strict json_schema, observed with minimax/minimax-m3).
+  // `schemaAttempted` starts true so we drop the schema on the
+  // first empty-content response; once it's false, subsequent
+  // empty-content retries use the parse-correction path.
+  let schemaAttempted = true;
   for (let attempt = 0; attempt <= CHAT_MAX_RETRIES; attempt++) {
-    const result = await callKiloChatOnce(openaiMessages, model);
+    const useSchema = schemaAttempted;
+    const result = await callKiloChatOnce(openaiMessages, model, { useSchema });
+    // Schema'd call came back empty — fall through to a single
+    // schema-less retry before using parse correction. This is
+    // cheap (one extra round trip on the unhappy path only) and
+    // addresses the `content: ""` failure mode.
+    if (
+      !result.ok && !result.fatal &&
+      schemaAttempted && result.value?.fallback_reason === 'empty_content'
+    ) {
+      console.warn(
+        `[chat] Schema'd chat call returned empty content; ` +
+        `retrying without response_format (attempt ${attempt + 1}/${CHAT_MAX_RETRIES + 1})`
+      );
+      schemaAttempted = false;
+      lastReason = 'empty_content_schema_dropped';
+      await new Promise((r) => setTimeout(r, CHAT_RETRY_DELAY_MS * (attempt + 1)));
+      continue;
+    }
     if (result.ok) {
       // Anchor-preservation gate (ADR 0012). When the model produced a
       // non-empty `suggested_prompt`, run the deterministic validator
@@ -6271,9 +6297,22 @@ const callKiloChat = async (systemPrompt, messages, options = {}, model = DEFAUL
     }
   }
 
-  // Exhausted retries — log the fallback reason and return the
-  // fallback so the user sees a real reply instead of a 500.
+  // Exhausted retries — log the fallback reason. For empty-content
+  // failures (the dominant failure mode with models that silently
+  // strip content under strict json_schema), throw a distinct
+  // error so the route handler can surface an actionable message
+  // instead of the apologetic generic fallback. For other
+  // parse-level failures (malformed JSON, missing reply field,
+  // etc.) keep the existing friendly fallback behaviour so the user
+  // sees a real reply bubble.
   console.warn(`Chat fallback after ${CHAT_MAX_RETRIES + 1} attempts (reason: ${lastReason})`);
+  if (lastReason === 'empty_content' || lastReason === 'empty_content_no_schema' || lastReason === 'empty_content_schema_dropped') {
+    throw new Error(
+      'The model returned an empty response after multiple attempts. ' +
+      'This usually means the model provider could not satisfy the JSON-schema constraint. ' +
+      'Try switching to a different model in the chat settings, or rephrase your message.'
+    );
+  }
   return extractChatReply('');
 };
 
@@ -6286,7 +6325,55 @@ const callKiloChat = async (systemPrompt, messages, options = {}, model = DEFAUL
  * Separated from the retry loop so the loop can call it cleanly and
  * the per-attempt logic is testable on its own.
  */
-const callKiloChatOnce = async (openaiMessages, model = DEFAULT_LLM_MODEL) => {
+const CHAT_JSON_SCHEMA = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'chat_reply',
+    strict: true,
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        reply: { type: 'string', minLength: 1 },
+        suggested_prompt: { type: 'string', minLength: 0 }
+      },
+      required: ['reply', 'suggested_prompt']
+    }
+  }
+};
+
+/**
+ * Build the request body for a single chat-completions call. When
+ * `useSchema` is true (default) the body pins a strict JSON-schema
+ * response_format so the model is contractually bound to
+ * `{ reply, suggested_prompt }`. When `useSchema` is false the
+ * schema is omitted so the model is free to reply in natural
+ * language — `extractChatReply` will then parse a JSON object out of
+ * whatever it returns (direct, fenced, or balanced-brace).
+ *
+ * The schema-less path exists as a recovery route for models that
+ * silently return empty content under strict json_schema (observed
+ * with `minimax/minimax-m3` against the chat_reply schema — the
+ * model emits completion_tokens > 0 with `content: ""` and
+ * `finish_reason: "stop"`, suggesting the schema validator is
+ * discarding the response). When the schema'd call comes back
+ * empty, the retry loop in `callKiloChat` re-issues without the
+ * schema so the user gets a real reply instead of the apologetic
+ * fallback.
+ */
+const buildKiloChatBody = (openaiMessages, model, useSchema) => {
+  const body = {
+    model,
+    max_tokens: 2400,
+    temperature: 0.5,
+    messages: openaiMessages
+  };
+  if (useSchema) body.response_format = CHAT_JSON_SCHEMA;
+  return body;
+};
+
+const callKiloChatOnce = async (openaiMessages, model = DEFAULT_LLM_MODEL, options = {}) => {
+  const useSchema = options.useSchema !== false;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 60000);
 
@@ -6298,28 +6385,7 @@ const callKiloChatOnce = async (openaiMessages, model = DEFAULT_LLM_MODEL) => {
         'Authorization': `Bearer ${KILO_API_KEY}`
       },
       signal: controller.signal,
-      body: JSON.stringify({
-        model: model,
-        max_tokens: 2400,
-        temperature: 0.5,
-        messages: openaiMessages,
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'chat_reply',
-            strict: true,
-            schema: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                reply: { type: 'string', minLength: 1 },
-                suggested_prompt: { type: 'string', minLength: 0 }
-              },
-              required: ['reply', 'suggested_prompt']
-            }
-          }
-        }
-      })
+      body: JSON.stringify(buildKiloChatBody(openaiMessages, model, useSchema))
     });
 
     clearTimeout(timeout);
@@ -6336,12 +6402,28 @@ const callKiloChatOnce = async (openaiMessages, model = DEFAULT_LLM_MODEL) => {
     }
 
     const result = await response.json();
-    const content = result.choices?.[0]?.message?.content;
+    const choice = result.choices?.[0];
+    const content = choice?.message?.content;
     if (!content || typeof content !== 'string') {
       // Empty content from the API itself — treat as parse-level
       // fallback (retriable) rather than fatal so the retry loop can
-      // try again.
-      return { ok: false, fatal: false, value: { fallback_reason: 'empty_content' } };
+      // try again. Logged with full diagnostic context (Fix 3): we
+      // need to see `finish_reason`, `usage.completion_tokens`, and
+      // whether the schema was on so we can tell empty-content from
+      // schema-stripped content from a flapping model.
+      console.warn(
+        `[chat] Empty content from ${model} ` +
+        `(useSchema=${useSchema}, finish_reason=${choice?.finish_reason || 'unknown'}, ` +
+        `completion_tokens=${result.usage?.completion_tokens ?? 'unknown'}, ` +
+        `stop_reason=${result.choices?.[0]?.stop_reason ?? 'unknown'})`
+      );
+      return {
+        ok: false,
+        fatal: false,
+        value: {
+          fallback_reason: useSchema ? 'empty_content' : 'empty_content_no_schema'
+        }
+      };
     }
 
     const parsed = extractChatReply(content);
@@ -7103,6 +7185,8 @@ module.exports = {
   validateChatSessionCreate,
   validateChatMessage,
   extractChatReply,
+  buildKiloChatBody,
+  CHAT_JSON_SCHEMA,
   // Anchor-preservation (ADR 0012)
   PRESERVATION_MIN_TOKEN_LENGTH,
   PRESERVATION_SHORT_PROMPT_LENGTH,

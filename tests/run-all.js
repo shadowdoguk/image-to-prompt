@@ -6180,27 +6180,30 @@ test('ADR 0011: chat input length cap is enforced at the schema level', () => {
 });
 
 test('ADR 0011: chat response schema uses string type (no union — Kilo Code rejects type arrays)', () => {
-  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  // The schema lives in callKiloChatOnce now (post-investigation:
-  // callKiloChat is the retry loop, callKiloChatOnce is the
-  // single-shot that builds the schema).
-  const block = serverText.match(/const callKiloChatOnce = async[\s\S]*?\n\};/);
-  assertTrue(block, 'callKiloChatOnce defined');
+  // Post-refactor (2026-09-02): the schema is a hoisted constant
+  // (`CHAT_JSON_SCHEMA`) consumed by `buildKiloChatBody`, rather
+  // than an inline literal in `callKiloChatOnce`. The contract is
+  // identical — we just import the schema and assert on it
+  // directly. This keeps the schema DRY between the schema'd and
+  // schema-less request bodies and makes future edits auditable
+  // from one location.
+  const { CHAT_JSON_SCHEMA } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const schema = CHAT_JSON_SCHEMA.json_schema.schema;
   // The Kilo Code JSON-schema validator rejects union types like
   // `type: ['string','null']` with a 400. We sidestep that by typing
   // `suggested_prompt` as a plain string and using "" to mean
   // "no revision this turn" (extractChatReply coerces empty to null).
-  assertTrue(/suggested_prompt:\s*\{\s*type:\s*'string'/.test(block[0])
-    || /suggested_prompt:\s*\{\s*type:\s*"string"/.test(block[0]),
+  assertEqual(schema.properties.suggested_prompt.type, 'string',
     'suggested_prompt schema is plain string (no union)');
-  assertTrue(!/suggested_prompt:\s*\{\s*type:\s*\[\s*['"]string['"]/.test(block[0]),
-    'suggested_prompt MUST NOT use a union type array');
-  assertTrue(/required:\s*\[\s*'reply',\s*'suggested_prompt'\s*\]/.test(block[0]),
-    'reply + suggested_prompt both required by schema');
-  // Post-investigation (2026-06-23): reply now has minLength: 1 so
-  // the API itself rejects empty replies. This eliminates the
-  // "missing reply string" failure mode at the source.
-  assertTrue(/reply:\s*\{\s*type:\s*'string',\s*minLength:\s*1\s*\}/.test(block[0]),
+  assertTrue(schema.properties.reply.type === 'string',
+    'reply schema is plain string (no union)');
+  assertTrue(schema.required.includes('reply'),
+    'reply must be in required');
+  assertTrue(schema.required.includes('suggested_prompt'),
+    'suggested_prompt must be in required');
+  // reply has minLength: 1 so the API itself rejects empty replies,
+  // eliminating the "missing reply string" failure mode at the source.
+  assertEqual(schema.properties.reply.minLength, 1,
     'reply schema enforces minLength: 1 to prevent empty replies');
 });
 
@@ -6993,13 +6996,14 @@ test('Chat fallback text is non-empty and human-readable', () => {
 test('Chat retry config: max_tokens is high enough for long revisions', () => {
   // 1500 was insufficient — large revisions got truncated mid-JSON.
   // 2400 leaves headroom for the envelope + 1800-char revisions.
-  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  const block = serverText.match(/const callKiloChatOnce = async[\s\S]*?\n\};/);
-  assertTrue(block, 'callKiloChatOnce defined');
-  const m = block[0].match(/max_tokens:\s*(\d+)/);
-  assertTrue(m, 'max_tokens configured');
-  const tokens = parseInt(m[1], 10);
-  assertTrue(tokens >= 2000, `max_tokens must be >= 2000 for long revisions (got ${tokens})`);
+  // Post-refactor (2026-09-02): max_tokens is set inside
+  // `buildKiloChatBody` (the body builder) rather than the inline
+  // fetch in `callKiloChatOnce`. We assert by importing the
+  // helper and inspecting the body it produces.
+  const { buildKiloChatBody } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const body = buildKiloChatBody([{ role: 'user', content: 'hi' }], 'minimax/minimax-m3', true);
+  assertTrue(typeof body.max_tokens === 'number', 'max_tokens is a number');
+  assertTrue(body.max_tokens >= 2000, `max_tokens must be >= 2000 for long revisions (got ${body.max_tokens})`);
 });
 
 test('Chat retry: callKiloChat has retry loop on parse fallback', () => {
@@ -8508,6 +8512,117 @@ test('Slice 3.5: no MINIMAX_ env var references in server.js', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   assertTrue(!/MINIMAX_API_KEY/.test(serverText), 'no MINIMAX_API_KEY refs');
   assertTrue(!/MINIMAX_BASE_URL/.test(serverText), 'no MINIMAX_BASE_URL refs');
+});
+
+// ──────────────────────────────────────────────────────────────────
+// Regression: chat assistant returns "Sorry — I couldn't generate…"
+// for every user message (issue: MiniMax M3 returned empty content
+// under strict json_schema).
+//
+// Observed 2026-09-02: the Kilo Code gateway returns 200 OK with
+// `content: ""` and `finish_reason: "stop"` for
+// `minimax/minimax-m3` whenever the request pins
+// `response_format: { type: 'json_schema', strict: true, … }`.
+// The original retry loop retried with the SAME schema and got the
+// SAME empty content, so the user always saw the apologetic
+// fallback. Three fixes are wired together:
+//
+//   Fix 2 — retry once WITHOUT response_format when the schema'd
+//           call comes back empty, so the model can reply in
+//           natural language.
+//   Fix 3 — log `finish_reason`, `completion_tokens`, and
+//           `useSchema` on every empty content, so the failure
+//           mode is observable in server logs.
+//   Fix 1 — when retries are exhausted on empty content, throw a
+//           distinct, actionable error instead of returning the
+//           silent fallback string.
+//
+// These tests exercise the seams directly without hitting the
+// network. They are the regression net for the bug observed in
+// the chat UI screenshot.
+// ──────────────────────────────────────────────────────────────────
+
+test('Chat regression: buildKiloChatBody pins json_schema when useSchema is true', () => {
+  const { buildKiloChatBody, CHAT_JSON_SCHEMA } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const body = buildKiloChatBody([{ role: 'user', content: 'hi' }], 'minimax/minimax-m3', true);
+  assertEqual(body.model, 'minimax/minimax-m3');
+  assertEqual(body.max_tokens, 2400);
+  assertEqual(body.temperature, 0.5);
+  assertTrue(Array.isArray(body.messages));
+  assertEqual(body.messages.length, 1);
+  assertEqual(body.response_format.type, 'json_schema');
+  assertEqual(body.response_format.json_schema.strict, true);
+  assertEqual(body.response_format.json_schema.name, 'chat_reply');
+  // The exported schema and the in-call schema must agree so
+  // future edits don't drift apart.
+  assertEqual(body.response_format.json_schema.schema, CHAT_JSON_SCHEMA.json_schema.schema);
+});
+
+test('Chat regression: buildKiloChatBody omits response_format when useSchema is false', () => {
+  const { buildKiloChatBody } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const body = buildKiloChatBody([{ role: 'user', content: 'hi' }], 'minimax/minimax-m3', false);
+  assertTrue(!('response_format' in body), 'response_format must be absent when useSchema is false');
+  // Model and tokens still present.
+  assertEqual(body.model, 'minimax/minimax-m3');
+  assertEqual(body.max_tokens, 2400);
+});
+
+test('Chat regression: CHAT_JSON_SCHEMA requires both reply and suggested_prompt as strings', () => {
+  const { CHAT_JSON_SCHEMA } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const props = CHAT_JSON_SCHEMA.json_schema.schema.properties;
+  assertTrue(props.reply && props.reply.type === 'string', 'reply must be a string');
+  assertTrue(props.suggested_prompt && props.suggested_prompt.type === 'string', 'suggested_prompt must be a string');
+  const required = CHAT_JSON_SCHEMA.json_schema.schema.required;
+  assertTrue(required.includes('reply'), 'reply must be in required');
+  assertTrue(required.includes('suggested_prompt'), 'suggested_prompt must be in required');
+  assertEqual(CHAT_JSON_SCHEMA.json_schema.strict, true, 'schema must be strict');
+});
+
+test('Chat regression: server.js contains the schema-drop retry guard (Fix 2)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The retry loop must include a branch that detects
+  // `fallback_reason === 'empty_content'` while `schemaAttempted`
+  // is still true and re-issues without the schema.
+  assertTrue(/schemaAttempted[\s\S]{0,400}empty_content/.test(serverText),
+    'callKiloChat must contain the schema-drop retry guard for empty_content');
+  assertTrue(/useSchema:\s*schemaAttempted|useSchema\s*=\s*schemaAttempted/.test(serverText),
+    'callKiloChatOnce must receive useSchema derived from schemaAttempted');
+});
+
+test('Chat regression: server.js throws an actionable error on exhausted empty_content retries (Fix 1)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/empty_content_schema_dropped/.test(serverText),
+    'callKiloChat must track the schema-dropped fallback reason');
+  assertTrue(
+    /throw new Error\([\s\S]{0,400}empty response after multiple attempts/.test(serverText),
+    'callKiloChat must throw a distinguishing error for exhausted empty_content retries'
+  );
+  // The new error must mention switching models or rephrasing so
+  // the user has a clear next step.
+  assertTrue(/different model|rephrase/i.test(serverText),
+    'new error must mention the next-step remedies (different model, rephrase)');
+});
+
+test('Chat regression: server.js logs diagnostic context on empty content (Fix 3)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The empty-content branch in callKiloChatOnce must log
+  // finish_reason, completion_tokens, and useSchema so we can
+  // distinguish schema-stripped content from a flapping model.
+  assertTrue(/console\.warn\([\s\S]{0,200}finish_reason[\s\S]{0,200}completion_tokens/.test(serverText),
+    'empty-content branch must log finish_reason and completion_tokens');
+  assertTrue(/useSchema=/.test(serverText),
+    'empty-content branch must log useSchema flag');
+});
+
+test('Chat regression: extractChatReply still coerces empty string to the fallback (parse-path unchanged)', () => {
+  const { extractChatReply } = require(path.join(PROJECT_ROOT, 'server.js'));
+  // Sanity: the parse path still produces the friendly fallback
+  // string for an empty payload, so callers that don't go through
+  // the retry loop keep their existing behaviour.
+  const out = extractChatReply('');
+  assertEqual(out.reply, "Sorry — I couldn't generate a response for that message. Please try again or rephrase your request.");
+  assertEqual(out.suggested_prompt, null);
+  assertEqual(out.fallback_reason, 'empty_content');
 });
 
 (async () => {
