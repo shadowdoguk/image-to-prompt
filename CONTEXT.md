@@ -6,7 +6,9 @@ Domain language, concepts, and entities for this project. Skills read this first
 
 An AI-powered web application that transforms an uploaded image into a refined,
 detailed text prompt suitable for downstream image-generation models (Stable
-Diffusion, Midjourney, DALL-E, Flux). The provider is MiniMax M3 (`MiniMax-Text-01`).
+Diffusion, Midjourney, DALL-E, Flux). The provider is the **Kilo AI Gateway**
+(`api.kilo.ai`), an OpenAI-compatible gateway to 500+ models (ADR 0022).
+Default LLM model: MiniMax M3 (`minimax/minimax-m3`).
 
 The product has two top-level surfaces:
 
@@ -195,7 +197,7 @@ benchmark dataset and CI validation harness in ADR-0001).
 
 ## Configuration sources (in priority order)
 
-1. **Environment variables** (`.env` → `process.env`) — required for `MINIMAX_API_KEY`.
+1. **Environment variables** (`.env` → `process.env`) — required for `KILO_API_KEY`.
 2. **Field palette constants** in `server.js` — single source of truth for the
    Stage 1 schema and edit UI.
 3. **Preset JSON** in `data/presets.json` — user-modifiable, persisted via API.

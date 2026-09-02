@@ -211,3 +211,101 @@ Before declaring the slice done:
 10. **Run** the per-sub-slice code reviews (G4) before commit.
 
 If any of these fail twice, kill the slice per `docs/SPEC.md` §14.4.3.
+
+---
+
+## Slice 3 — Kilo Code provider migration + model selector
+
+**Date:** 2026-08-04
+**Origin:** `docs/SPEC.md` §15 (G2 approved)
+**Slice:** 3 — Kilo Code as sole provider with six-model LLM selector
+
+### Failure mode 1: Kilo Code gateway is down or degrades
+
+**What:** `api.kilo.ai` returns 5xx for all requests. No LLM calls succeed — Stage 1, per-field re-analysis, Stage 2, and chat all fail. The user sees error toasts for every action.
+
+**Probability:** Medium. Third-party gateway dependency.
+
+**Impact:** High. The entire app is non-functional without an LLM. There is no fallback provider.
+
+**Mitigation:**
+- Clear per-status-code error messages: 502 "Upstream provider error — try again", 503 "Kilo Code gateway temporarily unavailable — retry in a moment"
+- The user can retry — gateway outages are typically minutes, not hours
+- If the gateway proves unreliable long-term (≥3 incidents in one week), a fallback-provider slice (direct MiniMax or OpenAI as backup) becomes priority
+
+**Pre-commitment:** Test error surfacing for all status codes. Manual demo: with an invalid API key, verify the error message is clear and actionable.
+
+### Failure mode 2: Image format mismatch produces garbage output
+
+**What:** `buildVisionMessage` constructs the `image_url` content parts incorrectly — wrong field names, nested structure, wrong MIME type. The LLM receives a malformed vision request and either ignores the image or produces hallucinated output.
+
+**Probability:** Medium. The helper is new code; the image format is a cross-cutting change.
+
+**Impact:** High. All vision-based analysis (Stage 1, all 6 per-field endpoints, Stage 2) produces garbage. The app's core value proposition breaks.
+
+**Mitigation:**
+- Test `buildVisionMessage` output against the OpenAI vision spec (ContentPart shape, `image_url.url` field, `type` enum)
+- Manual demo with one known image across all six models
+- If any model consistently misinterprets images, remove it from the hardcoded list
+
+**Pre-commitment:** Test the helper's output shape. Manual three-image demo (oil painting, digital art, photograph) with MiniMax M3 and GPT-5.6 Luna. If vision output is unrecognisable on ≥2 of 3 images for any model, flag that model as unreliable and consider removing it.
+
+### Failure mode 3: Helper rename misses a call site
+
+**What:** One of the ~15 `callMiniMax*` references is not renamed to `callKilo*`. That endpoint calls the old (now-removed) function name and throws `ReferenceError`.
+
+**Probability:** Low. Rename is mechanical — global find-and-replace covers it.
+
+**Impact:** Medium. One endpoint breaks; the user sees an error for that specific action. Other endpoints continue to work.
+
+**Mitigation:**
+- After rename: `grep -n "callMiniMax" server.js` must return zero results
+- Add a test that asserts zero `callMiniMax` references remain in `server.js`
+- Run `node --check server.js` — syntax errors on unresolved references
+
+**Pre-commitment:** The grep check is mandatory before any sub-slice commit. If any reference remains, fix before proceeding.
+
+### Failure mode 4: localStorage collision between state.model and state.llmModel
+
+**What:** The chat session schema has a `model` field (currently storing the output contract). Adding `llmModel` creates ambiguity — code that reads `session.model` might get the wrong value.
+
+**Probability:** Medium. Naming collision in a shared schema.
+
+**Impact:** Medium. Chat refinements target the wrong model. Chat history displays incorrectly.
+
+**Mitigation:**
+- Chat session stores `llm_model` (LLM model ID) — separate key, no collision
+- Existing `model` field renamed to `contract` in the chat session schema (expand-contract: add `contract`, migrate reads, remove `model`)
+- Backward-compatible: old sessions with only `model` are read as `contract = model`
+
+**Pre-commitment:** Test that chat session reads from both `llm_model` and `contract` fields. Test that old sessions (no `llm_model`, no `contract`, only `model`) still load correctly.
+
+### Failure mode 5: Model produces structurally different output
+
+**What:** GPT-5.6 Luna or another model emits JSON that doesn't match the expected schema (e.g., different field names in the Stage 1 analysis JSON, or prose instead of structured JSON).
+
+**Probability:** Low-Medium. Different models have different JSON-following reliability. MiniMax M3 is known-good (current baseline). GPT-5.6 Luna is strong at JSON. Grok 4.3 and Nemotron 3 Ultra are unknowns.
+
+**Impact:** Medium. JSON Schema validation catches structural failures and returns an error. The user sees a validation error instead of a result. They can retry or switch models.
+
+**Mitigation:**
+- All response schemas remain enforced server-side (`minLength`, `additionalProperties: false`, `required` fields)
+- The Stage 1 retry-with-strengthened-prompt loop still runs — if the first attempt fails validation, a second attempt with a stronger prompt is made
+- If a specific model consistently fails on a specific endpoint, document it in the README
+
+**Pre-commitment:** Test that JSON Schema validation still runs for all endpoints. Manual demo: run Stage 1 with each of the six models; if any model fails validation ≥2 times on the same image, flag it.
+
+### Pre-commitments (bullet list)
+
+1. **`grep -n "callMiniMax" server.js` returns zero results** after 3.1.
+2. **`grep -n "minimaxi.chat" server.js` returns zero results** after 3.1.
+3. **`node --check server.js` exit 0** after every sub-slice.
+4. **`node tests/run-all.js` all pass** after every sub-slice.
+5. **`node scripts/session-init.js` 10/10 V-checks** after 3.5.
+6. **Manual demo:** upload one image, run through all six models, verify Stage 1 output is recognisable for each.
+7. **Manual demo:** generate a prompt with MiniMax M3 through Kilo Code, compare to a saved prompt from the direct MiniMax era — quality should be equivalent.
+8. **Manual demo:** switch model mid-session, verify chat refines the correct prompt with the correct model.
+9. **Test** that `buildVisionMessage` output matches OpenAI vision ContentPart shape.
+10. **Test** that chat sessions survive the `model` → `contract` rename.
+
+If any of these fail twice, kill the slice per `docs/SPEC.md` §15.4.3.

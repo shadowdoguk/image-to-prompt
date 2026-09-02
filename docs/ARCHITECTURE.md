@@ -140,6 +140,7 @@ If a future slice needs to touch **≥3 of these files for non-additive reasons*
 |---|---|---|
 | 2026-07-29 | Initial slice 1 architecture | Phase G3 of Slice 1 |
 | 2026-08-03 | Appended Slice 2 — Anima fork (model selector + dispatch + Anima contract) | Phase G3 of Slice 2; G2 approved by user; pre-Generate model picker chosen over dual-output design |
+| 2026-08-04 | Appended Slice 3 — Kilo Code provider migration + model selector | Phase G3 of Slice 3; G2 approved by user; Kilo AI Gateway as sole provider; six hardcoded models; buildVisionMessage helper; MiniMax M3 default |
 
 ---
 
@@ -350,3 +351,186 @@ Slice 2 touches:
 If a future slice needs to touch **≥3 of these files for non-additive reasons** (rename, retype, schema change, library migration), trigger the per-field route split (separate wide-refactor slice per `docs/SYNTHESIS.md` §9 risk #3). Not now.
 
 Also: if the Anima LLM contract proves inadequate (the LLM keeps mis-emitting the Anima contract), the slice's contract may need to be split into per-variant constants. This is captured in the Slice 2 PRE-MORTEM as a "stretch" path under §A5.
+
+---
+
+# Slice 3 — Kilo Code provider migration + model selector (the appendices)
+
+**Status:** Draft → In Review → Approved (pending Gate G3)
+**Slice:** 3 — Kilo Code provider migration + model selector
+**Created:** 2026-08-04
+**Origin:** `docs/SPEC.md` §15 (G2 approved)
+**Reference doc:** `https://kilo.ai/docs/gateway/api-reference` (the API contract source of truth)
+
+---
+
+## B1. Stack (Slice 3 deltas)
+
+| Layer | Choice | Why not the alternative |
+|---|---|---|
+| Language | JavaScript (CommonJS) | unchanged |
+| Runtime | Node.js >= 18 | unchanged |
+| Framework | Express 4.21 | unchanged |
+| View layer | Vanilla HTML/CSS/JS, no build step | unchanged |
+| LLM Provider | **Kilo AI Gateway** (`api.kilo.ai`) | OpenAI-compatible gateway to 500+ models; single `KILO_API_KEY`; replaces direct MiniMax API |
+| Image format | OpenAI-compatible `image_url` content parts | Kilo Code uses this format; `buildVisionMessage` helper standardises it |
+| State persistence | `localStorage` (extended) | sidebar: persist `state.llmModel` across reloads |
+| URL mirror | `?llm=...` query string (new) | sidebar: shareable URLs |
+| Tests | Bespoke Node scripts (`tests/run-all.js`) | unchanged |
+| Process model | Single Node process | unchanged |
+
+**No new dependencies.** No schema migration. Slice 3: one new helper, ~15 renamed helpers, one new state field, one UI selector, env var swap.
+
+## B2. File / folder layout (Slice 3 deltas only)
+
+```
+image-to-prompt/
+├── server.js                    ← + buildVisionMessage helper
+                                  ← callMiniMax* → callKilo* (rename, +model param)
+                                  ← MINIMAX_* env vars → KILO_* env vars
+                                  ← all fetch URLs → KILO_BASE_URL
+                                  ← response envelope provider: 'kilo-code'
+├── src/
+│   ├── app.js                   ← + state.llmModel, + model selector handler
+│   ├── index.html               ← + model selector <select> in upload section
+│   └── styles.css               ← + .model-selector styling
+├── tests/
+│   └── run-all.js               ← env var tests, buildVisionMessage tests,
+                                  ← model param validation, selector rendering
+├── docs/
+│   ├── SPEC.md                  ← §15 (G2-approved)
+│   ├── ARCHITECTURE.md          ← this section (G3)
+│   ├── PRE-MORTEM.md            ← Slice 3 entry (G3)
+│   ├── adr/0022-kilo-code-provider.md  ← new ADR (G3)
+│   ├── SESSION-STATE.md         ← post-slice notes (G4)
+│   └── CODE-REVIEW-3-kilo-code-provider.md ← post-slice (G4)
+├── CONTEXT.md                   ← updated provider section
+└── README.md                    ← updated env vars section
+```
+
+**No new directories.** No new files in `data/`. New ADR per the 3-criteria check (provider migration crosses seams — ADR 0022).
+
+## B3. Seams (Slice 3 modules)
+
+### Module A: `buildVisionMessage` (server helper — NEW)
+
+| Attribute | Value |
+|---|---|
+| **Interface** | `(imageDataUri: string, prompt: string) → [{role: "user", content: ContentPart[]}]` |
+| **Seam** | `server.js` module export |
+| **Depth target** | **Deep** |
+| **Hidden complexity** | Data URI validation, image_url content part construction, prompt wrapping, base64 passthrough (no re-encoding — Kilo Code accepts data URIs in `image_url.url`) |
+| **Test surface** | Module export. Tests assert: output shape matches OpenAI vision format, data URI preserved in `url` field, text part follows image part, valid for both `system`+`user` and `user`-only message patterns. |
+| **Deletion test** | Delete the helper → every vision call site breaks; must inline ~15 copies of the same format. **Earned.** |
+
+### Module B: `callKilo*` helpers (~15 functions — RENAMED)
+
+| Attribute | Value |
+|---|---|
+| **Interface** | Unchanged from `callMiniMax*` except: `(imageDataUri, model, ...optionalPerCallParams) → Promise<result>` |
+| **Seam** | `server.js` module exports |
+| **Depth target** | **Deep** (unchanged) |
+| **Hidden complexity** | Kilo Code fetch (base URL, auth header, model param), JSON schema construction, response parsing (`choices[0].message.content`), error handling (401/402/429/502/503) |
+| **Test surface** | Module exports. Tests assert: helpers exported with new names, model param accepted, fetch called with correct URL + auth, response parsed from OpenAI shape. |
+| **Deletion test** | Delete one helper → its endpoint 500s; other endpoints unaffected. **Earned.** |
+
+### Module C: `state.llmModel` (frontend state — NEW)
+
+| Attribute | Value |
+|---|---|
+| **Interface** | `string` — one of six model IDs. Default `'minimax/minimax-m3'`. Persisted in `localStorage`. Mirrored in URL (`?llm=...`). |
+| **Seam** | `src/app.js` state object |
+| **Depth target** | **Shallow** — a string |
+| **Hidden complexity** | localStorage read/write, URL read/write, validation against six allowed values, fallback to default on garbage |
+| **Test surface** | The state object. Tests assert: persistence round-trip, URL mirror, default fallback, garbage rejection. |
+| **Deletion test** | Delete the field → model selector defaults to MiniMax M3, UI behaves as before. **Earned.** |
+
+### Module D: Model selector UI (frontend component — NEW)
+
+| Attribute | Value |
+|---|---|
+| **Interface** | `<select>` dropdown with six options. Rendered in the upload section, upstream of the output-contract selector. |
+| **Seam** | `src/index.html` (markup) + `src/app.js` (handler) |
+| **Depth target** | **Shallow** — pure state binding |
+| **Hidden complexity** | DOM event handler, `state.llmModel` binding, visual distinction from output-contract selector |
+| **Test surface** | The rendered DOM. Tests assert: six options present, default = MiniMax M3, change updates state, option values are Kilo Code model IDs. |
+| **Deletion test** | Delete the selector → app falls back to MiniMax M3 (default). **Earned.** |
+
+### Module E: Model param on every endpoint (server routes — MODIFIED)
+
+| Attribute | Value |
+|---|---|
+| **Interface** | Every endpoint accepts `llmModel` in `req.body`, validates against six allowed IDs, passes to helper. 400 on invalid. |
+| **Seam** | All route handlers in `server.js` |
+| **Depth target** | **Shallow** — validation + passthrough |
+| **Hidden complexity** | Validation (whitelist check), error message on invalid model |
+| **Test surface** | HTTP routes. Tests assert: valid model accepted, invalid model → 400, endpoint passes model to helper. |
+| **Deletion test** | Delete validation → garbage model IDs reach Kilo Code → 400 from gateway (not as clear to user). **Earned.** |
+
+## B4. Pre-mortem (Slice 3 — top 5)
+
+(See `docs/PRE-MORTEM.md` Slice 3 entry for the full pre-mortem. Summary below.)
+
+1. **Kilo Code gateway is down or returns 5xx.** All LLM calls fail. No fallback to direct MiniMax. **Mitigation:** clear error messaging per status code. User can wait and retry. This is an accepted risk of single-provider architecture.
+2. **Image format mismatch produces garbled output.** If `buildVisionMessage` constructs the content parts incorrectly, models may ignore the image or misinterpret it. **Mitigation:** test the helper's output shape against the OpenAI vision spec. Manual demo with a known image across all six models.
+3. **Model rename during helper migration misses a call site.** One of the ~15 call sites keeps the old `callMiniMax*` name → endpoint 500s. **Mitigation:** global search for `callMiniMax` after migration must return zero results. Add a test that asserts no `callMiniMax` string remains in `server.js`.
+4. **localStorage collision with `state.model`.** The output-contract selector already uses `state.model`. Adding `state.llmModel` is unambiguous, but the chat session `model` field ambiguity could cause bugs. **Mitigation:** chat session stores both `llm_model` (LLM model ID) and `contract` (output contract, renamed from `model`).
+5. **Model produces different output shape than MiniMax.** GPT-5.6 Luna or Grok 4.3 may emit JSON schemas or prose formats differently than MiniMax M3. The existing JSON Schema validators (`minLength`, etc.) should catch structural failures. **Mitigation:** all response schemas remain enforced server-side. The user sees validation errors, not silent garbage.
+
+## B5. Slice order (reproduced from `docs/SPEC.md` §15.9)
+
+| Sub-slice | min | target | stretch |
+|---|---|---|---|
+| 3.1 — env + server-side provider swap | env var rename + helper rename + fetch URL swap | + all 503 path updates | — |
+| 3.2 — buildVisionMessage helper + migration | helper + all call sites migrated | + zero `callMiniMax` remaining | — |
+| 3.3 — model selector UI + state | selector + state.llmModel + persistence + URL | + a11y (aria-label) | — |
+| 3.4 — wire model param | model param on all endpoints + validation | + chat session LLM model field | — |
+| 3.5 — tests + code review + docs | tests pass + CODE-REVIEW-3 + CONTEXT.md + README.md | + ADR 0022 | — |
+
+**Frontier:** 5 sub-slices, sequential. 3.1 must precede 3.2 (helpers must be renamed before call sites use the new names). 3.2 must precede 3.4 (call sites must accept model param). 3.3 is parallelisable with 3.1–3.2 but must precede 3.4 (UI must exist before endpoints receive model param). 3.5 is last.
+
+## B6. Decisions (Slice 3)
+
+- **Lightweight decisions** (not separately ADR-worthy within Slice 3):
+  - `buildVisionMessage` as single helper (expand-contract pattern)
+  - Mechanical rename: `callMiniMax*` → `callKilo*`
+  - Model validation: whitelist of six IDs, 400 on mismatch
+  - `state.llmModel` default: `'minimax/minimax-m3'`
+  - URL parameter: `?llm=...` (not `?model=...` — that's the output contract)
+  - Chat session: `llm_model` field (not `model` — avoids collision with output contract)
+  - Response envelope `provider`: `'kilo-code'`
+  - Error messages: human-readable per status code
+- **New ADR: `docs/adr/0022-kilo-code-provider.md`.** Captures the provider migration decision (the strategic choice to replace direct MiniMax with Kilo Code gateway, which crosses the entire server-side seam). Status: **Proposed** (awaiting G3 approval).
+
+## B7. Out of scope (Slice 3)
+
+- Dynamic model list from `GET /models` (deferred — six models are hardcoded)
+- Multi-provider architecture (deferred — Kilo Code is sole provider)
+- Provider fallback to direct MiniMax (deferred — single-provider by design)
+- Model capability metadata in the selector (deferred — display names only)
+- Streaming responses (deferred — all calls remain non-streaming)
+- Server.js split (deferred — well under 290KB kill criterion)
+- Preset-aware model selection (deferred — model selector is global)
+
+## B8. Wide-refactor check (per `docs/PRINCIPLES.md` §6.3)
+
+Slice 3 touches:
+- `server.js` (renames + new helper + fetch URL changes, ~200 lines touched)
+- `src/app.js` (additive, ~50 lines)
+- `src/index.html` (additive, ~10 lines)
+- `src/styles.css` (additive, ~15 lines)
+- `tests/run-all.js` (additive + rename updates, ~80 lines)
+- `docs/SPEC.md` (already written, §15)
+- `docs/ARCHITECTURE.md` (this section)
+- `docs/PRE-MORTEM.md` (Slice 3 entry)
+- `docs/adr/0022-kilo-code-provider.md` (new)
+- `CONTEXT.md` (update provider section)
+- `README.md` (update env vars)
+
+**Not a wide refactor.** The `callMiniMax*` → `callKilo*` rename is mechanical (global find-and-replace), not a semantic change. No schema migration, no symbol rename that crosses module boundaries, no library migration. The rename stays within `server.js`. Vertical slice holds.
+
+## B9. Refactor-trigger criteria (Slice 3)
+
+If a future slice needs to add a **second provider** (e.g., direct OpenAI alongside Kilo Code), trigger the provider-abstraction refactor (separate wide-refactor slice). Not now — Slice 3 is single-provider by design.
+
+Also: if the Kilo Code gateway proves unreliable (≥3 downtime incidents in one week), trigger a fallback-provider slice (direct MiniMax or OpenAI as backup). This is captured in the Slice 3 PRE-MORTEM as failure mode #1.

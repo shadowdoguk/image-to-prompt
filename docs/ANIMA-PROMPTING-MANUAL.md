@@ -82,10 +82,10 @@ Want to train a LoRA, or need maximum tag fidelity? ── YES ──► Anima-B
 | Variant | File | Purpose | Recommended CFG | Recommended steps | Best for |
 |---|---|---|---|---|---|
 | **Anima-Turbo v1.0** | `anima-turbo-v1.0.safetensors` | Distilled, fast inference; weak default style baked in | **1** | **8–12** | Quick iteration, online platforms where step count is billed, anything that benefits from a stable default style |
-| **Anima-Aesthetic v1.1** | `anima-aesthetic-v1.1.safetensors` | Fine-tuned for higher consistency and a better default art style | **4–5** | **30–50** | Final-render quality, "I just want a good image" defaults |
-| **Anima-Aesthetic v1.0** | `anima-aesthetic-v1.0.safetensors` | Earlier Aesthetic, with stabilization LoRAs merged in. Author says v1.1 supersedes it. | **4–5** | **30–50** | Reproducing older results, comparing v1.0↔v1.1 |
-| **Anima-Aesthetic v1.0b** | `anima-aesthetic-v1.0b.safetensors` | Pure aesthetics full finetune without the additional stabilization LoRAs. Author notes "I personally think 1.0 is better." | **4–5** | **30–50** | Reproducing the diff between a "raw" aesthetic fine-tune and the merged v1.0 |
-| **Anima-Base v1.0** | `anima-base-v1.0.safetensors` | The pretrained, unrefined base. Plain / neutral default style. | **4–5** | **30–50** | **LoRA training. Full stop.** Do not train LoRAs on any variant except Base. |
+| **Anima-Aesthetic v1.1** | `anima-aesthetic-v1.1.safetensors` | Fine-tuned for higher consistency and a better default art style | **4–6** | **30–50** | Final-render quality, "I just want a good image" defaults |
+| **Anima-Aesthetic v1.0** | `anima-aesthetic-v1.0.safetensors` | Earlier Aesthetic, with stabilization LoRAs merged in. Author says v1.1 supersedes it. | **4–6** | **30–50** | Reproducing older results, comparing v1.0↔v1.1 |
+| **Anima-Aesthetic v1.0b** | `anima-aesthetic-v1.0b.safetensors` | Pure aesthetics full finetune without the additional stabilization LoRAs. Author notes "I personally think 1.0 is better." | **4–6** | **30–50** | Reproducing the diff between a "raw" aesthetic fine-tune and the merged v1.0 |
+| **Anima-Base v1.0** | `anima-base-v1.0.safetensors` | The pretrained, unrefined base. Plain / neutral default style. | **4–6** | **30–50** | **LoRA training. Full stop.** Do not train LoRAs on any variant except Base. |
 
 **Author's recommendation (verbatim):** "I recommend starting with Anima-Turbo. On average, it is only slightly worse than Anima-Aesthetic, while being very fast to generate (and much cheaper if you use it on an online platform that scales the cost with step count). This makes it very convenient for quickly iterating on prompts. The increased stability can even make it better than Aesthetic in some cases."
 
@@ -141,8 +141,8 @@ The author's recommended favorites (in their own order):
 
 | Variant | Recommended CFG |
 |---|---|
-| Anima-Base | **4–5** |
-| Anima-Aesthetic (v1.0, v1.0b, v1.1) | **4–5** |
+| Anima-Base | **4–6** |
+| Anima-Aesthetic (v1.0, v1.0b, v1.1) | **4–6** (can tolerate as low as 3) |
 | Anima-Turbo | **1** (distilled; CFG > 1 will over-cook the image) |
 
 ### 4.4 Steps
@@ -256,6 +256,10 @@ Single words sometimes work. Short phrases rarely. Long sentences won't render c
 ### R11. Don't try to train the LLM adapter.
 
 In LoRA training: set `llm_adapter_lr=0` (or its equivalent in your trainer). The LLM adapter is sensitive; training it degrades the model.
+
+### R12. When a tag differs between Danbooru and Gelbooru, prefer Gelbooru.
+
+The Qwen-3 text encoder was trained with Gelbooru-favored tagging conventions. Using Danbooru variants of ambiguous tags can produce weaker results.
 
 [Source: `circlestone-labs/Anima/README.md` "Prompting", "Aesthetic Version Prompting", "Tag order", "Artist tags", "Dataset tags", "Natural language prompting tips", "Limitations", "Finetuning Tips" sections, accessed 2026-08-03.]
 
@@ -545,7 +549,7 @@ masterpiece, best quality, year 2025, newest, highres, safe,
 masterpiece, best quality, score_7, safe, 1girl, oomuro sakurako, yuru yuri, @nnn yryr, smile, brown hair, hat, santa costume,
 ```
 
-Settings: Anima-Turbo, `er_sde` or `euler`, 8–12 steps, **CFG 1** (not 4–5).
+Settings: Anima-Turbo, `er_sde` or `euler`, 8–12 steps, **CFG 1** (not 4–6).
 
 ### 9.11 Multi-character, multi-cluster
 
@@ -583,6 +587,9 @@ Before submitting any Anima prompt, run through this checklist:
 ### 10.2 Artist tags (R2)
 - [ ] Every artist tag has a leading `@`.
 
+### 10.2a Danbooru/Gelbooru conflicts (R12)
+- [ ] When a tag differs between Danbooru and Gelbooru, the Gelbooru variant is used.
+
 ### 10.3 Variant-appropriate quality tags (R3, R7)
 - [ ] On Base / Turbo: positive prefix contains `masterpiece, best quality, score_7, safe,`.
 - [ ] On Aesthetic: positive prefix contains `masterpiece, best quality,` (no `score_7`).
@@ -610,8 +617,8 @@ Before submitting any Anima prompt, run through this checklist:
 - [ ] Not asking for multi-word text rendering.
 
 ### 10.9 Sampler / CFG / steps match the variant (§4)
-- [ ] Base: 30–50 steps, CFG 4–5.
-- [ ] Aesthetic: 30–50 steps, CFG 4–5.
+- [ ] Base: 30–50 steps, CFG 4–6.
+- [ ] Aesthetic: 30–50 steps, CFG 4–6 (can tolerate as low as 3).
 - [ ] Turbo: 8–12 steps, **CFG 1**.
 
 ### 10.10 Resolution is in [512², 1536²] (R-spec)
@@ -724,7 +731,7 @@ Listed in the README's "Limitations" section, plus observed behaviors:
 | **Wrong artist style** | Bleed from other artists, weak style | Always `@`-prefix the artist. Add `artist name` to the negative prompt. |
 | **Image is "boring" / unscoped** | Default style, generic composition | Add `masterpiece, best quality, score_7,` (Base/Turbo). Add an `@artist` tag. |
 | **Aesthetic variant looks "slop-ish"** | Over-cooked, hyper-saturated, plastic | Drop `score_*` from both prompts (R3). Reduce CFG toward 4. |
-| **Turbo looks over-cooked** | Sharp outlines, harsh shadows | Reduce CFG to 1 (do not let the UI default to 4–5). |
+| **Turbo looks over-cooked** | Sharp outlines, harsh shadows | Reduce CFG to 1 (do not let the UI default to 4–6). |
 | **Resolution > 1536²** | Artifacts, blurriness, "soft" output | Reduce to ≤ 1536². |
 | **Base without quality tags** | Plain, neutral, low-effort | Add `masterpiece, best quality, score_7,` (Base/Turbo) or use Aesthetic. |
 | **Weighting has no effect** | `(chibi:1.3)` is invisible | Bump the weight to ~2.0 (1.5× SDXL norms). |

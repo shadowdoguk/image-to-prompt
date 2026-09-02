@@ -1,6 +1,6 @@
 # Image-to-Prompt Generator
 
-An AI-powered web application that transforms uploaded images into refined, detailed text prompts optimized for AI image generation models (Stable Diffusion, Midjourney, DALL-E, Flux). Powered by MiniMax M3.
+An AI-powered web application that transforms uploaded images into refined, detailed text prompts optimized for AI image generation models (Stable Diffusion, Midjourney, DALL-E, Flux). Powered by the Kilo AI Gateway (OpenAI-compatible gateway to 500+ models). Default model: MiniMax M3.
 
 ## Features
 
@@ -14,14 +14,14 @@ An AI-powered web application that transforms uploaded images into refined, deta
 - **Responsive design** — works on mobile, tablet, and desktop
 - **Saved color palettes** — name and reuse a palette from any run. After analyze, a "Save palette…" button sits directly under the analyzed colors — click it, name the palette, and it becomes available in the Step 1 picker to override the auto-analyzed colors on the next job. Per-color **weight** (1–10) + **accent flag** + palette-level **accent cap** shape how the palette influences generated prompts: the server appends a deterministic `Color usage budget` block to the Stage 2 user message, and a distribution dashboard panel surfaces measured vs target mention counts per color (ADR 0014).
 - **Saved directives** — name, tag, version, search, share, and reuse your favorite Stage 2 directives. Below the directives textarea, a "Save directive…" button captures the current text as a named, tagged directive; a "Manage directives…" modal lets you edit, search, filter, restore prior versions, and import/export directive sets as `.i2p.json` files. Usage frequency and last-used date are tracked automatically each time you apply a directive.
-- **Focused re-analysis + curated presets for Actions / Mood / Lighting** — three new "Populate with AI" buttons (ADR 0018) sit directly beneath the `actions`, `mood`, and `lighting` fields in the analysis editor, each delegating a focused MiniMax M3 vision call to a single field via dedicated endpoints (`/api/actions`, `/api/mood`, `/api/lighting`). For `mood` and `lighting`, a curated taxonomy of preset chips is rendered beneath the button — five labeled categories (Positive / Reflective / Intense / Atmospheric / Still for mood; Natural / Directional / Quality / Stylized / Studio for lighting). Click a chip to fill the field with a one-line descriptor; edit after clicking. Chips are a zero-credit quick override; the AI button is the custom image-derived escape hatch.
-- **Focused re-analysis for Texture** — a "Populate with AI" button (Slice 1) sits directly beneath the `texture` field in the analysis editor, delegating a focused MiniMax M3 vision call to a single field via a dedicated endpoint (`/api/texture`). The shipped prompt excludes the subject, lighting, color, mood, composition, style, and medium — those are separate fields — and mandates coverage of five texture categories: surface quality (smooth / rough / pitted / polished / matte / glossy), mark-making and tool traces (brushstrokes / palette-knife slabs / pen hatching / photographic grain), material identification (oil / acrylic / watercolor / paper / canvas / photographic emulsion / 3D render), pigment interaction (impasto / glazing / scumbling / wet-in-wet bleeds / drybrush / washes / sgraffito), and tactile cues (chunky / slick / fibrous / velvety / sticky / gritty). Texture is image-specific and resists a curated chip taxonomy (mirror ADR 0018 §5); only the AI button is rendered, no chips.
+- **Focused re-analysis + curated presets for Actions / Mood / Lighting** — three new "Populate with AI" buttons (ADR 0018) sit directly beneath the `actions`, `mood`, and `lighting` fields in the analysis editor, each delegating a focused Kilo Code vision call to a single field via dedicated endpoints (`/api/actions`, `/api/mood`, `/api/lighting`). For `mood` and `lighting`, a curated taxonomy of preset chips is rendered beneath the button — five labeled categories (Positive / Reflective / Intense / Atmospheric / Still for mood; Natural / Directional / Quality / Stylized / Studio for lighting). Click a chip to fill the field with a one-line descriptor; edit after clicking. Chips are a zero-credit quick override; the AI button is the custom image-derived escape hatch.
+- **Focused re-analysis for Texture** — a "Populate with AI" button (Slice 1) sits directly beneath the `texture` field in the analysis editor, delegating a focused Kilo Code vision call to a single field via a dedicated endpoint (`/api/texture`). The shipped prompt excludes the subject, lighting, color, mood, composition, style, and medium — those are separate fields — and mandates coverage of five texture categories: surface quality (smooth / rough / pitted / polished / matte / glossy), mark-making and tool traces (brushstrokes / palette-knife slabs / pen hatching / photographic grain), material identification (oil / acrylic / watercolor / paper / canvas / photographic emulsion / 3D render), pigment interaction (impasto / glazing / scumbling / wet-in-wet bleeds / drybrush / washes / sgraffito), and tactile cues (chunky / slick / fibrous / velvety / sticky / gritty). Texture is image-specific and resists a curated chip taxonomy (mirror ADR 0018 §5); only the AI button is rendered, no chips.
 
 ## Architecture
 
-- **Backend**: Node.js + Express, handles API communication with MiniMax M3
+- **Backend**: Node.js + Express, handles API communication via Kilo AI Gateway
 - **Frontend**: Vanilla HTML/CSS/JS (no build step), drag-and-drop upload, responsive UI
-- **API**: MiniMax M3 (`MiniMax-Text-01`) for vision + prompt generation
+- **API**: Kilo AI Gateway for vision + prompt generation (default model: MiniMax M3)
 - **Security**: API key never exposed to client; all uploads validated and sanitized
 
 ## Quick Start
@@ -29,7 +29,7 @@ An AI-powered web application that transforms uploaded images into refined, deta
 ### Prerequisites
 
 - Node.js >= 18
-- A MiniMax API key (sign up at https://api.minimaxi.chat)
+- A Kilo Code API key (sign up at https://app.kilo.ai)
 
 ### Local Development
 
@@ -42,9 +42,9 @@ An AI-powered web application that transforms uploaded images into refined, deta
    ```bash
    cp .env.example .env
    ```
-   Then edit `.env` and set your `MINIMAX_API_KEY`:
+   Then edit `.env` and set your `KILO_API_KEY`:
    ```
-   MINIMAX_API_KEY=your-actual-api-key-here
+   KILO_API_KEY=your-actual-api-key-here
    ```
 
 3. **Start the server:**
@@ -97,9 +97,8 @@ All configuration is via environment variables (see `.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MINIMAX_API_KEY` | — | **Required.** Your MiniMax API key |
-| `MINIMAX_BASE_URL` | `https://api.minimaxi.chat/v1` | MiniMax API base URL |
-| `MINIMAX_MODEL` | `MiniMax-Text-01` | Model to use for generation |
+| `KILO_API_KEY` | — | **Required.** Your Kilo Code API key (JWT from https://app.kilo.ai) |
+| `KILO_BASE_URL` | `https://api.kilo.ai/api/gateway` | Kilo Code API base URL |
 | `PORT` | `3100` | Server port (change if 3100 is also taken) |
 | `MAX_FILE_SIZE_BYTES` | `10485760` | Max upload size (10MB) |
 
@@ -115,7 +114,7 @@ Health check.
   "success": true,
   "data": {
     "status": "ok",
-    "provider": "minimax-m3",
+    "provider": "kilo-code",
     "configured": true
   }
 }
@@ -139,7 +138,7 @@ the fields defined by the chosen preset.
     "preset_name": "Alla Prima Oil Painting",
     "analysis": { "subject": "...", "style": "...", "...": "..." },
     "requested_fields": ["subject", "style", "..."],
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -164,7 +163,7 @@ final image-generation prompt via Stage 2.
     "preset_id": "preset_alla_prima_oil",
     "preset_name": "Alla Prima Oil Painting",
     "prompt": "A serene mountain landscape at sunset...",
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -192,7 +191,7 @@ details.
   "success": true,
   "data": {
     "subject": "Two people are seated at a wooden dining table in the lower-center of the frame. The person on the left wears a navy blue wool sweater and is smiling with visible teeth; the person on the right wears a red and black plaid flannel shirt with a neutral expression...",
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -226,7 +225,7 @@ for one question.
   "success": true,
   "data": {
     "camera_angle": "Eye-level medium shot captured from a three-quarter front-right perspective, with a normal lens showing natural perspective, shallow depth of field softly blurring the background, and a static frame with no implied motion.",
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -261,7 +260,7 @@ contract the full prompt-attention window for one question.
   "success": true,
   "data": {
     "actions": "Seated cross-legged on a polished wooden floor, the woman rests her clasped hands in her lap with her eyes closed in serene contemplation. Her head tilts slightly forward, lips drawn together in a soft, settled expression. No object interaction is visible and no implied motion is present — the frame captures a moment of stillness, the body settled at the end of an exhale.",
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -296,7 +295,7 @@ multi-clause descriptions.
   "success": true,
   "data": {
     "mood": "Contemplative and serene, with a bittersweet undercurrent — the warmth of the wooden floor and the soft natural light pull the moment toward comfort, while the closed eyes and bowed head introduce a private, almost grief-tinged inwardness. The atmosphere is intimate and enclosed, the air still. Pacing is languid and meditative, the energy of a long-held breath.",
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -331,7 +330,7 @@ prompt-attention window for one question.
   "success": true,
   "data": {
     "lighting": "Soft diffused natural daylight from a north-facing window at camera-left, falling across the subject with a warm golden cast; shadows are soft-edged and short, falling toward camera-right.",
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -367,7 +366,7 @@ per-field pattern from `/api/actions`, `/api/mood`, and `/api/lighting`.
   "success": true,
   "data": {
     "texture": "Heavy impasto with visible palette-knife slabs and sharp knife-edge ridges, layered alla prima with thick pigment standing proud of the canvas weave. The surface reads as chunky and ridged under the eye, with broken-color passages and canvas showing through in thinner scraped areas.",
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -403,7 +402,7 @@ swap the prompt template per variant.
     "positive": "masterpiece, best quality, score_7, safe, 1girl, oomuro sakurako, yuru yuri, @nnn yryr, smile, brown hair, hat, solo, looking at viewer",
     "negative": "worst quality, low quality, score_1, score_2, score_3, artist name, blurry, jpeg artifacts, chromatic aberration",
     "variant": "base",
-    "model": "MiniMax-Text-01"
+    "model": "minimax/minimax-m3"
   }
 }
 ```
@@ -838,7 +837,7 @@ fields.
 
 ```
 image-to-prompt/
-├── server.js              # Express backend + MiniMax M3 integration
+├── server.js              # Express backend + Kilo Code integration
 ├── package.json
 ├── .env.example           # Environment variable template
 ├── .gitignore
@@ -863,7 +862,7 @@ image-to-prompt/
 
 ## Security
 
-- **API key protection**: `MINIMAX_API_KEY` is read from `.env` server-side only; never sent to the client
+- **API key protection**: `KILO_API_KEY` is read from `.env` server-side only; never sent to the client
 - **Input validation**: file type and size validated before upload; base prompt sanitized to strip control characters and limit length
 - **Error sanitization**: error messages are redacted to prevent API key/token leakage in client-facing responses
 - **Upload cleanup**: uploaded files are deleted from disk after processing (success or error)
@@ -875,9 +874,9 @@ image-to-prompt/
 Set the following in your production environment:
 
 ```bash
-MINIMAX_API_KEY=your-production-key
-MINIMAX_BASE_URL=https://api.minimaxi.chat/v1
-MINIMAX_MODEL=MiniMax-Text-01
+KILO_API_KEY=your-production-key
+KILO_BASE_URL=https://api.kilo.ai/api/gateway
+KILO_BASE_URL | `https://api.kilo.ai/api/gateway` | Kilo Code API base URL |
 PORT=3000
 NODE_ENV=production
 MAX_FILE_SIZE_BYTES=10485760

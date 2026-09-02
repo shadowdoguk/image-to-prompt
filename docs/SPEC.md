@@ -185,7 +185,7 @@ I heard this as: "keep the existing Z-Image pipeline intact and add a sibling pi
 1. **Two contracts to keep coherent.** Every bug fix, every preset, every chat refinement template needs to be either model-agnostic or duplicated. The fallout from past contract drift (ADR 0019 — gestural → pastel-focal-glow) is recent and well-documented. **Mitigation:** the per-field artifacts (`subject`, `actions`, `mood`, `lighting`, `texture`, etc.) remain shared between both pipelines. Only the **final-prompt assembly** is model-specific. ADR 0021 (forthcoming, G3) will codify this.
 2. **Frontend state proliferation.** `state.model` joins a long list of model-side state flags. The risk is hidden coupling — "what happens when the user switches model mid-chat?" **Mitigation:** explicit per-model chat behaviour (see §14.7 Open Questions Q3). The state is first-class and introspectable.
 3. **Anima license boundary.** The CircleStone Labs Non-Commercial License v1.2 restricts hosting the model behind a paid API, but does **not** restrict us from generating prompts for Anima via a third-party LLM (the API call is to MiniMax M3, not to Anima weights). Prompt-engineering for Anima is not a Derivative Model per §1.a of the LICENSE. We are not embedding weights or hosting inference. **Mitigation:** SPEC §14.10 documents the boundary in plain English. Outputs from Anima are reusable commercially; the model itself is not.
-4. **Server.js monolith growth.** Adding `DEFAULT_ANIMA_PROMPT` + `callMiniMaxAnimaAnalysis` + `/api/anima` is ~80–120 lines. **Mitigation:** the pattern is established (ADR 0018 per-field); the slice is well-bounded. Post-Slice-2, the `server/routes/` split can become its own slice.
+4. **Server.js monolith growth.** Adding `DEFAULT_ANIMA_PROMPT` + `callKiloAnimaAnalysis` + `/api/anima` is ~80–120 lines. **Mitigation:** the pattern is established (ADR 0018 per-field); the slice is well-bounded. Post-Slice-2, the `server/routes/` split can become its own slice.
 5. **The Anima contract is more condition-heavy than Z-Image.** Pure-tag, pure-prose, hybrid shapes (§7 of the manual) depend on the image's subject. The LLM prompt must condition on image content. **Mitigation:** the system prompt itself instructs the LLM to choose shape based on subject (mirror principle from ADR 0019 §2). One server endpoint, three possible outputs.
 
 ### 14.4 Scope
@@ -195,7 +195,7 @@ I heard this as: "keep the existing Z-Image pipeline intact and add a sibling pi
 - **`state.model`** in app state — string enum, defaults to `'zimage_turbo'`. Persisted in `localStorage`, recorded in chat sessions, exported with the prompt, mirrored in the URL.
 - **Model selector UI** — dropdown or button group, placed near the Generate button. Switching it re-shapes the result panel and chat console.
 - **`DEFAULT_ANIMA_PROMPT`** — the system prompt the LLM sees. Mirrors the structure of `DEFAULT_ZIMAGE_*` (when one exists) or the `actions`/`mood`/`lighting` pattern (ADR 0018).
-- **`callMiniMaxAnimaAnalysis`** — the LLM helper. Returns a `{ positive, negative }` shape (the Anima contract is two-output; the Z-Image contract is single-output).
+- **`callKiloAnimaAnalysis`** — the LLM helper. Returns a `{ positive, negative }` shape (the Anima contract is two-output; the Z-Image contract is single-output).
 - **`POST /api/anima`** — sibling route to `POST /api/zimage`. The frontend dispatches to one or the other based on `state.model`.
 - **Anima variant selector** — Base / Aesthetic / Turbo. Defaults to Base (per the manual §2 — "LoRAs should be trained using this version"). Lives in the result panel, not in the model selector (different abstraction levels).
 - **Result panel shapes per contract** — Z-Image: single prompt. Anima: positive textarea + negative textarea + variant selector.
@@ -261,7 +261,7 @@ A day in their life: "Last week I was iterating on a pastel-focal-glow oil paint
 - **Model selector UI** (frontend component) — interface: a dropdown or button group near the Generate button. Seam: `src/app.js` render. Depth: **shallow** — pure state binding.
 - **Result panel per contract** (frontend component) — interface: receives a `model` prop, renders the right UI. Seam: `src/app.js` render. Depth target: **deep** — shape, behaviour, and chat-anchor all hidden behind one component.
 - **`/api/anima`** (server module) — interface: `POST /api/anima (multipart image) → { success, data: { positive, negative, variant, model } }`. Seam: `server.js` route handler. Depth target: **deep** — same depth as the existing final-prompt route (multer + LLM call + response envelope + 503/500 handling).
-- **`callMiniMaxAnimaAnalysis`** (server helper) — interface: `(imageDataUri: string) → Promise<{ positive, negative }>`. Seam: `server.js` module export. Depth target: **deep** — single-attempt + schema builder + length guard all hidden behind one call.
+- **`callKiloAnimaAnalysis`** (server helper) — interface: `(imageDataUri: string) → Promise<{ positive, negative }>`. Seam: `server.js` module export. Depth target: **deep** — single-attempt + schema builder + length guard all hidden behind one call.
 - **`DEFAULT_ANIMA_PROMPT`** (server constant) — interface: string. Seam: `server.js` module export. Mirrors existing `DEFAULT_*_PROMPT` exports.
 - **Chat dispatch** (frontend handler) — interface: chat-session anchor is per-model. Seam: `src/app.js`. Depth: **shallow** — state flag + dispatch.
 
@@ -400,3 +400,199 @@ These terms either already exist in `CONTEXT.md` or are sharpened by this slice:
 |---|---|---|
 | 2026-07-29 | Initial draft (Slice 1) | Phase C of `goose-review`; user selected Candidate 1 (texture AI button) at the Phase C prompt |
 | 2026-08-03 | Appended Slice 2 — Anima contract (the fork) | G1 approved by user; pre-Generate model picker chosen over dual-output design; Z-Image Turbo remains the default; Anima is a sibling contract with its own positive + negative prompts, variant selector (Base / Aesthetic / Turbo), and per-model chat sessions |
+| 2026-08-04 | Appended Slice 3 — Kilo Code provider migration + model selector | G1 approved by user; MiniMax M3 is the default LLM model; six hardcoded models via Kilo AI Gateway; model selector upstream of output-contract selector |
+
+---
+
+## 15. Slice 3 — Kilo Code provider migration + model selector
+
+**Status:** Draft (awaiting Gate G2 user approval)
+**Date:** 2026-08-04
+**Origin:** User request — "review project and evaluate new feature for choosing kilocode as model provider … hardcode these minimax-m3, GPT-5.6 Luna, Gemini 3.1 Pro Preview, Gemini 3.5 Flash, Nemotron 3 Ultra, Grok 4.3"
+**Context:** The current app calls MiniMax M3 directly via `api.minimaxi.chat`. The user wants to route all LLM calls through the **Kilo AI Gateway** (`api.kilo.ai`) — an OpenAI-compatible API gateway to 500+ models — and add a model selector dropdown so the artist can pick which underlying LLM model generates their prompts. The existing output-contract selector (Z-Image Turbo / Anima) is unchanged and sits downstream of the new model selector.
+
+### 15.1 The Idea (one paragraph)
+
+Swap the backend's LLM provider from direct MiniMax API calls to the Kilo AI Gateway, add a `buildVisionMessage` helper to consolidate the image-format change (MiniMax raw data URI → OpenAI-compatible `image_url` content parts), and render a **model selector** dropdown with six hardcoded models in the upload screen, positioned upstream of the existing output-contract selector. The selected model is sent with every LLM request, persisted in localStorage, mirrored in the URL, recorded in chat sessions, and defaults to MiniMax M3.
+
+### 15.2 The Reframe
+
+I heard this as: "replace the direct MiniMax integration with Kilo Code as the sole provider, keep all the prompt-engineering logic intact, and let me pick which LLM model does the work — without touching the Z-Image/Anima fork." Confirm or amend? *(Yes — confirmed by user at G1. Default model is MiniMax M3.)*
+
+### 15.3 The Challenge (Goose argues against)
+
+1. **Image format is a cross-cutting change.** Every one of the ~15 vision call sites currently embeds raw base64 data URIs in the MiniMax message shape. Kilo Code uses OpenAI-compatible `image_url` content parts — same data, different wrapper. Missing one call site means that button silently fails. **Mitigation:** a single `buildVisionMessage(imageDataUri, prompt)` helper used by every call site. Test the helper once; all call sites benefit. This is the expand-contract pattern: introduce the helper, migrate call sites one by one, delete the old inline pattern.
+2. **Model capability mismatch.** Grok 4.3 and Nemotron 3 Ultra may produce weaker vision analysis than Gemini or GPT-5.6 Luna. A user picking the wrong model for Stage 1 gets poor output and blames the tool. **Mitigation:** the selector defaults to MiniMax M3 (the user's familiar baseline). The selector is explicit — the user owns the choice. We surface capability, we don't gatekeep it.
+3. **Three selectors on one screen.** The upload screen now has: LLM model (new) → output contract (existing) → variant (existing, Anima-only). This risks dropdown fatigue. **Mitigation:** the model selector is visually distinct — it sits on its own row above the Generate button, styled differently from the contract selector. Most users set it once and rarely change it. localStorage persistence means it survives reloads.
+4. **Provider migration touches every test.** The test suite has assertions about `MINIMAX_API_KEY`, `MINIMAX_BASE_URL`, `callMiniMax*` function names. Renaming ~15 helper functions + env vars means ~30-40 test assertions need updating. **Mitigation:** this is mechanical — s/MINIMAX/KILO/g plus s/callMiniMax/callKilo/g. The test shape (assert route registered, helper exported, response envelope correct) stays identical.
+
+### 15.4 Scope
+
+#### 15.4.1 In scope (Slice 3 ships these)
+
+- **Env var swap:** `MINIMAX_API_KEY` → `KILO_API_KEY`, `MINIMAX_BASE_URL` → `KILO_BASE_URL` (default `https://api.kilo.ai/api/gateway`), `MINIMAX_MODEL` → removed (model is now dynamic from frontend).
+- **`buildVisionMessage(imageDataUri, prompt)` helper** — single helper in `server.js` that constructs the OpenAI-compatible messages array with `image_url` content parts. Used by all vision call sites.
+- **Rename ~15 helpers:** `callMiniMaxTextureAnalysis` → `callKiloTextureAnalysis`, etc. Each helper's fetch call updated to use `KILO_BASE_URL`, `KILO_API_KEY`, and accept a `model` parameter.
+- **Model selector UI** — dropdown in `src/index.html` (or rendered programmatically), positioned above the output-contract selector. Six options:
+  - `minimax/minimax-m3` — MiniMax M3 *(default)*
+  - `openai/gpt-5.6-luna` — GPT-5.6 Luna
+  - `google/gemini-3.1-pro-preview` — Gemini 3.1 Pro Preview
+  - `google/gemini-3.5-flash` — Gemini 3.5 Flash
+  - `nvidia/nemotron-3-ultra-550b-a55b` — Nemotron 3 Ultra
+  - `x-ai/grok-4.3` — Grok 4.3
+- **`state.llmModel`** — string, persisted in `localStorage` (`image-to-prompt.state.llmModel`), mirrored in URL (`?llm=minimax/minimax-m3`), recorded in chat session `model` field (renamed from current `state.model` to avoid collision with the output-contract `state.model`).
+- **Model param on every endpoint** — Stage 1 (`/api/analyze`), all per-field re-analysis endpoints (`/api/subject`, `/api/camera_angle`, `/api/actions`, `/api/mood`, `/api/lighting`, `/api/texture`), Stage 2 (`/api/generate-prompt` and `/api/anima`), chat (`/api/chat/sessions`, `/api/chat/messages`). Frontend sends `llmModel` in the request body; server uses it as the `model` field in the Kilo Code API call.
+- **Chat session `model` field** — captures which LLM model was active. (Existing `state.model` for output contract is separate and untouched.)
+- **Tests** — env var validation, `buildVisionMessage` output shape, model selector rendering, model param on each endpoint, localStorage round-trip, URL mirror.
+- **Documentation** — `CONTEXT.md` updated (provider section), `README.md` updated (env vars, architecture), this SPEC §15, forthcoming ARCHITECTURE.md appendix, ADR 0022, CODE-REVIEW-3.
+
+#### 15.4.2 Out of scope (explicitly not doing)
+
+- **Dynamic model list from `GET /models`.** The six models are hardcoded. No network fetch at startup.
+- **Multi-provider architecture.** Kilo Code is the sole provider. No fallback to direct MiniMax API. No provider selector.
+- **Model capability metadata.** The selector shows display names only — no context-length, pricing, or vision-capability badges.
+- **Streaming responses.** All calls remain non-streaming (current behaviour).
+- **Server.js split.** The file will grow by ~100 lines; well under the 290KB kill criterion.
+- **Image format for chat.** Chat messages are text-only (analysis snapshot is JSON text). Chat does not send images — no image-format changes needed there.
+- **Preset-aware model selection.** The model selector is global, not per-preset.
+- **No new dependencies, no schema migration.** Chat session `model` field is additive.
+
+#### 15.4.3 The ONE thing
+
+**Clicking Generate with MiniMax M3 selected produces a prompt identical in quality to the current direct MiniMax integration — routed through Kilo Code instead. Switching to GPT-5.6 Luna and clicking Generate produces a prompt from GPT-5.6 Luna.**
+
+This is the success criterion for Slice 3.
+
+### 15.5 Users
+
+**Primary user:** the AI artist who wants to experiment with different LLM models for prompt generation. They might use MiniMax M3 for consistency with their existing workflow, switch to GPT-5.6 Luna when they want stronger prompt-engineering, or try Gemini 3.5 Flash for speed. They pick a model once and it persists across sessions.
+
+A day in their life: "I've been happy with MiniMax M3 for my oil-painting prompts, but tonight I want to try GPT-5.6 Luna for more creative texture descriptions. I pick it from the new dropdown, click Generate, and compare. Next week I might switch back — the dropdown remembers."
+
+### 15.6 Constraints
+
+| Constraint | Value | Reason |
+|---|---|---|
+| Stack | Node + Express + vanilla-JS frontend (unchanged) | mirrors existing |
+| Hosting | localhost:3100 (unchanged) | running live; no deploy |
+| Timeline | 1 session (Slice 3) | well-bounded; pattern is established |
+| API provider | Kilo AI Gateway only | user explicitly chose single-provider |
+| Model list | 6 hardcoded models | user explicitly provided the list |
+| Default model | MiniMax M3 (`minimax/minimax-m3`) | user's familiar baseline; existing workflow |
+| State persistence | `localStorage` | low-risk; mirrors Slice 2 pattern |
+| URL mirror | `?llm=minimax/minimax-m3` | shareability |
+| Kill criterion | `server.js` exceeds 290KB | well under (currently ~7,100 lines) |
+
+### 15.7 User Stories
+
+1. As a user, I want a model selector dropdown before the Generate button, so I can pick which LLM generates my prompts.
+2. As a user, I want the model selector to default to MiniMax M3, so my existing workflow is unchanged on first use.
+3. As a user, I want my model choice to persist across page reloads, so I don't re-pick every session.
+4. As a user, I want to switch models and re-generate, so I can compare output quality across different LLMs.
+5. As a user, I want the chat console to use the same model I selected, so refinements are consistent with the generation.
+6. As a developer, I want a single `buildVisionMessage` helper for all vision calls, so the image-format change is centralized.
+7. As a developer, I want the test suite to validate the model param on every endpoint, so no call site is missed.
+8. As a developer, I want the provider migration to be mechanically verifiable (s/MINIMAX/KILO/g), so no hidden MiniMax references remain.
+
+### 15.8 Implementation Decisions
+
+#### Modules
+
+- **`buildVisionMessage(imageDataUri, prompt)`** (server helper) — interface: `(string, string) → [{role: "user", content: [{type: "image_url", image_url: {url: string}}, {type: "text", text: string}]}]`. Seam: `server.js` module export. Depth: **deep** — image format conversion, data URI validation, prompt wrapping all hidden behind one call.
+- **`state.llmModel`** (frontend state) — interface: string (one of six model IDs). Default: `'minimax/minimax-m3'`. Seam: `src/app.js` state object. Depth: **shallow** — a string, persisted, mirrored.
+- **Model selector UI** (frontend component) — interface: `<select>` dropdown with six options. Position: above the output-contract selector, before Generate. Seam: `src/index.html` or programmatic render. Depth: **shallow** — pure state binding.
+- **`callKilo*` helpers** (~15 functions) — renamed from `callMiniMax*`. Each accepts a `model` parameter. Seam: `server.js` module exports. Depth: **deep** — unchanged from existing, only the fetch URL + auth header + model param change.
+
+#### Decisions
+
+- **Single `buildVisionMessage` helper.** Every vision call site uses it. No inline image-format construction anywhere. This is the expand-contract pattern: introduce helper → migrate call sites → delete old pattern.
+- **Rename all helpers:** `callMiniMaxTextureAnalysis` → `callKiloTextureAnalysis`, etc. Mechanical s/MiniMax/Kilo/g. No functional change beyond fetch target.
+- **Model param on every endpoint.** Server routes extract `llmModel` from `req.body`, validate against the six allowed IDs, pass to the helper. 400 if invalid.
+- **URL parameter:** `?llm=minimax/minimax-m3`. Read on boot: URL first, then localStorage, then default.
+- **Chat session `model` field:** captures the LLM model used. Separate from the output-contract field (currently also called `model`; will be renamed to `contract` in chat session schema — or the LLM model field is named `llm_model` to avoid collision).
+- **Display names vs model IDs.** The selector shows human-readable names. The `value` attribute is the Kilo Code model ID.
+- **No retry loop, no fallback.** Single-attempt LLM call (mirrors existing). If Kilo Code returns 5xx, the error surfaces to the user.
+- **Error handling.** 401/403 on Kilo Code → check `KILO_API_KEY`. 402 → "Kilo Code balance exhausted." 429 → "Rate limited — wait and retry." 502 → "Upstream provider error."
+- **`provider` field in response envelope:** changed from `'minimax-m3'` to `'kilo-code'`.
+
+#### Model list (canonical, hardcoded)
+
+| Display Name | Model ID (`value`) | Notes |
+|---|---|---|
+| MiniMax M3 | `minimax/minimax-m3` | **Default.** Existing familiar baseline. |
+| GPT-5.6 Luna | `openai/gpt-5.6-luna` | Strong vision + prompt engineering. |
+| Gemini 3.1 Pro Preview | `google/gemini-3.1-pro-preview` | Large context, strong vision. |
+| Gemini 3.5 Flash | `google/gemini-3.5-flash` | Fast, cost-effective. |
+| Nemotron 3 Ultra | `nvidia/nemotron-3-ultra-550b-a55b` | NVIDIA large model. |
+| Grok 4.3 | `x-ai/grok-4.3` | xAI flagship. |
+
+### 15.9 Definition of Done (vertical sub-slices)
+
+#### Slice 3.1 — env + server-side provider swap
+
+- **Behaviour:** `server.js` reads `KILO_API_KEY` and `KILO_BASE_URL`. All `callMiniMax*` helpers renamed to `callKilo*`. All fetch calls pointed at Kilo Code gateway. No functional change in prompt quality for MiniMax M3 (it goes through Kilo Code instead of direct, but same model).
+- **DoD:**
+  - [ ] `KILO_API_KEY` and `KILO_BASE_URL` env vars read at startup with validation
+  - [ ] All `callMiniMax*` → `callKilo*` renames
+  - [ ] All fetch URLs → `${KILO_BASE_URL}/chat/completions`
+  - [ ] All auth headers → `Bearer ${KILO_API_KEY}`
+  - [ ] All model params → accept `model` argument
+  - [ ] `node --check server.js` exit 0
+
+#### Slice 3.2 — buildVisionMessage helper + call site migration
+
+- **Behaviour:** `buildVisionMessage(imageDataUri, prompt)` exists and constructs correct OpenAI-compatible vision messages. Every vision call site uses it. No inline image-format construction remains.
+- **DoD:**
+  - [ ] `buildVisionMessage` exported from `server.js`
+  - [ ] Helper produces `[{role: "user", content: [{type: "image_url", image_url: {url: "..."}}, {type: "text", text: "..."}]}]`
+  - [ ] All ~15 vision call sites migrated (Stage 1, 6 per-field endpoints, Stage 2 Z-Image, Stage 2 Anima, subject re-analysis, camera-angle re-analysis)
+  - [ ] `node --check server.js` exit 0
+
+#### Slice 3.3 — model selector UI + state + persistence
+
+- **Behaviour:** Model selector dropdown renders above the output-contract selector. Default is MiniMax M3. Selection persists in localStorage and mirrors in URL.
+- **DoD:**
+  - [ ] Dropdown with six options rendered in the UI
+  - [ ] `state.llmModel` initialized from URL, then localStorage, then default
+  - [ ] Changing selection updates `state.llmModel`, localStorage, URL
+  - [ ] Reload preserves selection
+  - [ ] `node --check src/app.js` exit 0
+
+#### Slice 3.4 — wire model param through all endpoints
+
+- **Behaviour:** Every LLM endpoint receives `llmModel` from the frontend and passes it as the `model` parameter to the Kilo Code API. Chat sessions record the LLM model. Response envelope says `provider: 'kilo-code'`.
+- **DoD:**
+  - [ ] All endpoints accept `llmModel` in request body
+  - [ ] Server validates against six allowed model IDs (400 on mismatch)
+  - [ ] Model param threaded to `callKilo*` helpers
+  - [ ] Chat session records LLM model
+  - [ ] Response envelope `provider` field updated
+  - [ ] Manual demo: pick each model, generate, verify it doesn't error
+
+#### Slice 3.5 — tests + code review + docs
+
+- **Behaviour:** Test suite updated for new env vars, helper names, model param validation. CODE-REVIEW-3 written. CONTEXT.md and README.md updated.
+- **DoD:**
+  - [ ] `node tests/run-all.js` — all existing + new tests pass
+  - [ ] `node scripts/session-init.js` — 10/10 V-checks
+  - [ ] `node --check server.js && node --check src/app.js` — exit 0
+  - [ ] `docs/CODE-REVIEW-3-kilo-code-provider.md` verdict: `pass` or `pass+minor`
+  - [ ] `CONTEXT.md` updated (provider, env vars, buildVisionMessage)
+  - [ ] `README.md` updated (env vars)
+
+**Blocked by:** all five sub-slices are sequential. 3.1 → 3.2 → 3.3 → 3.4 → 3.5.
+
+### 15.10 Open Questions
+
+- None. All design decisions resolved at G1.
+
+### 15.11 Glossary point-in-time
+
+These terms either already exist in `CONTEXT.md` or are sharpened by this slice:
+
+- **Kilo AI Gateway** — OpenAI-compatible API gateway at `api.kilo.ai`. Single provider for all LLM calls. Replaces direct MiniMax API integration. *Source: SPEC §15.1; kilo.ai/docs/gateway/api-reference.*
+- **`state.llmModel`** — string enum of six model IDs. Default `'minimax/minimax-m3'`. Persisted in localStorage, mirrored in URL (`?llm=...`), recorded in chat sessions. *Source: SPEC §15.8.*
+- **Model selector** — `<select>` dropdown before the Generate button. Picks the LLM model. Six hardcoded options. **Distinct from the output-contract selector** (Z-Image Turbo / Anima). *Source: SPEC §15.4.1.*
+- **`buildVisionMessage(imageDataUri, prompt)`** — server helper that constructs OpenAI-compatible vision messages with `image_url` content parts. Single source of truth for image format. *Source: SPEC §15.8.*
+- **`callKilo*` helpers** — renamed from `callMiniMax*`. ~15 functions. Each accepts a `model` param and calls Kilo Code `/chat/completions`. *Source: SPEC §15.8.*
+- **`KILO_API_KEY`** — env var for Kilo Code API key (JWT Bearer token). Replaces `MINIMAX_API_KEY`. *Source: SPEC §15.4.1.*
