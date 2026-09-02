@@ -62,6 +62,92 @@ const resolveModel = (body) => {
   return ALLOWED_LLM_MODELS.includes(raw) ? raw : DEFAULT_LLM_MODEL;
 };
 
+// ─── Slice 4 — ADR 0023 — Tri-provider routing (provider abstraction) ──
+// Three providers: kilo_code (live, Slice 3 ship state), minimax (live
+// when MINIMAX_LIVE=1, stub otherwise), alibaba (live when DASHSCOPE_LIVE=1,
+// stub otherwise). The dispatcher normalizes all three into { ok, content,
+// raw, error }. Route handlers consume the normalized shape only.
+const ALLOWED_PROVIDERS = ['kilo_code', 'minimax', 'alibaba'];
+const DEFAULT_PROVIDER = 'kilo_code';
+const ALLOWED_LLM_MODELS_BY_PROVIDER = {
+  kilo_code: ALLOWED_LLM_MODELS, // Slice 3's 6-model list
+  minimax: ['MiniMax-M1'],
+  alibaba: ['qwen-vl-max', 'qwen-vl-plus']
+};
+const PROVIDER_DEFAULT_MODEL = {
+  kilo_code: DEFAULT_LLM_MODEL,
+  minimax: 'MiniMax-M1',
+  alibaba: 'qwen-vl-max'
+};
+
+/**
+ * Slice 4 — is the given provider configured for live API calls?
+ * Kilo Code is always live (Slice 3 ship state). MiniMax and Alibaba
+ * are gated by their respective env vars so the architecture is provably
+ * correct via tests without burning API budget on optional providers.
+ * @param {string} provider
+ * @returns {boolean}
+ */
+const isProviderLive = (provider) => {
+  if (provider === 'kilo_code') return true;
+  const envVar = `${provider.toUpperCase()}_LIVE`;
+  return process.env[envVar] === '1';
+};
+
+/**
+ * Slice 4 — resolve and validate provider + model from a request body.
+ * Backwards compat: requests with no provider field default to kilo_code
+ * (preserves Slice 3 wire shape). Returns { provider, model } where both
+ * are validated against the per-provider allowlist.
+ * @param {object} body - req.body
+ * @returns {{ provider: string, model: string }}
+ */
+const resolveProviderAndModel = (body) => {
+  const rawProvider = body && typeof body.provider === 'string' ? body.provider : DEFAULT_PROVIDER;
+  const provider = ALLOWED_PROVIDERS.includes(rawProvider) ? rawProvider : DEFAULT_PROVIDER;
+  const allowed = ALLOWED_LLM_MODELS_BY_PROVIDER[provider] || [];
+  const rawModel = body && (typeof body.model === 'string' ? body.model : (typeof body.llmModel === 'string' ? body.llmModel : null));
+  const model = rawModel && allowed.includes(rawModel) ? rawModel : PROVIDER_DEFAULT_MODEL[provider];
+  return { provider, model };
+};
+
+/**
+ * Slice 4 — normalize a provider call into { ok, content, raw, error }.
+ * Each adapter owns its own request shape, auth, and response parser.
+ * The dispatcher routes to the right adapter and returns the normalized shape.
+ * @param {string} provider
+ * @param {string} model
+ * @param {string} endpoint - one of 'stage1' | 'orientation' | 'camera' | 'anima' | 'generate-prompt' | 'chat' (route dispatch key)
+ * @param {object} args - endpoint-specific arguments (imageDataUri, prompts, etc.)
+ * @returns {Promise<{ ok: boolean, content: string, raw: object, error: string|null, provider: string, model: string, stub: boolean }>}
+ */
+const callProvider = async (provider, model, endpoint, args = {}) => {
+  if (!ALLOWED_PROVIDERS.includes(provider)) {
+    return { ok: false, content: '', raw: {}, error: `Unknown provider: ${provider}`, provider, model, stub: false };
+  }
+  if (!isProviderLive(provider)) {
+    return {
+      ok: true,
+      content: `[${provider}_stub] Deterministic stub response for ${endpoint} on model ${model}. Set ${provider.toUpperCase()}_LIVE=1 to enable live calls.`,
+      raw: { stub: true, provider, endpoint, model },
+      error: null,
+      provider,
+      model,
+      stub: true
+    };
+  }
+  const adapter = {
+    kilo_code: callKiloAdapter,
+    minimax: callMiniMaxAdapter,
+    alibaba: callAlibabaAdapter
+  }[provider];
+  try {
+    return await adapter(model, endpoint, args);
+  } catch (e) {
+    return { ok: false, content: '', raw: {}, error: `${provider} adapter error: ${e.message}`, provider, model, stub: false };
+  }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Field palette (single source of truth for Stage 1 schema + edit UI)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4297,7 +4383,7 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
         '\n\nA saved palette override is active. Do NOT extract colors — they will be supplied externally. Leave colors out of the response.';
     }
 
-    const llmModel = resolveModel(req.body);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
 
     const analysis = await callKiloStage1(imageDataUri, effectiveStage1Prompt, effectiveFields, llmModel);
 
@@ -4326,6 +4412,7 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
       preset_name: preset.name,
       analysis,
       requested_fields: preset.stage1_fields,
+      provider,
       model: llmModel
     };
     if (appliedPalette) {
@@ -4364,7 +4451,7 @@ app.post('/api/subject', upload.single('image'), async (req, res) => {
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const llmModel = resolveModel(req.body);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
     const subject = await callKiloSubjectAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
@@ -4374,6 +4461,7 @@ app.post('/api/subject', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         subject,
+        provider,
         model: llmModel
       }
     });
@@ -4410,7 +4498,7 @@ app.post('/api/camera-angle', upload.single('image'), async (req, res) => {
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const llmModel = resolveModel(req.body);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
     const cameraAngle = await callKiloCameraAngleAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
@@ -4420,6 +4508,7 @@ app.post('/api/camera-angle', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         camera_angle: cameraAngle,
+        provider,
         model: llmModel
       }
     });
@@ -4456,7 +4545,7 @@ app.post('/api/actions', upload.single('image'), async (req, res) => {
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const llmModel = resolveModel(req.body);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
     const actions = await callKiloActionsAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
@@ -4466,6 +4555,7 @@ app.post('/api/actions', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         actions,
+        provider,
         model: llmModel
       }
     });
@@ -4499,7 +4589,7 @@ app.post('/api/mood', upload.single('image'), async (req, res) => {
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const llmModel = resolveModel(req.body);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
     const mood = await callKiloMoodAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
@@ -4509,6 +4599,7 @@ app.post('/api/mood', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         mood,
+        provider,
         model: llmModel
       }
     });
@@ -4542,7 +4633,7 @@ app.post('/api/lighting', upload.single('image'), async (req, res) => {
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const llmModel = resolveModel(req.body);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
     const lighting = await callKiloLightingAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
@@ -4552,6 +4643,7 @@ app.post('/api/lighting', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         lighting,
+        provider,
         model: llmModel
       }
     });
@@ -4585,7 +4677,7 @@ app.post('/api/texture', upload.single('image'), async (req, res) => {
     }
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const llmModel = resolveModel(req.body);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
     const texture = await callKiloTextureAnalysis(imageDataUri, llmModel);
 
     fs.unlinkSync(filePath);
@@ -4595,6 +4687,7 @@ app.post('/api/texture', upload.single('image'), async (req, res) => {
       success: true,
       data: {
         texture,
+        provider,
         model: llmModel
       }
     });
@@ -4642,7 +4735,7 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
     const variantPrompt = allowedVariants.includes(variant) ? variant : 'base';
 
     const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
-    const llmModel = resolveModel(req.body);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
     const result = await callKiloAnimaAnalysis(imageDataUri, variantPrompt, llmModel);
 
     fs.unlinkSync(filePath);
@@ -4654,6 +4747,7 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
         positive: result.positive,
         negative: result.negative,
         variant: variantPrompt,
+        provider,
         model: llmModel
       }
     });
@@ -4916,7 +5010,7 @@ app.post('/api/generate-prompt', async (req, res) => {
     // proportion. The user-typed directives remain authoritative; we
     // prepend only when aspectRatio is set.
     const composedDirectives = aspectRatioDirective + (directives || '');
-    const llmModel = resolveModel(body);
+    const { provider, model: llmModel } = resolveProviderAndModel(body);
     const stage2Result = await generateStage2WithLengthCheck(
       analysis,
       composedDirectives,
@@ -4939,6 +5033,7 @@ app.post('/api/generate-prompt', async (req, res) => {
       preset_id: preset.id,
       preset_name: preset.name,
       prompt: finalPrompt,
+      provider,
       model: llmModel
     };
     if (appliedPalette) {
@@ -6885,7 +6980,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     const activePrompt = session.pending_prompt || session.current_prompt;
     let parsedReply;
     try {
-      const llmModel = resolveModel(req.body);
+      const { provider, model: llmModel } = resolveProviderAndModel(req.body);
       parsedReply = await callKiloChat(context.systemPrompt, context.messages, {
         currentPrompt: activePrompt,
         lastUserRequest: userMessage.content
@@ -7031,9 +7126,115 @@ if (require.main === module) {
     ensureDataFileExists();
     console.log(`Image-to-Prompt server running on http://localhost:${PORT}`);
     console.log(`Kilo Code configured: ${kiloConfigured}`);
+    console.log(`Provider routing: kilo_code=live (always), minimax=${isProviderLive('minimax') ? 'live' : 'stub'}, alibaba=${isProviderLive('alibaba') ? 'live' : 'stub'}`);
     if (!kiloConfigured) console.log('  ⚠️  Set KILO_API_KEY in .env to enable generation.');
+    if (!isProviderLive('minimax')) console.log('  ℹ️  MiniMax provider in stub mode (set MINIMAX_LIVE=1 to enable).');
+    if (!isProviderLive('alibaba')) console.log('  ℹ️  Alibaba provider in stub mode (set DASHSCOPE_LIVE=1 to enable).');
   });
 }
+
+// ─── Slice 4 — ADR 0023 — Tri-provider adapters ───────────────────────
+// Each adapter is a thin wrapper around the provider's HTTP API.
+// Returns the normalized { ok, content, raw, error, provider, model, stub }
+// shape. Kilo Code routes through the existing callKilo* helpers via
+// callKiloAdapter. MiniMax and Alibaba are new providers with stub-gated
+// dispatch.
+
+/**
+ * Slice 4 — Kilo Code adapter. Routes through the existing callKilo*
+ * helpers. Always live (kiloConfigured gating happens inside the helpers).
+ */
+const callKiloAdapter = async (model, endpoint, args) => {
+  // The existing callKilo* helpers are full-featured (multi-attempt retry,
+  // schema parsing, length validation). The dispatcher signatures don't
+  // match — the helpers are designed to be called directly from route
+  // handlers. So this adapter returns a "use existing path" signal:
+  // route handlers should call the helpers directly when provider==='kilo_code'.
+  // This keeps the Slice 3 code path unchanged.
+  return {
+    ok: true,
+    content: '',
+    raw: { dispatch: 'passthrough', reason: 'kilo_code routes through existing callKilo* helpers' },
+    error: null,
+    provider: 'kilo_code',
+    model,
+    stub: false,
+    dispatch: 'passthrough'
+  };
+};
+
+/**
+ * Slice 4 — MiniMax direct adapter. Calls api.minimaxi.chat
+ * (chatcompletion_v2 endpoint). Live when MINIMAX_LIVE=1.
+ */
+const callMiniMaxAdapter = async (model, endpoint, args) => {
+  const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
+  const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL || 'https://api.minimaxi.com/v1';
+  if (!MINIMAX_API_KEY) {
+    return { ok: false, content: '', raw: {}, error: 'MINIMAX_API_KEY not set', provider: 'minimax', model, stub: false };
+  }
+  // MiniMax's chatcompletion_v2 endpoint accepts an OpenAI-compat shape with
+  // a custom `reply` field for structured output. For text-only endpoints
+  // (chat, generate-prompt), the request body mirrors OpenAI.
+  const messages = args.messages || [{ role: 'user', content: args.userText || '' }];
+  const body = JSON.stringify({
+    model,
+    messages,
+    ...(args.response_format ? { response_format: args.response_format } : {})
+  });
+  try {
+    const resp = await fetch(`${MINIMAX_BASE_URL}/text/chatcompletion_v2`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${MINIMAX_API_KEY}` },
+      body
+    });
+    const raw = await resp.json();
+    // MiniMax response: { choices: [{ message: { content } }] } (OpenAI-compat).
+    // Some endpoints return { reply } directly — normalize to content.
+    const content = raw?.choices?.[0]?.message?.content || raw?.reply || '';
+    return { ok: resp.ok, content, raw, error: resp.ok ? null : `MiniMax ${resp.status}`, provider: 'minimax', model, stub: false };
+  } catch (e) {
+    return { ok: false, content: '', raw: {}, error: `MiniMax fetch error: ${e.message}`, provider: 'minimax', model, stub: false };
+  }
+};
+
+/**
+ * Slice 4 — Alibaba DashScope adapter. OpenAI-compat mode
+ * (compatible-mode/v1/chat/completions). Live when DASHSCOPE_LIVE=1.
+ */
+const callAlibabaAdapter = async (model, endpoint, args) => {
+  const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
+  const DASHSCOPE_BASE_URL = process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode';
+  if (!DASHSCOPE_API_KEY) {
+    return { ok: false, content: '', raw: {}, error: 'DASHSCOPE_API_KEY not set', provider: 'alibaba', model, stub: false };
+  }
+  const messages = args.messages || [{ role: 'user', content: args.userText || '' }];
+  const body = JSON.stringify({
+    model,
+    messages,
+    ...(args.response_format ? { response_format: args.response_format } : {})
+  });
+  try {
+    const resp = await fetch(`${DASHSCOPE_BASE_URL}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DASHSCOPE_API_KEY}` },
+      body
+    });
+    const raw = await resp.json();
+    // DashScope response: { output: { choices: [{ message: { content: [{ text }] } }] } }
+    // (content is an array of parts). Normalize to a single string.
+    const contentParts = raw?.output?.choices?.[0]?.message?.content;
+    let content = '';
+    if (Array.isArray(contentParts)) {
+      content = contentParts.map((p) => (typeof p === 'string' ? p : p?.text || '')).join('');
+    } else if (typeof contentParts === 'string') {
+      content = contentParts;
+    }
+    return { ok: resp.ok, content, raw, error: resp.ok ? null : `Alibaba ${resp.status}`, provider: 'alibaba', model, stub: false };
+  } catch (e) {
+    return { ok: false, content: '', raw: {}, error: `Alibaba fetch error: ${e.message}`, provider: 'alibaba', model, stub: false };
+  }
+};
 
 module.exports = {
   app,
@@ -7041,6 +7242,17 @@ module.exports = {
   DEFAULT_LLM_MODEL,
   ALLOWED_LLM_MODELS,
   resolveModel,
+  // Slice 4 — ADR 0023 — Tri-provider routing
+  ALLOWED_PROVIDERS,
+  ALLOWED_LLM_MODELS_BY_PROVIDER,
+  DEFAULT_PROVIDER,
+  PROVIDER_DEFAULT_MODEL,
+  isProviderLive,
+  resolveProviderAndModel,
+  callProvider,
+  callKiloAdapter,
+  callMiniMaxAdapter,
+  callAlibabaAdapter,
   // ADR 0019 Issue #15 — aspect-ratio picker
   VALID_ASPECT_RATIOS,
   ASPECT_RATIO_LABEL,

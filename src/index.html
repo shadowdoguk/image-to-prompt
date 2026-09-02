@@ -125,6 +125,17 @@
           </div>
 
           <div class="step-actions">
+            <div class="provider-row">
+              <label for="provider-selector" class="label provider-label">
+                Provider
+                <span class="label-hint">— which LLM vendor routes the call</span>
+              </label>
+              <select id="provider-selector" class="select provider-select" aria-label="LLM provider for prompt generation">
+                <option value="kilo_code">Kilo Code (live)</option>
+                <option value="minimax">MiniMax direct (stub)</option>
+                <option value="alibaba">Alibaba DashScope (stub)</option>
+              </select>
+            </div>
             <div class="llm-model-row">
               <label for="llm-model-selector" class="label llm-model-label">
                 LLM model

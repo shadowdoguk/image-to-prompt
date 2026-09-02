@@ -309,3 +309,65 @@ If any of these fail twice, kill the slice per `docs/SPEC.md` §14.4.3.
 10. **Test** that chat sessions survive the `model` → `contract` rename.
 
 If any of these fail twice, kill the slice per `docs/SPEC.md` §15.4.3.
+---
+
+# Slice 4 — Tri-provider routing: risks + pre-commitments
+
+**Date:** 2026-09-03
+**Origin:** `docs/SPEC.md` §16 + `docs/adr/0023-tri-provider-routing.md`
+
+## Top risks (ranked)
+
+### Risk 1 — Three response-shape normalizers to maintain
+**Severity:** MEDIUM
+**Likelihood:** MEDIUM
+**Description:** Each adapter parses its provider's response shape and normalizes into `{ ok, content, raw, error }`. If a provider changes their response format (e.g. Kilo Code adds a wrapper, Alibaba renames `output.choices`), the adapter breaks silently.
+**Mitigation:** Each adapter has a dedicated test that asserts the normalized shape against a canned raw response. If a provider changes shape, the test fails before the route handler runs. Smoke test on every adapter after deploy.
+**Pre-commitment:** if any adapter test fails twice in a row, kill the slice. The provider shape is upstream of the entire app — adapter drift is a server-wide regression.
+
+### Risk 2 — Auth complexity (3 keys, 3 env vars)
+**Severity:** MEDIUM
+**Likelihood:** LOW
+**Description:** Kilo Code, MiniMax, and DashScope each use a different API key. Rotating one without updating its env var causes a silent 401. The user may not realize which provider is failing.
+**Mitigation:** Each provider has its own health check route (`/api/health/providers`) that returns `{ provider: { live: bool, last_error: string|null } }`. The frontend's provider selector shows a per-provider "live ✓" or "auth failed" badge.
+**Pre-commitment:** if auth fails for any provider at deploy time, the deploy is rolled back. Provider auth is a pre-condition for the slice, not a fix-it-later.
+
+### Risk 3 — Stub-vs-live confusion in error messages
+**Severity:** LOW
+**Likelihood:** HIGH
+**Description:** A stub returns `provider_not_live`; a live 401 returns the provider's actual error. The frontend must distinguish. If both are shown as "provider failed", the user can't tell whether to flip the env var or check the API key.
+**Mitigation:** The adapter sets `error.code = 'stub' | 'auth' | 'rate_limit' | 'parse'` explicitly. Frontend renders error messages keyed on `error.code`. Stub mode shows a yellow "stub mode" banner, not a red error.
+**Pre-commitment:** every error path has a user-readable message that names the provider and the actionable next step.
+
+### Risk 4 — Per-provider rate-limit semantics differ
+**Severity:** LOW
+**Likelihood:** MEDIUM
+**Description:** Kilo Code: 429 with `Retry-After`. MiniMax: 429 with custom header. DashScope: 429 with quota reset timestamp. A retry policy that works for one provider may over-retry on another.
+**Mitigation:** Per-provider retry policy in `callProvider`'s `options.retryPolicy`. Default: 1 retry with exponential backoff for `kilo_code`, 0 retries for `minimax`/`alibaba` (per-frontend-driven retry). The chat-recovery fix from Slice 3 (`7a16088`) lives inside `callKiloProvider`, not at the dispatcher level — Kilo Code-specific.
+**Pre-commitment:** rate-limit behavior is documented per provider in ADR 0023 §"Consequences (Negative)".
+
+### Risk 5 — Provider selector UX (URL noise + double state)
+**Severity:** LOW
+**Likelihood:** MEDIUM
+**Description:** Two new state flags (`state.provider`, `state.llmModel`) mean two URL params (`?provider=`, `?llm=`). If the user shares a URL with both, the canonicalization rules must agree (provider `kilo_code` + llm `minimax/minimax-m3` → both params omitted → URL is `/`). If a stale URL has `?provider=minimax&llm=minimax/minimax-m3`, the resolver should pick the MiniMax provider with the (allowed) M3 model.
+**Mitigation:** The resolver treats the two params independently. Cross-validation is a UI concern (the model selector's option list is filtered by the selected provider).
+**Pre-commitment:** URL canonicalization rules are documented in SPEC §16.4 and tested explicitly.
+
+## Pre-commitments (apply to all sub-slices)
+
+1. `node --check server.js` exit 0 after every sub-slice.
+2. `node --check src/app.js` exit 0 after every sub-slice.
+3. `node tests/run-all.js` — 402 + ~28 = ~430 passing after Slice 4.0.
+4. `node scripts/session-init.js` — 10/10 V-checks after Slice 4.0.
+5. **Visual-demo gate** (deferred from Slice 3 closeout) — open the app in a browser, upload an image, switch providers (kilo_code → minimax → alibaba), switch models within each provider, generate, verify response envelope `provider` and `model` fields reflect the selection. Capture screenshots and attach to the PR. This is the G4 step that was skipped for Slice 3 — Slice 4 lands it.
+6. Test that stub-mode responses don't break the chat assistant's `extractChatReply` parser.
+7. Test that switching provider mid-chat-session preserves the session's `provider` + `model` in the chat history.
+
+## Kill criteria
+
+Kill the slice if:
+- A provider adapter can't normalize its provider's response shape within 3 attempts.
+- Any of the three env-var configs fail auth in production after a clean deploy.
+- The frontend provider selector UX confuses a user-reported test session (have a non-developer try it).
+- The visual-demo gate fails twice (a button that doesn't work in the browser is a real bug).
+

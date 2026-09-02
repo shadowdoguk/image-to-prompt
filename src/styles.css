@@ -1455,6 +1455,26 @@ body {
   color: var(--text-muted);
 }
 
+/* ADR 0023 — Slice 4 — Provider selector row (sibling to LLM model selector) */
+.provider-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.provider-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.provider-label .label-hint {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.provider-select {
+  min-width: 200px;
+}
+
 /* ADR 0022 — Kilo Code LLM model selector row */
 .llm-model-row {
   display: flex;

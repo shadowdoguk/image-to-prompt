@@ -8363,14 +8363,30 @@ test('Slice 2.1: SPEC.md §14 + ADR 0021 are in place (pre-conditions for the sl
 
 // ─── Slice 3 — Kilo Code provider migration + model selector (ADR 0022) ───
 
-test('Slice 3.1: no callMiniMax references remain in server.js (ADR 0022 pre-commitment #1)', () => {
+test('Slice 3.1: no direct-minimax function call sites remain in server.js (ADR 0022 pre-commitment #1)', () => {
+  // Slice 3 removed the old direct-MiniMax integration (callMiniMaxXxx,
+  // callMiniMaxYyy). Slice 4 (ADR 0023) re-introduces MiniMax as a
+  // provider via callMiniMaxAdapter — so we assert on the OLD function
+  // shape (callMiniMax followed by uppercase letter, excluding the new
+  // 'Adapter' suffix which is the Slice 4 provider adapter).
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  assertTrue(!/callMiniMax/.test(serverText), 'server.js must have zero callMiniMax references');
+  // Strip the new callMiniMaxAdapter (and similar) so we only check for the OLD shape.
+  const stripped = serverText.replace(/callMiniMaxAdapter/g, '');
+  assertTrue(!/callMiniMax[A-Z]/.test(stripped), 'server.js must have zero direct-minimax function call sites (Slice 3 pre-commitment #1)');
+  assertTrue(/callMiniMaxAdapter/.test(serverText), 'server.js defines callMiniMaxAdapter (Slice 4)');
 });
 
-test('Slice 3.1: no minimaxi.chat references remain in server.js (ADR 0022 pre-commitment #2)', () => {
+test('Slice 3.1: no direct-minimax HTTP URL references remain in server.js (ADR 0022 pre-commitment #2)', () => {
+  // Slice 3 removed the hardcoded api.minimaxi.chat URL. Slice 4
+  // re-introduces MiniMax as a provider with the same URL, but via
+  // a constant (MINIMAX_BASE_URL) rather than hardcoded in fetch calls.
+  // We assert on the latter (hardcoded URL in code), not the former.
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  assertTrue(!/minimaxi\.chat/.test(serverText), 'server.js must have zero minimaxi.chat references');
+  const matches = serverText.match(/minimaxi\.chat/g) || [];
+  // Slice 4 may reference minimaxi.chat in the DEFAULT for MINIMAX_BASE_URL.
+  // Count hardcoded references inside fetch() calls — there should be zero.
+  const fetchUrlMatches = (serverText.match(/fetch\([^)]*minimaxi\.chat[^)]*\)/g) || []).length;
+  assertEqual(fetchUrlMatches, 0, 'server.js must have zero hardcoded minimaxi.chat URLs inside fetch() calls');
 });
 
 test('Slice 3.1: KILO_API_KEY and KILO_BASE_URL are referenced in server.js', () => {
@@ -8508,10 +8524,245 @@ test('Slice 3.5: provider field updated in server.js response envelope', () => {
   assertTrue(!/provider: 'minimax-m3'/.test(serverText), 'provider must not be minimax-m3');
 });
 
-test('Slice 3.5: no MINIMAX_ env var references in server.js', () => {
+test('Slice 3.5: Slice 3 removed the old MINIMAX_ env var; Slice 4 re-introduces them as the MiniMax provider', () => {
+  // Slice 3 ship state (zero MINIMAX_API_KEY refs) is intentionally
+  // broken by Slice 4 — ADR 0023 re-introduces MiniMax as a provider.
+  // The new env vars are MINIMAX_API_KEY + MINIMAX_BASE_URL + the
+  // stub-gating MINIMAX_LIVE. We assert Slice 4 introduced them.
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
-  assertTrue(!/MINIMAX_API_KEY/.test(serverText), 'no MINIMAX_API_KEY refs');
-  assertTrue(!/MINIMAX_BASE_URL/.test(serverText), 'no MINIMAX_BASE_URL refs');
+  assertTrue(/MINIMAX_API_KEY/.test(serverText), 'server.js must reference MINIMAX_API_KEY (Slice 4 provider)');
+  assertTrue(/MINIMAX_BASE_URL/.test(serverText), 'server.js must reference MINIMAX_BASE_URL (Slice 4 provider)');
+  assertTrue(/MINIMAX_LIVE/.test(serverText) || /`\$\{provider\.toUpperCase\(\)\}_LIVE`/.test(serverText),
+    'server.js must define the stub-gating ${PROVIDER}_LIVE env var (Slice 4 pattern)');
+});
+
+// ──────────────────────────────────────────────────────────────────
+// Slice 4 — ADR 0023 — Tri-provider routing (provider abstraction)
+// ──────────────────────────────────────────────────────────────────
+
+test('Slice 4: ALLOWED_PROVIDERS, ALLOWED_LLM_MODELS_BY_PROVIDER, DEFAULT_PROVIDER exported from server.js', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(Array.isArray(server.ALLOWED_PROVIDERS), 'ALLOWED_PROVIDERS is an array');
+  assertEqual(server.ALLOWED_PROVIDERS.length, 3, 'three providers: kilo_code, minimax, alibaba');
+  assertEqual(server.DEFAULT_PROVIDER, 'kilo_code', 'default provider is kilo_code');
+  assertTrue(typeof server.ALLOWED_LLM_MODELS_BY_PROVIDER === 'object', 'models-by-provider object exported');
+  assertEqual(server.ALLOWED_LLM_MODELS_BY_PROVIDER.kilo_code.length, 6, 'kilo_code has Slice 3 6-model list');
+  assertEqual(server.ALLOWED_LLM_MODELS_BY_PROVIDER.minimax[0], 'MiniMax-M1', 'minimax exposes MiniMax-M1');
+  assertTrue(server.ALLOWED_LLM_MODELS_BY_PROVIDER.alibaba.includes('qwen-vl-max'), 'alibaba exposes qwen-vl-max');
+  assertTrue(server.ALLOWED_LLM_MODELS_BY_PROVIDER.alibaba.includes('qwen-vl-plus'), 'alibaba exposes qwen-vl-plus');
+});
+
+test('Slice 4: isProviderLive — Kilo Code is always live; MiniMax/Alibaba gated by env var', () => {
+  const { isProviderLive } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(isProviderLive('kilo_code'), true, 'kilo_code is always live');
+  assertEqual(isProviderLive('minimax'), false, 'minimax is stub by default (no MINIMAX_LIVE env var)');
+  assertEqual(isProviderLive('alibaba'), false, 'alibaba is stub by default (no DASHSCOPE_LIVE env var)');
+  // env var flip
+  process.env.MINIMAX_LIVE = '1';
+  assertEqual(isProviderLive('minimax'), true, 'MINIMAX_LIVE=1 enables minimax');
+  delete process.env.MINIMAX_LIVE;
+  assertEqual(isProviderLive('minimax'), false, 'unset MINIMAX_LIVE disables minimax');
+});
+
+test('Slice 4: resolveProviderAndModel — defaults to kilo_code + default model on missing fields', () => {
+  const { resolveProviderAndModel, PROVIDER_DEFAULT_MODEL } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r1 = resolveProviderAndModel({});
+  assertEqual(r1.provider, 'kilo_code', 'missing provider defaults to kilo_code');
+  assertEqual(r1.model, 'minimax/minimax-m3', 'missing model defaults to per-provider default');
+
+  // Backwards compat: legacy { llmModel } field still works
+  const r2 = resolveProviderAndModel({ llmModel: 'openai/gpt-5.6-luna' });
+  assertEqual(r2.provider, 'kilo_code', 'legacy llmModel defaults to kilo_code');
+  assertEqual(r2.model, 'openai/gpt-5.6-luna', 'legacy llmModel preserved');
+
+  // New { provider, model } shape
+  const r3 = resolveProviderAndModel({ provider: 'minimax', model: 'MiniMax-M1' });
+  assertEqual(r3.provider, 'minimax', 'provider honoured');
+  assertEqual(r3.model, 'MiniMax-M1', 'model honoured for provider');
+
+  // Invalid provider → fallback to default
+  const r4 = resolveProviderAndModel({ provider: 'unknown', model: 'whatever' });
+  assertEqual(r4.provider, 'kilo_code', 'invalid provider falls back to default');
+
+  // Invalid model for provider → fallback to provider default
+  const r5 = resolveProviderAndModel({ provider: 'minimax', model: 'minimax/minimax-m3' });
+  assertEqual(r5.provider, 'minimax', 'provider honoured even when model invalid');
+  assertEqual(r5.model, PROVIDER_DEFAULT_MODEL.minimax, 'model falls back to provider default');
+});
+
+test('Slice 4: callProvider returns stub response when provider not live', async () => {
+  const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = await callProvider('minimax', 'MiniMax-M1', 'stage1', { userText: 'test' });
+  assertEqual(r.ok, true, 'stub returns ok=true');
+  assertEqual(r.provider, 'minimax', 'provider echoed');
+  assertEqual(r.model, 'MiniMax-M1', 'model echoed');
+  assertEqual(r.stub, true, 'stub flag set');
+  assertTrue(r.content.includes('minimax_stub'), 'content names the provider');
+  assertTrue(r.content.includes('MINIMAX_LIVE'), 'content tells user how to enable live');
+});
+
+test('Slice 4: callProvider returns error for unknown provider', async () => {
+  const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = await callProvider('unknown', 'whatever', 'stage1');
+  assertEqual(r.ok, false, 'unknown provider returns ok=false');
+  assertTrue(r.error.includes('Unknown provider'), 'error names the cause');
+  assertEqual(r.provider, 'unknown', 'provider echoed');
+});
+
+test('Slice 4: callProvider for kilo_code returns dispatch=passthrough (existing callKilo* path)', async () => {
+  const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = await callProvider('kilo_code', 'minimax/minimax-m3', 'stage1');
+  assertEqual(r.ok, true, 'kilo_code adapter returns ok=true');
+  assertEqual(r.dispatch, 'passthrough', 'kilo_code routes through existing callKilo* helpers');
+});
+
+test('Slice 4: Three provider adapters exported from server.js', () => {
+  const server = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(typeof server.callKiloAdapter, 'function', 'callKiloAdapter exported');
+  assertEqual(typeof server.callMiniMaxAdapter, 'function', 'callMiniMaxAdapter exported');
+  assertEqual(typeof server.callAlibabaAdapter, 'function', 'callAlibabaAdapter exported');
+});
+
+test('Slice 4: callMiniMaxAdapter requires MINIMAX_API_KEY when live', async () => {
+  // Force live mode
+  process.env.MINIMAX_LIVE = '1';
+  delete process.env.MINIMAX_API_KEY;
+  // callProvider routes to callMiniMaxAdapter
+  const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = await callProvider('minimax', 'MiniMax-M1', 'chat', { userText: 'hi' });
+  assertEqual(r.ok, false, 'no key → ok=false');
+  assertTrue(r.error.includes('MINIMAX_API_KEY not set'), 'error names the missing env var');
+  // clean up
+  delete process.env.MINIMAX_LIVE;
+});
+
+test('Slice 4: callAlibabaAdapter requires DASHSCOPE_API_KEY when live', async () => {
+  // The dispatcher's stub-gate uses ${PROVIDER.toUpperCase()}_LIVE.
+  // For provider 'alibaba' that's ALIBABA_LIVE (not DASHSCOPE_LIVE —
+  // the env var convention is keyed on the provider id, not the
+  // underlying service name).
+  process.env.ALIBABA_LIVE = '1';
+  delete process.env.DASHSCOPE_API_KEY;
+  const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = await callProvider('alibaba', 'qwen-vl-max', 'chat', { userText: 'hi' });
+  assertEqual(r.ok, false, 'no key → ok=false');
+  assertTrue(r.error.includes('DASHSCOPE_API_KEY not set'), 'error names the missing env var');
+  delete process.env.ALIBABA_LIVE;
+});
+
+test('Slice 4: callMiniMaxAdapter normalizes OpenAI-compat + MiniMax { reply } shapes', async () => {
+  process.env.MINIMAX_LIVE = '1';
+  process.env.MINIMAX_API_KEY = 'fake-key-for-test';
+  const realFetch = global.fetch;
+  // Simulate OpenAI-compat response
+  global.fetch = async () => new Response(JSON.stringify({
+    choices: [{ message: { content: 'openai-compat reply' } }]
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r1 = await callProvider('minimax', 'MiniMax-M1', 'chat');
+  assertEqual(r1.ok, true, 'openai-compat shape returns ok=true');
+  assertEqual(r1.content, 'openai-compat reply', 'content extracted from choices[0].message.content');
+
+  // Simulate MiniMax { reply } response
+  global.fetch = async () => new Response(JSON.stringify({
+    reply: 'direct reply'
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  const r2 = await callProvider('minimax', 'MiniMax-M1', 'chat');
+  assertEqual(r2.ok, true, 'MiniMax { reply } shape returns ok=true');
+  assertEqual(r2.content, 'direct reply', 'content extracted from reply field');
+
+  global.fetch = realFetch;
+  delete process.env.MINIMAX_LIVE;
+  delete process.env.MINIMAX_API_KEY;
+});
+
+test('Slice 4: callAlibabaAdapter normalizes output.choices[0].message.content array shape', async () => {
+  process.env.ALIBABA_LIVE = '1';
+  process.env.DASHSCOPE_API_KEY = 'fake-key-for-test';
+  const realFetch = global.fetch;
+  // Simulate DashScope { output: { choices: [{ message: { content: [{ text }] } }] } }
+  global.fetch = async () => new Response(JSON.stringify({
+    output: { choices: [{ message: { content: [{ text: 'qwen-vl-max says hi' }] } }] }
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const r = await callProvider('alibaba', 'qwen-vl-max', 'chat');
+  assertEqual(r.ok, true, 'DashScope shape returns ok=true');
+  assertEqual(r.content, 'qwen-vl-max says hi', 'content extracted from output.choices[0].message.content[0].text');
+
+  global.fetch = realFetch;
+  delete process.env.ALIBABA_LIVE;
+  delete process.env.DASHSCOPE_API_KEY;
+});
+
+test('Slice 4: Frontend src/app.js defines ALLOWED_PROVIDERS + validateProvider', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/ALLOWED_PROVIDERS/.test(appText), 'src/app.js defines ALLOWED_PROVIDERS');
+  assertTrue(/validateProvider/.test(appText), 'src/app.js defines validateProvider');
+  assertTrue(/'kilo_code'/.test(appText) && /'minimax'/.test(appText) && /'alibaba'/.test(appText),
+    'src/app.js lists all three providers');
+});
+
+test('Slice 4: Frontend state.provider default = kilo_code', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Look for the default state initialization block
+  const m = appText.match(/provider:\s*['"]kilo_code['"]/);
+  assertTrue(!!m, 'src/app.js sets state.provider default to kilo_code');
+});
+
+test('Slice 4: Frontend PROVIDER_STORAGE_KEY = i2p.state.provider', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/PROVIDER_STORAGE_KEY\s*=\s*['"]i2p\.state\.provider['"]/.test(appText),
+    'src/app.js defines PROVIDER_STORAGE_KEY = i2p.state.provider');
+});
+
+test('Slice 4: Frontend writeStateToLocalStorage + readStateFromLocalStorage persist provider', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // writeStateToLocalStorage should setItem on PROVIDER_STORAGE_KEY
+  assertTrue(/localStorage\.setItem\(PROVIDER_STORAGE_KEY,\s*state\.provider\)/.test(appText),
+    'writeStateToLocalStorage persists state.provider');
+  // readStateFromLocalStorage should getItem on PROVIDER_STORAGE_KEY
+  assertTrue(/localStorage\.getItem\(PROVIDER_STORAGE_KEY\)/.test(appText),
+    'readStateFromLocalStorage reads state.provider');
+});
+
+test('Slice 4: Frontend URL mirror — ?provider= param in syncStateToURL + readStateFromURL', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/searchParams\.(?:set|delete)\(['"]provider['"]/.test(appText),
+    'syncStateToURL mirrors ?provider=');
+  assertTrue(/url\.searchParams\.get\(['"]provider['"]\)/.test(appText),
+    'readStateFromURL reads ?provider=');
+});
+
+test('Slice 4: Frontend provider selector — renderProviderSelector + change listener', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/renderProviderSelector/.test(appText), 'renderProviderSelector defined');
+  // change listener for provider selector
+  assertTrue(/providerSelector[^]*addEventListener\(['"]change['"]/.test(appText),
+    'change listener on provider selector');
+});
+
+test('Slice 4: Frontend forwards provider on all 4 endpoints', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // FormData paths: /api/analyze + /api/anima
+  const fdProviderMatches = (appText.match(/fd\.append\(['"]provider['"]/g) || []).length;
+  assertTrue(fdProviderMatches >= 2, 'frontend forwards provider on /api/analyze + /api/anima FormData');
+  // JSON paths: /api/generate-prompt + chat messages
+  const jsonProviderMatches = (appText.match(/provider:\s*state\.provider\b/g) || []).length;
+  assertTrue(jsonProviderMatches >= 2, 'frontend forwards provider on /api/generate-prompt + chat messages');
+});
+
+test('Slice 4: Frontend HTML has <select id="provider-selector">', () => {
+  const htmlText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/<select[^>]*id=["']provider-selector["']/.test(htmlText),
+    'index.html has provider-selector <select>');
+  assertTrue(/kilo_code/.test(htmlText) && /minimax/.test(htmlText) && /alibaba/.test(htmlText),
+    'index.html lists all three provider options');
+});
+
+test('Slice 4: Frontend CSS has .provider-* styles', () => {
+  const cssText = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  assertTrue(/\.provider-row/.test(cssText) || /\.provider-label/.test(cssText) || /\.provider-select/.test(cssText),
+    'styles.css defines provider-row / provider-label / provider-select rules');
 });
 
 // ──────────────────────────────────────────────────────────────────

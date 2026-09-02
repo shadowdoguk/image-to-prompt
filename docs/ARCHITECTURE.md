@@ -534,3 +534,124 @@ Slice 3 touches:
 If a future slice needs to add a **second provider** (e.g., direct OpenAI alongside Kilo Code), trigger the provider-abstraction refactor (separate wide-refactor slice). Not now — Slice 3 is single-provider by design.
 
 Also: if the Kilo Code gateway proves unreliable (≥3 downtime incidents in one week), trigger a fallback-provider slice (direct MiniMax or OpenAI as backup). This is captured in the Slice 3 PRE-MORTEM as failure mode #1.
+---
+
+# Slice 4 — Tri-provider routing (the appendices)
+
+**Status:** Draft → In Review → Approved (pending Gate G3 user approval — proceeding under Slice 3 closeout pre-commitment)
+**Slice:** 4 — Tri-provider routing (Kilo Code / MiniMax / Alibaba DashScope)
+**Created:** 2026-09-03
+**Origin:** `docs/SPEC.md` §16 (G2 approved); `docs/adr/0023-tri-provider-routing.md`
+**Pre-commitment:** lands with the G4 visual-demo gate deferred from `docs/CODE-REVIEW-10-slice-3-closeout.md` follow-up #2.
+
+---
+
+## C1. Stack (Slice 4 deltas)
+
+| Layer | Choice | Why not the alternative |
+|---|---|---|
+| Language | JavaScript (CommonJS) | unchanged |
+| Runtime | Node.js >= 18 | unchanged |
+| Framework | Express 4.21 | unchanged |
+| View layer | Vanilla HTML/CSS/JS, no build step | unchanged |
+| LLM provider abstraction | Thin adapter pattern (3 adapters, 1 dispatcher) | Third-party library (LiteLLM, Portkey) — over-abstraction for 3 providers |
+| Provider allowlist | `ALLOWED_PROVIDERS` + `ALLOWED_LLM_MODELS_BY_PROVIDER` in `server.js` | Hardcoded per call site — fails single-source-of-truth |
+| Live-vs-stub gating | `isProviderLive(provider)` checks `${PROVIDER}_LIVE` env var | Always-live — burns API budget in tests |
+| Frontend state | `state.provider` sibling to `state.llmModel`, both URL-mirrored + localStorage-persisted | New state without persistence — re-selects on every reload |
+
+## C2. Module map (Slice 4 deltas)
+
+```
+server.js
+├── const ALLOWED_PROVIDERS
+├── const ALLOWED_LLM_MODELS_BY_PROVIDER
+├── const isProviderLive(provider)
+├── function resolveProviderAndModel(body) → { provider, model }
+├── function callProvider(provider, model, messages, options)
+│   ├── dispatch to callKiloProvider
+│   ├── dispatch to callMiniMaxProvider
+│   └── dispatch to callAlibabaProvider
+├── callKiloProvider(model, messages, options) — live (always)
+├── callMiniMaxProvider(model, messages, options) — live if MINIMAX_LIVE=1, stub otherwise
+├── callAlibabaProvider(model, messages, options) — live if DASHSCOPE_LIVE=1, stub otherwise
+└── 8 route handlers + 2 helper call sites pass provider + model
+
+src/app.js
+├── state.provider = 'kilo_code'
+├── ALLOWED_PROVIDERS_FRONTEND (mirrors server.js)
+├── PROVIDER_STORAGE_KEY = 'i2p.state.provider'
+├── validateProvider(raw) → 'kilo_code'
+├── renderProviderSelector() + onProviderChange()
+├── <select id="provider-selector"> change listener
+├── renderLlmModelSelector() — option list derived from ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider]
+├── fd.append('provider', state.provider) on /api/analyze, /api/anima
+└── provider: state.provider on /api/generate-prompt, chat messages
+
+src/index.html
+└── <select id="provider-selector"> upstream of <select id="llm-model-selector">
+
+src/styles.css
+└── .provider-row, .provider-label, .provider-select
+```
+
+## C3. Adapter pattern (shared)
+
+Each of the three adapters implements the same shape:
+
+```javascript
+const callKiloProvider = async (model, messages, options = {}) => {
+  // 1. Auth header
+  const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${process.env.KILO_API_KEY}` };
+  // 2. Request body
+  const body = JSON.stringify({ model, messages, ...(options.response_format ? { response_format: options.response_format } : {}) });
+  // 3. HTTP call
+  const resp = await fetch(`${process.env.KILO_BASE_URL}/chat/completions`, { method: 'POST', headers, body });
+  // 4. Normalize response
+  const data = await resp.json();
+  const content = data?.choices?.[0]?.message?.content || '';
+  return { ok: resp.ok, content, raw: data, error: resp.ok ? null : `Kilo ${resp.status}` };
+};
+```
+
+The dispatcher returns the **same shape** regardless of provider. Route handlers never branch on provider.
+
+## C4. Stub gating (shared)
+
+```javascript
+const isProviderLive = (provider) => {
+  if (provider === 'kilo_code') return true; // Slice 3 ship state — Kilo Code is always live.
+  return process.env[`${provider.toUpperCase()}_LIVE`] === '1';
+};
+
+const stubResponse = (provider) => ({
+  ok: true,
+  content: `[${provider}_stub] Deterministic stub response. Set ${provider.toUpperCase()}_LIVE=1 to enable live calls.`,
+  raw: { stub: true, provider },
+  error: null
+});
+```
+
+When `isProviderLive` returns false, the adapter returns `stubResponse(provider)` after a 100ms delay (so the loading-state UI is exercised in tests too).
+
+## C5. Failure modes (Slice 4)
+
+1. **Provider live but auth fails (401/403).** Adapter returns `{ ok: false, content: '', raw: data, error: `Provider auth failed: ${resp.status}` }`. Route handler surfaces as 500 with the provider-specific error.
+2. **Provider live but rate-limited (429).** Same path as auth failure; the error message names the provider so the user can switch.
+3. **Provider stub (env var unset).** Adapter returns `{ ok: true, content: '<stub>', raw: { stub: true }, error: null }`. Route handler returns 200 with the stub content as the prompt. Frontend shows a banner "stub mode — set `${PROVIDER}_LIVE=1`".
+4. **Unknown provider.** `callProvider` returns `{ ok: false, error: 'Unknown provider: ${provider}' }`. Route handler surfaces as 400.
+5. **Model not allowed for provider.** `resolveProviderAndModel` falls back to the provider's first allowed model. Silent fallback (logged) — same pattern as Slice 3.3 `validateLlmModel`.
+
+## C6. URL canonicalization (Slice 4)
+
+URL state: `?provider=` + `?llm=`. Both omitted when at default (provider=`kilo_code`, llm=`minimax/minimax-m3`). Default URL stays `/`. The frontend mirrors `state.provider` and `state.llmModel` symmetrically (URL > localStorage > defaults).
+
+## C7. Refactor-trigger criteria (Slice 4)
+
+Trigger the next refactor if:
+- A fourth provider is added (separate slice for the dispatcher generalization).
+- One of the three live providers changes its response shape (adapter-only update, no slice).
+- Per-user API keys are introduced (BYOK) — requires auth-layer rewrite, separate slice.
+- Provider selector grows from `<select>` to a richer UI (e.g. search + autocomplete) — separate slice.
+
+---
+

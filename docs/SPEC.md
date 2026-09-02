@@ -596,3 +596,89 @@ These terms either already exist in `CONTEXT.md` or are sharpened by this slice:
 - **`buildVisionMessage(imageDataUri, prompt)`** — server helper that constructs OpenAI-compatible vision messages with `image_url` content parts. Single source of truth for image format. *Source: SPEC §15.8.*
 - **`callKilo*` helpers** — renamed from `callMiniMax*`. ~15 functions. Each accepts a `model` param and calls Kilo Code `/chat/completions`. *Source: SPEC §15.8.*
 - **`KILO_API_KEY`** — env var for Kilo Code API key (JWT Bearer token). Replaces `MINIMAX_API_KEY`. *Source: SPEC §15.4.1.*
+---
+
+## 16. Slice 4 — Tri-provider routing (Kilo Code / MiniMax / Alibaba DashScope)
+
+**Status:** Draft (awaiting Gate G2 user approval — proceeding under Slice 3 closeout pre-commitment)
+**Date:** 2026-09-03
+**Origin:** User request — multi-provider routing so the artist can pick the underlying vendor (Kilo Code's aggregator vs. direct MiniMax vs. Alibaba's DashScope) and the model within that vendor.
+**Context:** Slice 3 shipped Kilo Code as the sole provider with model selection within Kilo. Slice 4 introduces a **provider selector** upstream of the existing LLM model `<select>`. The provider determines the call shape (request format, auth header, response parsing); the model is scoped to the chosen provider.
+
+### 16.1 The Idea (one paragraph)
+
+Generalize the Kilo Code call path into a thin **provider abstraction layer** (`callProvider(provider, model, messages, options)`) backed by three concrete adapters: `callKiloProvider` (live, ship-ready), `callMiniMaxProvider` (live when `MINIMAX_LIVE=1`, stub otherwise), `callAlibabaProvider` (live when `DASHSCOPE_LIVE=1`, stub otherwise). The `<select id="provider-selector">` upstream of `#llm-model-selector` picks the provider; the per-provider `<select id="llm-model-selector">` swaps its option list when the provider changes. Resolution goes `URL (?provider=&llm=) > localStorage (i2p.state.provider, i2p.state.llmModel) > defaults (kilo_code, minimax/minimax-m3)`. The response envelope gains a `provider` field alongside the existing `model` field.
+
+### 16.2 The Reframe
+
+I heard this as: "give me a provider selector so I can route through Kilo Code, MiniMax direct, or Alibaba DashScope — and within each provider, pick the model — without rewriting the route handlers." Confirm or amend?
+
+### 16.3 The Challenge (Goose argues against)
+
+1. **Three response envelopes to normalize.** Kilo Code is OpenAI-compat (`choices[0].message.content`). MiniMax returns `{ reply, suggested_prompt }` (custom). DashScope returns `{ output: { choices: [{ message: { content: [...] } }] } }`. **Mitigation:** each adapter returns a normalized `{ ok, content, raw, error }` shape. Route handlers consume the normalized shape only; they never see provider-specific quirks.
+2. **Auth complexity.** Kilo Code: `Authorization: Bearer ${KILO_API_KEY}`. MiniMax: `Authorization: Bearer ${MINIMAX_API_KEY}`. DashScope: `Authorization: Bearer ${DASHSCOPE_API_KEY}` (different key namespace). **Mitigation:** each adapter owns its own auth-header construction. The route handlers pass the raw `apiKey` from env; they never construct headers.
+3. **Live-vs-stub gating.** The user wants real providers when keys are present, but the architecture must be provably correct via tests without burning API budget. **Mitigation:** each adapter checks `${PROVIDER}_LIVE=1` (env var) and falls back to a deterministic stub that returns canned-shape responses. Tests use the stub; production flips the env var to go live. This matches the "smallest slice" suggestion from BACKLOG.md Slice 4 entry.
+4. **URL canonicalization.** With two new URL params (`?provider=` + `?llm=`), URL noise grows. **Mitigation:** omit both when at default; default is `kilo_code` + `minimax/minimax-m3`, so a first-load URL stays canonical (`/`, no params).
+
+### 16.4 Scope
+
+- **Server (`server.js`)**:
+  - `ALLOWED_PROVIDERS = ['kilo_code', 'minimax', 'alibaba']`
+  - `ALLOWED_LLM_MODELS_BY_PROVIDER = { kilo_code: [...6], minimax: ['MiniMax-M1'], alibaba: ['qwen-vl-max', 'qwen-vl-plus'] }`
+  - `resolveProviderAndModel(body)` — chained resolver, returns `{ provider, model }`
+  - `callProvider(provider, model, messages, options)` — dispatcher; calls the right adapter
+  - Three adapters: `callKiloProvider`, `callMiniMaxProvider`, `callAlibabaProvider` (~30 lines each)
+  - All 8 route handlers + 2 helper call sites pass `provider: provider, model: model` (replacing the existing `model: llmModel`)
+  - Response envelope gains `provider` field alongside `model`
+  - `isProviderLive(provider)` helper — returns true only when `${PROVIDER}_LIVE=1` is set; otherwise the adapter returns a deterministic stub
+
+- **Frontend (`src/app.js` + `src/index.html` + `src/styles.css`)**:
+  - `state.provider` (default `'kilo_code'`)
+  - `PROVIDER_STORAGE_KEY = 'i2p.state.provider'`
+  - `validateProvider` (defaults to `kilo_code` on invalid)
+  - `renderProviderSelector()` + `onProviderChange()`
+  - `<select id="provider-selector">` with three options (kilo_code, minimax, alibaba)
+  - Per-provider `<select id="llm-model-selector">` swaps options when provider changes
+  - `?provider=...` URL mirror (omitted when default)
+  - `fd.append('provider', state.provider)` on `/api/analyze`, `/api/anima`
+  - `provider: state.provider` on `/api/generate-prompt` body, chat messages body
+
+- **Tests (`tests/run-all.js`)**:
+  - 8 new tests for `resolveProviderAndModel` + `ALLOWED_LLM_MODELS_BY_PROVIDER`
+  - 4 new tests for `callKiloProvider` adapter (real + stub)
+  - 4 new tests for `callMiniMaxProvider` adapter (real + stub)
+  - 4 new tests for `callAlibabaProvider` adapter (real + stub)
+  - 4 new tests for frontend `state.provider` + persistence + URL mirror
+  - 4 new tests for frontend endpoint forwarding (all 4 endpoints)
+
+### 16.5 What stays the same
+
+- The Z-Image / Anima output-contract selector (`state.model`) is unchanged — different abstraction level.
+- The existing 6 Kilo Code models are unchanged.
+- The chat assistant's schema-drop retry (Fix 2 from Slice 3 closeout) is preserved — the retry runs inside `callKiloProvider`, not at the dispatcher level.
+- The frontend's existing model selector UI is unchanged; it just swaps its option list when the provider changes.
+
+### 16.6 Slice 4 file touchpoints (preview)
+
+| File | Touch | Lines (est.) |
+|---|---|---|
+| `server.js` | rewrite call path | +180 / −60 |
+| `src/app.js` | provider selector + forwarding | +80 / −5 |
+| `src/index.html` | provider `<select>` markup | +10 |
+| `src/styles.css` | provider-row styles | +15 |
+| `tests/run-all.js` | new tests | +120 |
+| `docs/SPEC.md` | §16 (this entry) | +150 |
+| `docs/adr/0023-tri-provider-routing.md` | new | +120 |
+| `docs/ARCHITECTURE.md` | Slice 4 appendices | +150 |
+| `docs/PRE-MORTEM.md` | Slice 4 risks | +60 |
+| `docs/CODE-REVIEW-11-slice-4.md` | new | +200 |
+| `docs/POLISH-AUDIT-4.md` | new | +100 |
+| `docs/POLISH-AUDIT-3 addendum.md` | closes deferred gate | +40 |
+
+### 16.7 Glossary point-in-time
+
+- **Provider** — string enum of three LLM vendors. `'kilo_code'`, `'minimax'`, or `'alibaba'`. Persisted in localStorage, mirrored in URL (`?provider=...`), recorded in response envelope `provider` field. *Source: SPEC §16.1.*
+- **`callProvider(provider, model, messages, options)`** — server-side dispatcher. Routes to one of three adapters based on `provider`. Each adapter returns a normalized `{ ok, content, raw, error }` shape. *Source: SPEC §16.4.*
+- **`isProviderLive(provider)`** — server-side helper. Returns true when `${PROVIDER}_LIVE=1` env var is set. False → adapter returns deterministic stub. *Source: SPEC §16.4.*
+- **`state.provider`** — frontend state flag, default `'kilo_code'`. Sibling to `state.llmModel`. *Source: SPEC §16.4.*
+

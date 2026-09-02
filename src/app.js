@@ -62,7 +62,14 @@
     // /api/analyze, /api/generate-prompt, /api/anima, and chat
     // messages; the server then routes the call through the
     // configured ALLOWED_LLM_MODELS whitelist (server.js).
-    llmModel: 'minimax/minimax-m3'
+    llmModel: 'minimax/minimax-m3',
+    // Slice 4 — ADR 0023 — Provider picker (Kilo Code / MiniMax / Alibaba).
+    // Sibling to llmModel. Determines which adapter the server uses
+    // (callKiloAdapter / callMiniMaxAdapter / callAlibabaAdapter).
+    // Persisted (localStorage) and mirrored in the URL (?provider=...).
+    // Forwarded alongside llmModel on all 4 endpoints. Defaults to
+    // 'kilo_code' so first-load users land on the Slice 3 ship state.
+    provider: 'kilo_code'
   };
 
   // ADR 0019 Issue #15 — count words in the current prompt and toggle the
@@ -111,6 +118,7 @@
     aspectRatioSelect: $('aspect-ratio-select'),
     modelSelector: $('model-selector'),  // Slice 2.1 — ADR 0021 — pre-Generate model picker
     llmModelSelector: $('llm-model-selector'),  // Slice 3.3 — ADR 0022 — Kilo Code LLM model picker
+    providerSelector: $('provider-selector'),    // Slice 4 — ADR 0023 — Provider picker
 
     resultSection: $('step-result'),
     resultPrompt: $('result-prompt'),
@@ -1156,6 +1164,9 @@
     // Slice 3.4 — ADR 0022 — forward the LLM model so the server
     // routes /api/analyze through the user's chosen model.
     fd.append('llmModel', state.llmModel);
+    // Slice 4 — ADR 0023 — forward the provider so the server
+    // dispatches to the right adapter (kilo_code / minimax / alibaba).
+    fd.append('provider', state.provider);
 
     try {
       const data = await apiCall('/api/analyze', { method: 'POST', body: fd });
@@ -1729,7 +1740,10 @@
           // chosen model. The server validates against
           // ALLOWED_LLM_MODELS; anything not on the whitelist
           // falls back to the default on the server side too.
-          llmModel: state.llmModel
+          llmModel: state.llmModel,
+          // Slice 4 — ADR 0023 — forward the provider so the
+          // server dispatches to the right adapter.
+          provider: state.provider
         })
       });
       state.finalPrompt = data.prompt;
@@ -1780,6 +1794,9 @@
       // Slice 3.4 — ADR 0022 — forward the LLM model so the server
       // routes /api/anima through the user's chosen model.
       fd.append('llmModel', state.llmModel);
+      // Slice 4 — ADR 0023 — forward the provider so the server
+      // dispatches to the right adapter.
+      fd.append('provider', state.provider);
       const data = await apiCall('/api/anima', { method: 'POST', body: fd });
       state.animaResult = {
         positive: data.positive,
@@ -1964,11 +1981,30 @@
     return ALLOWED_LLM_MODELS.includes(raw) ? raw : 'minimax/minimax-m3';
   };
 
+  // ─── Slice 4 — ADR 0023 — Provider picker (Kilo Code / MiniMax / Alibaba) ──
+  // Mirrors server.js ALLOWED_PROVIDERS + ALLOWED_LLM_MODELS_BY_PROVIDER.
+  // The provider-selector <select> swaps the options of #llm-model-selector
+  // when the provider changes (per-provider model lists). The selected
+  // provider is forwarded alongside llmModel on all 4 endpoints so the
+  // server's resolveProviderAndModel can dispatch to the right adapter.
+  const ALLOWED_PROVIDERS = ['kilo_code', 'minimax', 'alibaba'];
+  const ALLOWED_LLM_MODELS_BY_PROVIDER = {
+    kilo_code: ['minimax/minimax-m3', 'openai/gpt-5.6-luna', 'google/gemini-3.1-pro-preview', 'google/gemini-3.5-flash', 'nvidia/nemotron-3-ultra-550b-a55b', 'x-ai/grok-4.3'],
+    minimax: ['MiniMax-M1'],
+    alibaba: ['qwen-vl-max', 'qwen-vl-plus']
+  };
+  const PROVIDER_STORAGE_KEY = 'i2p.state.provider';
+
+  const validateProvider = (raw) => {
+    return ALLOWED_PROVIDERS.includes(raw) ? raw : 'kilo_code';
+  };
+
   const writeStateToLocalStorage = () => {
     try {
       localStorage.setItem(MODEL_STORAGE_KEY, state.model);
       localStorage.setItem(VARIANT_STORAGE_KEY, state.animaVariant);
       localStorage.setItem(LLM_MODEL_STORAGE_KEY, state.llmModel);
+      localStorage.setItem(PROVIDER_STORAGE_KEY, state.provider);
     } catch (_) {
       // localStorage may be unavailable (private mode, quota, etc.). The
       // app continues with in-memory state. Not a user-visible error.
@@ -1980,9 +2016,11 @@
       const m = localStorage.getItem(MODEL_STORAGE_KEY);
       const v = localStorage.getItem(VARIANT_STORAGE_KEY);
       const l = localStorage.getItem(LLM_MODEL_STORAGE_KEY);
+      const p = localStorage.getItem(PROVIDER_STORAGE_KEY);
       if (m !== null) state.model = validateModel(m);
       if (v !== null) state.animaVariant = validateVariant(v);
       if (l !== null) state.llmModel = validateLlmModel(l);
+      if (p !== null) state.provider = validateProvider(p);
     } catch (_) {
       // Same as above — silent fallback to defaults.
     }
@@ -2010,6 +2048,14 @@
       } else {
         url.searchParams.set('llm', state.llmModel);
       }
+      // Slice 4 — ADR 0023 — mirror the provider in ?provider=...
+      // Sibling to the ?llm= mirror. Omitted when default so a
+      // first-load URL stays canonical (/, no params).
+      if (state.provider === 'kilo_code') {
+        url.searchParams.delete('provider');
+      } else {
+        url.searchParams.set('provider', state.provider);
+      }
       window.history.replaceState(null, '', url.toString());
     } catch (_) {
       // history.replaceState / URL parsing may fail; the in-memory state
@@ -2023,9 +2069,11 @@
       const m = url.searchParams.get('model');
       const v = url.searchParams.get('variant');
       const l = url.searchParams.get('llm');
+      const p = url.searchParams.get('provider');
       if (m !== null) state.model = validateModel(m);
       if (v !== null) state.animaVariant = validateVariant(v);
       if (l !== null) state.llmModel = validateLlmModel(l);
+      if (p !== null) state.provider = validateProvider(p);
     } catch (_) {
       // Silently fall back to defaults.
     }
@@ -2099,10 +2147,60 @@
     });
   }
 
+  // ─── Slice 4 — ADR 0023 — Provider selector (native <select>) ─────────
+  // Sibling to the LLM model selector. Picks the underlying vendor
+  // (kilo_code / minimax / alibaba). When the provider changes, the
+  // LLM model <select>'s option list is rebuilt from
+  // ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider] — the previously
+  // selected model is preserved if it's valid for the new provider,
+  // otherwise it falls back to the new provider's first allowed model.
+  const renderProviderSelector = () => {
+    if (!dom.providerSelector) return;
+    dom.providerSelector.value = validateProvider(state.provider);
+  };
+
+  const onProviderChange = (nextProvider) => {
+    const validated = validateProvider(nextProvider);
+    if (validated === state.provider) return;
+    const prevProvider = state.provider;
+    state.provider = validated;
+    // Rebuild the model <select>'s option list for the new provider.
+    const allowedModels = ALLOWED_LLM_MODELS_BY_PROVIDER[validated] || [];
+    if (allowedModels.length > 0 && dom.llmModelSelector) {
+      // Wipe existing options and rebuild from the per-provider list.
+      dom.llmModelSelector.innerHTML = '';
+      for (const modelId of allowedModels) {
+        const opt = document.createElement('option');
+        opt.value = modelId;
+        opt.textContent = modelId;
+        dom.llmModelSelector.appendChild(opt);
+      }
+      // If the old model isn't valid for the new provider, fall back
+      // to the new provider's first allowed model.
+      if (!allowedModels.includes(state.llmModel)) state.llmModel = allowedModels[0];
+    }
+    writeStateToLocalStorage();
+    syncStateToURL();
+    renderProviderSelector();
+    renderLlmModelSelector();
+    // Surface a one-line notice if we silently switched providers
+    // (e.g. localStorage had 'minimax' but server has it as stub).
+    if (prevProvider !== validated) {
+      console.log(`[provider] switched ${prevProvider} → ${validated}`);
+    }
+  };
+
+  if (dom.providerSelector) {
+    dom.providerSelector.addEventListener('change', () => {
+      onProviderChange(dom.providerSelector.value);
+    });
+  }
+
   // ─── Slice 3.3 — ADR 0022 — LLM model selector (native <select>) ──
   // Renders by reflecting state.llmModel onto the <select>'s value;
-  // the 6 <option> elements are static in index.html so we only need
-  // to set the selected option. Falls back silently if the cached
+  // the <option> elements are static in index.html for the default
+  // provider (kilo_code) and rebuilt dynamically by onProviderChange
+  // when the provider changes. Falls back silently if the cached
   // value isn't in the whitelist (the default then re-asserts itself
   // via validateLlmModel on next read).
   const renderLlmModelSelector = () => {
@@ -5022,7 +5120,8 @@
         headers: { 'Content-Type': 'application/json' },
         // Slice 3.4 — ADR 0022 — forward the LLM model so the server
         // routes the chat reply through the user's chosen model.
-        body: JSON.stringify({ content: text, llmModel: state.llmModel })
+        // Slice 4 — ADR 0023 — forward the provider too.
+        body: JSON.stringify({ content: text, llmModel: state.llmModel, provider: state.provider })
       });
       const prevSession = state.chatSessions.find((s) => s.id === updated.id);
       const lastMsg = Array.isArray(updated.messages) && updated.messages.length > 0
@@ -5311,6 +5410,10 @@
     // any UI is rendered. State precedence: URL > localStorage > defaults.
     restoreStateFromUrlOrStorage();
     renderModelSelector();
+    // Slice 4 — ADR 0023 — render the provider <select> against the
+    // resolved state.provider. Call BEFORE renderLlmModelSelector so
+    // the model list rebuilds against the right provider on first load.
+    renderProviderSelector();
     // Slice 3.3 — ADR 0022 — render the LLM model <select> against the
     // resolved state.llmModel (URL > localStorage > default). Same
     // restoration pass, mirrors the model picker above.
