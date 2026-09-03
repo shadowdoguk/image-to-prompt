@@ -4,815 +4,985 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Image-to-Prompt Generator</title>
+  <meta name="description" content="Two-stage pipeline that turns an uploaded image into a refined, editable AI image-generation prompt — with presets, palettes, directives, chat refinement, and provider key management.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%233fb6c8' d='M12 2l8 10-8 10L4 12z'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main class="container">
-    <header class="header">
-      <h1>Image-to-Prompt Generator</h1>
-      <p class="subtitle">Two-stage pipeline: analyze an image with a custom preset, edit the result, then synthesize a refined prompt.</p>
-    </header>
+  <a class="skip-link" href="#view-root">Skip to content</a>
 
-    <!-- ─── Step 1: Preset ─────────────────────────────────────────────── -->
-    <section class="step" id="step-preset" aria-label="Step 1: Choose a preset">
-      <header class="step-header">
-        <span class="step-number">1</span>
-        <h2 class="step-title">Choose a preset</h2>
-      </header>
-      <div class="step-body">
-        <div class="palette-picker-row">
-          <label for="palette-select" class="label">Saved palette (optional)</label>
-          <div class="palette-picker-controls">
-            <select id="palette-select" class="select" aria-label="Use saved palette">
-              <option value="">— Auto-analyze colors —</option>
-            </select>
-          </div>
-          <div class="palette-picker-actions">
-            <button
-              type="button"
-              id="palette-picker-edit-btn"
-              class="btn-secondary"
-              aria-label="Edit or manage saved color palettes"
-            >Manage palettes…</button>
-          </div>
-          <p id="palette-picker-hint" class="palette-picker-hint" hidden></p>
+  <!-- ─── App shell (UI-R1 — spec §3.2) ─────────────────────────────── -->
+  <header class="app-header">
+    <div class="app-header__inner">
+      <a class="wordmark" href="#/create">
+        <span class="wordmark__glyph" aria-hidden="true">◆</span>
+        <span class="wordmark__text">Image-to-Prompt</span>
+      </a>
+      <nav class="primary-nav" aria-label="Primary">
+        <div role="tablist" aria-label="Views" class="nav-tablist" id="nav-tablist">
+          <a role="tab" id="nav-create" class="nav-link" href="#/create" aria-controls="view-create" tabindex="0">Create</a>
+          <a role="tab" id="nav-library" class="nav-link" href="#/library" aria-controls="view-library" tabindex="-1">Library</a>
+          <a role="tab" id="nav-chat" class="nav-link" href="#/chat" aria-controls="view-chat" tabindex="-1">Chat</a>
+          <a role="tab" id="nav-providers" class="nav-link" href="#/providers" aria-controls="view-providers" tabindex="-1">Providers &amp; keys</a>
+          <a role="tab" id="nav-settings" class="nav-link" href="#/settings" aria-controls="view-settings" tabindex="-1">Settings</a>
         </div>
-
-        <div class="preset-controls">
-          <select id="preset-select" class="select" aria-label="Select preset">
-            <option value="">— Select a preset —</option>
-          </select>
-          <div class="preset-actions">
-            <button type="button" id="preset-new-btn" class="btn-secondary">+ New</button>
-            <button type="button" id="preset-edit-btn" class="btn-secondary" disabled>Edit</button>
-            <button type="button" id="preset-export-btn" class="btn-secondary" disabled>Export</button>
-            <button type="button" id="preset-import-btn" class="btn-secondary">Import</button>
-            <input type="file" id="preset-import-input" accept=".json,application/json" hidden>
-          </div>
-        </div>
-        <div id="preset-description" class="preset-description" hidden></div>
-      </div>
-    </section>
-
-    <!-- ─── Step 2: Upload ─────────────────────────────────────────────── -->
-    <section class="step" id="step-upload" aria-label="Step 2: Upload image">
-      <header class="step-header">
-        <span class="step-number">2</span>
-        <h2 class="step-title">Upload image</h2>
-      </header>
-      <div class="step-body">
-        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Upload image by clicking or dragging and dropping">
-          <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden>
-          <div class="dropzone-content">
-            <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="17 8 12 3 7 8"/>
-              <line x1="12" y1="3" x2="12" y2="15"/>
-            </svg>
-            <p class="dropzone-text">Drag &amp; drop an image here</p>
-            <p class="dropzone-subtext">or click to browse</p>
-            <p class="dropzone-formats">JPG, PNG, WebP • up to 10MB</p>
-          </div>
-          <div id="preview-container" class="preview-container" hidden>
-            <img id="preview-image" class="preview-image" alt="Uploaded image preview">
-            <button type="button" id="remove-image-btn" class="btn-remove" aria-label="Remove uploaded image">×</button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ─── Step 3: Analyze + Edit ─────────────────────────────────────── -->
-    <section class="step" id="step-analyze" aria-label="Step 3: Analyze and edit">
-      <header class="step-header">
-        <span class="step-number">3</span>
-        <h2 class="step-title">Analyze &amp; edit</h2>
-      </header>
-      <div class="step-body">
-        <button type="button" id="analyze-btn" class="btn-primary" disabled>
-          <span class="btn-text">Analyze image</span>
-          <span class="btn-spinner" hidden aria-hidden="true"></span>
-        </button>
-
-        <div id="analysis-editor" class="analysis-editor" hidden>
-          <p class="analysis-hint">Stage 1 returned the structured analysis below. Edit any field, then proceed.</p>
-          <div id="analysis-fields" class="analysis-fields"></div>
-        </div>
-
-        <div class="directives-section">
-          <label for="directives-input" class="label">Directives (optional)</label>
-          <p class="directives-hint">Free-form instructions passed to Stage 2. Examples: "add a punchy red accent in the upper-right", "make it more dramatic", "use shorter sentences".</p>
-          <textarea
-            id="directives-input"
-            class="textarea"
-            rows="3"
-            maxlength="1000"
-            placeholder="Add any specific guidance for the final prompt…"
-          ></textarea>
-          <span id="directives-count" class="char-count">0 / 1000</span>
-
-          <div class="directives-actions">
-            <p class="directives-actions__hint">Save the current text as a reusable directive, or apply a saved one into the box above.</p>
-            <div class="directives-actions__row">
-              <select id="directives-select" class="select" aria-label="Choose a saved directive to apply">
-                <option value="">— Choose a saved directive —</option>
-              </select>
-              <button type="button" id="directives-apply-btn" class="btn-secondary">Apply</button>
-            </div>
-            <div class="directives-actions__row">
-              <button type="button" id="directives-save-btn" class="btn-secondary">Save directive…</button>
-              <button type="button" id="directives-manage-btn" class="btn-secondary">Manage directives…</button>
-            </div>
-          </div>
-
-          <div class="step-actions">
-            <div class="provider-row">
-              <label for="provider-selector" class="label provider-label">
-                Provider
-                <span class="label-hint">— which LLM vendor routes the call</span>
-              </label>
-              <select id="provider-selector" class="select provider-select" aria-label="LLM provider for prompt generation">
-                <option value="kilo_code">Kilo Code (live)</option>
-                <option value="minimax">MiniMax direct (stub)</option>
-                <option value="alibaba">Alibaba DashScope (stub)</option>
-              </select>
-            </div>
-            <div class="llm-model-row">
-              <label for="llm-model-selector" class="label llm-model-label">
-                LLM model
-                <span class="label-hint">— which AI model generates the prompt</span>
-              </label>
-              <select id="llm-model-selector" class="select llm-model-select" aria-label="LLM model for prompt generation">
-                <option value="minimax/minimax-m3">MiniMax M3</option>
-                <option value="openai/gpt-5.6-luna">GPT-5.6 Luna</option>
-                <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
-                <option value="google/gemini-3.5-flash">Gemini 3.5 Flash</option>
-                <option value="nvidia/nemotron-3-ultra-550b-a55b">Nemotron 3 Ultra</option>
-                <option value="x-ai/grok-4.3">Grok 4.3</option>
-              </select>
-            </div>
-            <div class="model-selector" id="model-selector" role="group" aria-label="Choose target model for the generated prompt">
-              <span class="label model-selector-label">
-                Target model
-                <span class="label-hint">— which contract the prompt should optimize for</span>
-              </span>
-              <button type="button" class="btn-toggle" data-model="zimage_turbo" aria-pressed="true">Z-Image Turbo</button>
-              <button type="button" class="btn-toggle" data-model="anima" aria-pressed="false">Anima</button>
-            </div>
-            <label for="aspect-ratio-select" class="label aspect-ratio-label">
-              Aspect ratio
-              <span class="label-hint">— targets the InvokeAI resolution the prompt should describe</span>
-            </label>
-            <select id="aspect-ratio-select" class="select aspect-ratio-select" aria-label="Aspect ratio for the generated prompt">
-              <option value="" selected>— Auto —</option>
-              <option value="square">Square 1:1 (1024×1024)</option>
-              <option value="portrait">Portrait 4:5 (832×1280)</option>
-              <option value="landscape">Landscape 16:9 (1280×832)</option>
-              <option value="panoramic">Panoramic 21:9 (1536×640)</option>
-            </select>
-            <button type="button" id="re-analyze-btn" class="btn-secondary">Re-analyze</button>
-            <button type="button" id="edit-stage2-prompt-btn" class="btn-secondary" disabled>Edit prompt</button>
-            <button type="button" id="generate-prompt-btn" class="btn-primary">
-              <span class="btn-text">Generate prompt</span>
-              <span class="btn-spinner" hidden aria-hidden="true"></span>
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ─── Step 4: Result ─────────────────────────────────────────────── -->
-    <section class="step" id="step-result" aria-label="Step 4: Generated prompt" hidden>
-      <header class="step-header">
-        <span class="step-number">4</span>
-        <h2 class="step-title">Generated prompt</h2>
-      </header>
-      <div class="step-body">
-        <div class="result-card">
-          <p id="result-prompt" class="result-prompt"></p>
-          <div class="result-meta">
-            <span id="result-meta-info" class="result-meta-info"></span>
-            <span id="result-strict-warn" class="result-strict-warn" role="status" aria-live="polite" hidden></span>
-          </div>
-          <div class="result-actions">
-            <button type="button" id="copy-btn" class="btn-copy">Copy to clipboard</button>
-            <button type="button" id="regenerate-btn" class="btn-secondary">Regenerate</button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ─── Step 4b: Anima result (Slice 2.3 — ADR 0021) ───────────── -->
-    <section class="step" id="step-anima-result" aria-label="Step 4b: Anima prompt result" hidden>
-      <div class="step-inner">
-        <header class="step-header">
-          <h2 class="step-title">Anima prompt result</h2>
-          <p class="step-subtitle">
-            Comma-separated tag-list prompts for Anima checkpoints (Base / Aesthetic / Turbo).
-            Copy the positive and negative into ComfyUI or any of the 7 author-endorsed platforms.
-          </p>
-        </header>
-
-        <div class="anima-variant-selector" id="anima-variant-selector" role="group" aria-label="Anima checkpoint variant">
-          <span class="label anima-variant-selector-label">
-            Variant
-            <span class="label-hint">— which Anima checkpoint the prompt is optimised for</span>
-          </span>
-          <button type="button" class="btn-toggle" data-anima-variant="base" aria-pressed="true">Base</button>
-          <button type="button" class="btn-toggle" data-anima-variant="aesthetic" aria-pressed="false">Aesthetic</button>
-          <button type="button" class="btn-toggle" data-anima-variant="turbo" aria-pressed="false">Turbo</button>
-        </div>
-
-        <label for="anima-result-positive" class="label">
-          Positive prompt
-          <span class="label-hint">— comma-separated tag list, lowercase, @-prefixed artist tags</span>
-        </label>
-        <textarea
-          id="anima-result-positive"
-          class="textarea anima-result-positive"
-          rows="6"
-          aria-label="Anima positive prompt"
-        ></textarea>
-
-        <label for="anima-result-negative" class="label">
-          Negative prompt
-          <span class="label-hint">— recommended Anima negative vocabulary</span>
-        </label>
-        <textarea
-          id="anima-result-negative"
-          class="textarea anima-result-negative"
-          rows="3"
-          aria-label="Anima negative prompt"
-        ></textarea>
-
-        <div class="result-meta">
-          <span id="anima-result-meta-info" class="result-meta-info"></span>
-        </div>
-
-        <div class="step-actions">
-          <button type="button" id="anima-copy-btn" class="btn-copy">Copy both to clipboard</button>
-          <button type="button" id="anima-regenerate-btn" class="btn-secondary">Regenerate</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- ─── Step 5: Chat console (ADR 0011) ─────────────────────────── -->
-    <section class="step" id="step-chat" aria-label="Step 5: Refine via chat" hidden>
-      <header class="step-header">
-        <span class="step-number">5</span>
-        <h2 class="step-title">Refine via chat</h2>
-      </header>
-      <div class="step-body">
-        <p class="chat-hint">
-          Discuss the prompt, ask for recommendations, or request a change. Proposed revisions stay unapplied until you choose Apply proposal or say “apply it”.
-        </p>
-        <p
-          id="token-reminder-banner"
-          class="token-reminder-banner"
-          role="status"
-          aria-live="polite"
-          hidden
-        >
-          Current prompt is approaching or past the 1024-token / 750-word ceiling. Z-Image will silently truncate above that; consider trimming adjectives in the chat before generating.
-        </p>
-
-        <div class="chat-session-bar">
-          <label for="chat-session-select" class="label">Conversation</label>
-          <div class="chat-session-bar__row">
-            <select id="chat-session-select" class="select" aria-label="Active chat session">
-              <option value="">— This prompt's conversation —</option>
-            </select>
-            <button type="button" id="chat-session-delete-btn" class="btn-secondary btn-danger-outline" disabled>Delete conversation</button>
-          </div>
-          <p id="chat-session-status" class="chat-session-status" hidden></p>
-        </div>
-
-        <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-label="Chat history"></div>
-
-        <form id="chat-form" class="chat-form" autocomplete="off">
-          <label for="chat-input" class="label">
-            Message
-            <span id="chat-input-count" class="char-count char-count--inline">0 / 2000</span>
-          </label>
-          <textarea
-            id="chat-input"
-            class="textarea"
-            rows="3"
-            maxlength="2000"
-            placeholder="Discuss the prompt, request a recommendation, or ask for a change — e.g. &quot;make the lighting more dramatic&quot;, &quot;shorten the subject line&quot;, &quot;rewrite in comma-separated tags&quot;…"
-            required
-          ></textarea>
-          <div class="chat-form__actions">
-            <span id="chat-form-status" class="chat-form-status" role="status" aria-live="polite"></span>
-            <button type="submit" id="chat-send-btn" class="btn-primary">
-              <span class="btn-text">Send</span>
-              <span class="btn-spinner" hidden aria-hidden="true"></span>
-            </button>
-          </div>
-        </form>
-      </div>
-    </section>
-
-    <!-- ─── Error toast ───────────────────────────────────────────────── -->
-    <div id="error-toast" class="error-toast" hidden role="alert">
-      <span id="error-message"></span>
-      <button type="button" id="error-dismiss-btn" class="btn-dismiss" aria-label="Dismiss error">×</button>
+      </nav>
+      <div class="provider-dots" id="provider-dots" role="status" aria-label="Provider key status"></div>
     </div>
+  </header>
 
-    <!-- ─── Preset editor modal ───────────────────────────────────────── -->
-    <div id="preset-modal" class="modal" hidden role="dialog" aria-labelledby="preset-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content">
-        <header class="modal-header">
-          <h3 id="preset-modal-title">Edit preset</h3>
-          <button type="button" id="preset-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <form id="preset-form" class="modal-body">
-          <label for="preset-name-input" class="label">Name</label>
-          <input type="text" id="preset-name-input" class="text-input" maxlength="100" required>
+  <main class="app-main" id="view-root">
 
-          <label for="preset-stage1-input" class="label">
-            Stage 1 system prompt
-            <span class="label-hint">— sent to the vision LLM; controls how the image is analyzed</span>
-          </label>
-          <textarea id="preset-stage1-input" class="textarea" rows="8" maxlength="5000" required></textarea>
+    <!-- ─── VIEW: Create (spec §4.1) ────────────────────────────────── -->
+    <section class="view" id="view-create" role="tabpanel" aria-labelledby="nav-create">
+      <h1 class="view-title" id="view-create-title" tabindex="-1">Create</h1>
+      <p class="view-sub">Two-stage pipeline: analyze an image with a preset, edit the result, then synthesize a refined prompt.</p>
 
-          <fieldset class="fields-fieldset">
-            <legend class="label">Stage 1 fields</legend>
-            <p class="label-hint">— which attributes Stage 1 should extract from the image</p>
-            <div id="preset-fields-grid" class="fields-grid"></div>
-          </fieldset>
+      <div class="create-grid">
+        <div class="create-col create-col--image">
 
-          <label for="preset-stage2-input" class="label">
-            Stage 2 system prompt
-            <span class="label-hint">— sent to the text LLM; controls how the analysis is converted into a final prompt</span>
-          </label>
-          <textarea id="preset-stage2-input" class="textarea" rows="8" maxlength="5000" required></textarea>
-
-          <div class="modal-actions">
-            <button type="button" id="preset-modal-cancel" class="btn-secondary">Cancel</button>
-            <button type="button" id="preset-modal-delete" class="btn-danger" hidden>Delete</button>
-            <button type="submit" id="preset-modal-save" class="btn-primary">Save</button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- ─── Subject prompt editor modal (ADR 0005) ───────────────────── -->
-    <div id="subject-prompt-modal" class="modal" hidden role="dialog" aria-labelledby="subject-prompt-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content modal-content--wide">
-        <header class="modal-header">
-          <h3 id="subject-prompt-modal-title">Edit subject-extraction prompt</h3>
-          <button type="button" id="subject-prompt-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <form id="subject-prompt-form" class="modal-body">
-          <p class="modal-hint">
-            This system prompt is sent to the vision LLM whenever you click
-            <strong>Populate with AI</strong> beneath the subject textarea.
-            It controls how the subject field is extracted from the uploaded
-            image. Independent of the active preset — changes apply to all
-            presets at once.
-          </p>
-
-          <label for="subject-prompt-input" class="label">
-            System prompt
-            <span id="subject-prompt-status" class="label-hint"></span>
-          </label>
-          <textarea
-            id="subject-prompt-input"
-            class="textarea subject-prompt-textarea"
-            rows="18"
-            spellcheck="false"
-            required
-          ></textarea>
-          <span id="subject-prompt-count" class="char-count char-count--inline">0 / 10000</span>
-
-          <div class="modal-actions">
-            <button type="button" id="subject-prompt-reset" class="btn-danger">Reset to default</button>
-            <div class="modal-actions__right">
-              <button type="button" id="subject-prompt-cancel" class="btn-secondary">Cancel</button>
-              <button type="submit" id="subject-prompt-save" class="btn-primary">Save</button>
-            </div>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- ─── Stage 2 prompt editor modal (ADR 0007) ───────────────────── -->
-    <div id="stage2-prompt-modal" class="modal" hidden role="dialog" aria-labelledby="stage2-prompt-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content modal-content--wide">
-        <header class="modal-header">
-          <h3 id="stage2-prompt-modal-title">Edit final-prompt synthesis prompt</h3>
-          <button type="button" id="stage2-prompt-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <form id="stage2-prompt-form" class="modal-body">
-          <p class="modal-hint">
-            This system prompt controls how the structured analysis is
-            synthesized into the final image-generation prompt. It overrides
-            the active preset's built-in prompt without editing the preset
-            itself. The override applies only to <strong id="stage2-prompt-preset-name">the current preset</strong>.
-          </p>
-
-          <label for="stage2-prompt-input" class="label">
-            System prompt
-            <span id="stage2-prompt-status" class="label-hint"></span>
-          </label>
-          <textarea
-            id="stage2-prompt-input"
-            class="textarea stage2-prompt-textarea"
-            rows="18"
-            spellcheck="false"
-            required
-          ></textarea>
-          <span id="stage2-prompt-count" class="char-count char-count--inline">0 / 10000</span>
-
-          <div class="modal-actions">
-            <button type="button" id="stage2-prompt-use-default" class="btn-danger">Use preset default</button>
-            <div class="modal-actions__right">
-              <button type="button" id="stage2-prompt-reset" class="btn-secondary">Reset to default</button>
-              <button type="button" id="stage2-prompt-cancel" class="btn-secondary">Cancel</button>
-              <button type="submit" id="stage2-prompt-save" class="btn-primary">Save</button>
-            </div>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- ─── Save palette modal (ADR 0006) ────────────────────────────── -->
-    <div id="save-palette-modal" class="modal" hidden role="dialog" aria-labelledby="save-palette-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content">
-        <header class="modal-header">
-          <h3 id="save-palette-modal-title">Save color palette</h3>
-          <button type="button" id="save-palette-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <form id="save-palette-form" class="modal-body">
-          <p id="save-palette-source" class="modal-hint"></p>
-
-          <label for="save-palette-name-input" class="label">Palette name</label>
-          <input
-            type="text"
-            id="save-palette-name-input"
-            class="text-input"
-            maxlength="60"
-            required
-            autocomplete="off"
-            aria-describedby="save-palette-count"
-          >
-          <span id="save-palette-count" class="char-count char-count--inline">0 / 60</span>
-
-          <div class="modal-actions">
-            <button type="button" id="save-palette-cancel" class="btn-secondary">Cancel</button>
-            <button type="submit" id="save-palette-save" class="btn-primary">Save palette</button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- ─── Palette manager modal (ADR 0006) ────────────────────────── -->
-    <div id="palette-manager-modal" class="modal" hidden role="dialog" aria-labelledby="palette-manager-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content modal-content--wide">
-        <header class="modal-header">
-          <h3 id="palette-manager-modal-title">Saved palettes</h3>
-          <button type="button" id="palette-manager-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <div class="modal-body">
-          <div class="palette-manager-controls">
-            <label for="palette-manager-search" class="label">Search by name</label>
-            <input
-              type="search"
-              id="palette-manager-search"
-              class="text-input"
-              placeholder="Type to filter…"
-              autocomplete="off"
-              aria-label="Search saved palettes by name"
-            >
-
-            <fieldset class="palette-manager-sort">
-              <legend class="label">Sort order</legend>
-              <label class="palette-sort-option">
-                <input type="radio" name="palette-sort" value="newest" checked>
-                Newest first
-              </label>
-              <label class="palette-sort-option">
-                <input type="radio" name="palette-sort" value="oldest">
-                Oldest first
-              </label>
-            </fieldset>
-          </div>
-
-          <div id="palette-manager-status" class="palette-manager-status" role="status" aria-live="polite">Loading…</div>
-          <ul id="palette-manager-list" class="palette-manager-list" hidden></ul>
-
-          <div class="modal-actions">
-            <button type="button" id="palette-manager-new-btn" class="btn-primary">New palette…</button>
-            <button type="button" id="palette-manager-cancel" class="btn-secondary">Close</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ─── Edit palette modal (ADR 0013) ──────────────────────────── -->
-    <div id="edit-palette-modal" class="modal" hidden role="dialog" aria-labelledby="edit-palette-modal-title" aria-describedby="edit-palette-modal-hint">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content modal-content--wide">
-        <header class="modal-header">
-          <h3 id="edit-palette-modal-title">Edit palette</h3>
-          <button type="button" id="edit-palette-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <form id="edit-palette-form" class="modal-body" novalidate>
-          <p id="edit-palette-modal-hint" class="modal-hint">
-            Change the name, tweak the colors, or add a new color. Hex, rgb(), and hsl() inputs are all accepted. Drag rows to set priority (top of the list is highest) and flag any color as a punchy accent to influence distribution in generated prompts.
-          </p>
-
-          <div class="edit-palette-source-row" id="edit-palette-source-row" hidden>
-            <span class="label-hint">Source:</span>
-            <span id="edit-palette-source" class="edit-palette-source"></span>
-          </div>
-
-          <label for="edit-palette-name-input" class="label">Palette name</label>
-          <input
-            type="text"
-            id="edit-palette-name-input"
-            class="text-input"
-            maxlength="60"
-            required
-            autocomplete="off"
-            aria-describedby="edit-palette-name-count edit-palette-name-error"
-          >
-          <span id="edit-palette-name-count" class="char-count char-count--inline">0 / 60</span>
-          <span id="edit-palette-name-error" class="edit-palette-error" role="alert" hidden></span>
-
-          <div class="edit-palette-preview-row">
-            <span class="label-hint">Preview</span>
-            <div id="edit-palette-preview" class="palette-preview" aria-live="polite" aria-label="Live preview of the palette as you edit it"></div>
-          </div>
-
-          <div class="edit-palette-distribution-row">
-            <span class="label-hint">Target distribution</span>
-            <div id="edit-palette-distribution" class="palette-preview__bars" aria-live="polite" aria-label="Live target distribution as you reorder and flag accents"></div>
-            <span id="edit-palette-distribution-sum" class="palette-preview__bars-sum" aria-live="polite"></span>
-          </div>
-
-          <fieldset class="edit-palette-colors-fieldset">
-            <legend class="label">Colors</legend>
-
-            <div class="edit-palette-accent-cap-row">
-              <label for="edit-palette-accent-max" class="label-hint">Accent cap</label>
-              <input
-                type="number"
-                id="edit-palette-accent-max"
-                class="text-input edit-palette-accent-cap-input"
-                min="1"
-                max="5"
-                step="1"
-                value="2"
-                aria-describedby="edit-palette-accent-max-hint"
-              >
-              <span id="edit-palette-accent-max-hint" class="field-action-hint">Max total mentions across all accent colors (1–5). Lower = sparser accents.</span>
-            </div>
-
-            <div class="edit-palette-strength-row">
-              <label for="edit-palette-strength" class="label-hint">Strength</label>
-              <select
-                id="edit-palette-strength"
-                class="text-input edit-palette-strength-input"
-                aria-describedby="edit-palette-strength-hint"
-              >
-                <option value="subtle">Subtle — gentle reference colors</option>
-                <option value="moderate" selected>Moderate — honor the palette closely</option>
-                <option value="strong">Strong — every named color appears at least once</option>
-                <option value="strict">Strict — per-color count is locked (validated post-hoc)</option>
-              </select>
-              <span id="edit-palette-strength-hint" class="field-action-hint">How aggressively the generated prompt should honor this palette. Subtle allows complementary tones; strict requires exact mention counts and is validated.</span>
-            </div>
-
-            <ul id="edit-palette-colors-list" class="edit-palette-colors-list"></ul>
-
-            <div class="edit-palette-add-row">
-              <label for="edit-palette-add-picker" class="visually-hidden-label">Pick a color</label>
-              <input type="color" id="edit-palette-add-picker" class="edit-palette-add-picker" value="#3b82f6" aria-label="Pick a color for the new entry">
-
-              <label for="edit-palette-add-hex" class="visually-hidden-label">Color value</label>
-              <input
-                type="text"
-                id="edit-palette-add-hex"
-                class="text-input edit-palette-add-hex"
-                placeholder="#d97706 / rgb(245,158,11) / hsl(36,91%,56%)"
-                value="#3b82f6"
-                aria-describedby="edit-palette-add-hex-hint"
-              >
-              <span id="edit-palette-add-hex-hint" class="field-action-hint">Accepts #hex, rgb(), or hsl().</span>
-
-              <label for="edit-palette-add-name" class="visually-hidden-label">Color name</label>
-              <input type="text" id="edit-palette-add-name" class="text-input edit-palette-add-name" placeholder="Color name" maxlength="60" autocomplete="off">
-
-              <button type="button" id="edit-palette-add-btn" class="btn-secondary">+ Add color</button>
-              <span id="edit-palette-add-error" class="edit-palette-error" role="alert" hidden></span>
-            </div>
-          </fieldset>
-
-          <fieldset class="palette-history-fieldset">
-            <legend class="label">Version history</legend>
-            <ul id="palette-history-list" class="palette-history-list"></ul>
-          </fieldset>
-
-          <details id="edit-palette-distribution-details" class="palette-distribution-details">
-            <summary class="palette-distribution-details__summary">Distribution dashboard</summary>
-            <div id="edit-palette-distribution-dashboard" class="palette-distribution-dashboard" aria-live="polite">
-              <p id="edit-palette-distribution-empty" class="palette-distribution-empty" hidden>
-                No runs yet for this palette. Click <strong>Generate prompt</strong> from the main wizard with this palette selected, then reopen the edit modal to see the target vs measured comparison.
-              </p>
-              <div id="edit-palette-distribution-content" hidden>
-                <p class="palette-distribution-meta">
-                  <span id="edit-palette-distribution-recorded-at" class="palette-distribution-recorded-at"></span>
-                  <span id="edit-palette-distribution-mentions" class="palette-distribution-mentions"></span>
-                </p>
-                <table class="palette-distribution-table" aria-label="Target vs measured color distribution from the latest run">
-                  <thead>
-                    <tr>
-                      <th scope="col">Color</th>
-                      <th scope="col">Target</th>
-                      <th scope="col">Measured</th>
-                    </tr>
-                  </thead>
-                  <tbody id="edit-palette-distribution-tbody"></tbody>
-                </table>
+          <!-- Upload (was Step 2) -->
+          <section class="panel" id="step-upload" aria-label="Upload image">
+            <header class="panel-header">
+              <span class="panel-number" aria-hidden="true">01</span>
+              <h2 class="panel-title">Upload image</h2>
+            </header>
+            <div class="panel-body">
+              <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Upload image by clicking or dragging and dropping">
+                <input type="file" id="file-input" accept="image/jpeg,image/png,image/webp" hidden>
+                <div class="dropzone-content">
+                  <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="17 8 12 3 7 8"/>
+                    <line x1="12" y1="3" x2="12" y2="15"/>
+                  </svg>
+                  <p class="dropzone-text">Drag &amp; drop an image here</p>
+                  <p class="dropzone-subtext">or click to browse</p>
+                  <p class="dropzone-formats">JPG, PNG, WebP • up to 10MB</p>
+                </div>
+                <div id="preview-container" class="preview-container" hidden>
+                  <img id="preview-image" class="preview-image" alt="Uploaded image preview">
+                  <button type="button" id="remove-image-btn" class="btn-remove" aria-label="Remove uploaded image">×</button>
+                </div>
+              </div>
+              <div id="field-completion" class="field-completion" hidden>
+                <div class="field-completion__row">
+                  <span class="field-completion__label">Fields filled</span>
+                  <span id="field-completion-text" class="field-completion__text">0 / 14</span>
+                </div>
+                <div class="field-completion__meter" role="img" aria-label="Analysis field completion meter">
+                  <div id="field-completion-bar" class="field-completion__bar"></div>
+                </div>
               </div>
             </div>
-          </details>
+          </section>
 
-          <div class="modal-actions">
-            <button type="button" id="edit-palette-delete" class="btn-danger">Delete palette…</button>
-            <button type="button" id="edit-palette-cancel" class="btn-secondary">Cancel</button>
-            <button type="submit" id="edit-palette-save" class="btn-primary">Save changes</button>
-          </div>
-        </form>
+        </div>
+        <div class="create-col create-col--flow">
+
+          <!-- Preset (was Step 1 — now a summary row, spec §4.1) -->
+          <section class="panel panel--compact" id="step-preset" aria-label="Choose a preset">
+            <header class="panel-header">
+              <span class="panel-number" aria-hidden="true">02</span>
+              <h2 class="panel-title">Preset &amp; palette</h2>
+              <a class="panel-manage-link" href="#/library?tab=presets">Manage in Library →</a>
+            </header>
+            <div class="panel-body">
+              <div class="palette-picker-row">
+                <label for="palette-select" class="label">Saved palette (optional)</label>
+                <div class="palette-picker-controls">
+                  <select id="palette-select" class="select" aria-label="Use saved palette">
+                    <option value="">— Auto-analyze colors —</option>
+                  </select>
+                </div>
+                <div class="palette-picker-actions">
+                  <button
+                    type="button"
+                    id="palette-picker-edit-btn"
+                    class="btn-secondary"
+                    aria-label="Edit or manage saved color palettes"
+                  >Manage palettes…</button>
+                </div>
+                <p id="palette-picker-hint" class="palette-picker-hint" hidden></p>
+              </div>
+
+              <div class="preset-controls">
+                <select id="preset-select" class="select" aria-label="Select preset">
+                  <option value="">— Select a preset —</option>
+                </select>
+                <div class="preset-actions">
+                  <button type="button" id="preset-new-btn" class="btn-secondary">+ New</button>
+                  <button type="button" id="preset-edit-btn" class="btn-secondary" disabled>Edit</button>
+                  <button type="button" id="preset-export-btn" class="btn-secondary" disabled>Export</button>
+                  <button type="button" id="preset-import-btn" class="btn-secondary">Import</button>
+                  <input type="file" id="preset-import-input" accept=".json,application/json" hidden>
+                </div>
+              </div>
+              <div id="preset-description" class="preset-description" hidden></div>
+            </div>
+          </section>
+
+          <!-- Analyze & edit (was Step 3 — de-densified, spec §4.1) -->
+          <section class="panel" id="step-analyze" aria-label="Analyze and edit">
+            <header class="panel-header">
+              <span class="panel-number" aria-hidden="true">03</span>
+              <h2 class="panel-title">Analyze &amp; edit</h2>
+            </header>
+            <div class="panel-body">
+              <button type="button" id="analyze-btn" class="btn-secondary btn-analyze" disabled>
+                <span class="btn-text">Analyze image</span>
+                <span class="btn-spinner" hidden aria-hidden="true"></span>
+              </button>
+
+              <div id="analysis-editor" class="analysis-editor" hidden>
+                <p class="analysis-hint">Stage 1 returned the structured analysis below. Edit any field, then proceed.</p>
+                <div id="analysis-fields" class="analysis-fields"></div>
+              </div>
+
+              <div class="directives-section">
+                <label for="directives-input" class="label">Directives (optional)</label>
+                <p class="directives-hint">Free-form instructions passed to Stage 2. Examples: "add a punchy red accent in the upper-right", "make it more dramatic", "use shorter sentences".</p>
+                <textarea
+                  id="directives-input"
+                  class="textarea"
+                  rows="3"
+                  maxlength="1000"
+                  placeholder="Add any specific guidance for the final prompt…"
+                ></textarea>
+                <span id="directives-count" class="char-count">0 / 1000</span>
+
+                <div class="directives-actions">
+                  <p class="directives-actions__hint">Save the current text as a reusable directive, or apply a saved one into the box above.</p>
+                  <div class="directives-actions__row">
+                    <select id="directives-select" class="select" aria-label="Choose a saved directive to apply">
+                      <option value="">— Choose a saved directive —</option>
+                    </select>
+                    <button type="button" id="directives-apply-btn" class="btn-secondary">Apply</button>
+                  </div>
+                  <div class="directives-actions__row">
+                    <button type="button" id="directives-save-btn" class="btn-secondary">Save directive…</button>
+                    <button type="button" id="directives-manage-btn" class="btn-secondary">Manage directives…</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Output options — configuration collapsed away from the
+                   action zone (spec §4.1; relabeled per F6) -->
+              <details id="output-options" class="output-options" open>
+                <summary class="output-options__summary">Output options</summary>
+                <div class="output-options__body">
+                  <div class="provider-row">
+                    <label for="provider-selector" class="label provider-label">
+                      Provider
+                      <span class="label-hint">— which LLM vendor routes the call</span>
+                    </label>
+                    <select id="provider-selector" class="select provider-select" aria-label="LLM provider for prompt generation">
+                      <option value="kilo_code">Kilo Code (live)</option>
+                      <option value="minimax">MiniMax direct (stub)</option>
+                      <option value="alibaba">Alibaba DashScope (stub)</option>
+                    </select>
+                    <p id="provider-key-warning" class="provider-key-warning" role="status" hidden></p>
+                  </div>
+                  <div class="llm-model-row">
+                    <label for="llm-model-selector" class="label llm-model-label">
+                      Generation model
+                      <span class="label-hint">— which AI model generates the prompt</span>
+                    </label>
+                    <select id="llm-model-selector" class="select llm-model-select" aria-label="Generation model for prompt generation">
+                      <option value="minimax/minimax-m3">MiniMax M3</option>
+                      <option value="openai/gpt-5.6-luna">GPT-5.6 Luna</option>
+                      <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+                      <option value="google/gemini-3.5-flash">Gemini 3.5 Flash</option>
+                      <option value="nvidia/nemotron-3-ultra-550b-a55b">Nemotron 3 Ultra</option>
+                      <option value="x-ai/grok-4.3">Grok 4.3</option>
+                    </select>
+                  </div>
+                  <div class="model-selector" id="model-selector" role="group" aria-label="Choose prompt format for the generated prompt">
+                    <span class="label model-selector-label">
+                      Prompt format
+                      <span class="label-hint">— which contract the prompt should optimize for</span>
+                    </span>
+                    <button type="button" class="btn-toggle" data-model="zimage_turbo" aria-pressed="true">Z-Image Turbo</button>
+                    <button type="button" class="btn-toggle" data-model="anima" aria-pressed="false">Anima</button>
+                  </div>
+                  <label for="aspect-ratio-select" class="label aspect-ratio-label">
+                    Aspect ratio
+                    <span class="label-hint">— targets the InvokeAI resolution the prompt should describe</span>
+                  </label>
+                  <select id="aspect-ratio-select" class="select aspect-ratio-select" aria-label="Aspect ratio for the generated prompt">
+                    <option value="" selected>— Auto —</option>
+                    <option value="square">Square 1:1 (1024×1024)</option>
+                    <option value="portrait">Portrait 4:5 (832×1280)</option>
+                    <option value="landscape">Landscape 16:9 (1280×832)</option>
+                    <option value="panoramic">Panoramic 21:9 (1536×640)</option>
+                  </select>
+                </div>
+              </details>
+
+              <div class="generate-row">
+                <button type="button" id="re-analyze-btn" class="btn-secondary">Re-analyze</button>
+                <button type="button" id="edit-stage2-prompt-btn" class="btn-secondary" disabled>Edit prompt</button>
+                <button type="button" id="generate-prompt-btn" class="btn-primary">
+                  <span class="btn-text">Generate prompt</span>
+                  <span class="btn-spinner" hidden aria-hidden="true"></span>
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <!-- Result (was Step 4 — in-flow, contact-sheet strip spec §7.3) -->
+          <section class="panel" id="step-result" aria-label="Generated prompt" hidden>
+            <header class="panel-header">
+              <span class="panel-number" aria-hidden="true">04</span>
+              <h2 class="panel-title">Generated prompt</h2>
+            </header>
+            <div class="panel-body">
+              <div class="result-card">
+                <p id="result-prompt" class="result-prompt"></p>
+                <div class="result-meta">
+                  <span id="result-meta-info" class="result-meta-info"></span>
+                  <span id="result-strict-warn" class="result-strict-warn" role="status" aria-live="polite" hidden></span>
+                </div>
+                <div class="result-actions">
+                  <button type="button" id="copy-btn" class="btn-copy">Copy to clipboard</button>
+                  <button type="button" id="regenerate-btn" class="btn-secondary">Regenerate</button>
+                  <a id="refine-in-chat-link" class="btn-secondary" href="#/chat">Refine in chat →</a>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Anima result (was Step 4b — Slice 2.3, ADR 0021) -->
+          <section class="panel" id="step-anima-result" aria-label="Anima prompt result" hidden>
+            <div class="panel-body">
+              <header class="panel-header">
+                <h2 class="panel-title">Anima prompt result</h2>
+                <p class="panel-subtitle">
+                  Comma-separated tag-list prompts for Anima checkpoints (Base / Aesthetic / Turbo).
+                  Copy the positive and negative into ComfyUI or any of the 7 author-endorsed platforms.
+                </p>
+              </header>
+
+              <div class="anima-variant-selector" id="anima-variant-selector" role="group" aria-label="Anima checkpoint variant">
+                <span class="label anima-variant-selector-label">
+                  Variant
+                  <span class="label-hint">— which Anima checkpoint the prompt is optimised for</span>
+                </span>
+                <button type="button" class="btn-toggle" data-anima-variant="base" aria-pressed="true">Base</button>
+                <button type="button" class="btn-toggle" data-anima-variant="aesthetic" aria-pressed="false">Aesthetic</button>
+                <button type="button" class="btn-toggle" data-anima-variant="turbo" aria-pressed="false">Turbo</button>
+              </div>
+
+              <label for="anima-result-positive" class="label">
+                Positive prompt
+                <span class="label-hint">— comma-separated tag list, lowercase, @-prefixed artist tags</span>
+              </label>
+              <textarea
+                id="anima-result-positive"
+                class="textarea anima-result-positive"
+                rows="6"
+                aria-label="Anima positive prompt"
+              ></textarea>
+
+              <label for="anima-result-negative" class="label">
+                Negative prompt
+                <span class="label-hint">— recommended Anima negative vocabulary</span>
+              </label>
+              <textarea
+                id="anima-result-negative"
+                class="textarea anima-result-negative"
+                rows="3"
+                aria-label="Anima negative prompt"
+              ></textarea>
+
+              <div class="result-meta">
+                <span id="anima-result-meta-info" class="result-meta-info"></span>
+              </div>
+
+              <div class="result-actions">
+                <button type="button" id="anima-copy-btn" class="btn-copy">Copy both to clipboard</button>
+                <button type="button" id="anima-regenerate-btn" class="btn-secondary">Regenerate</button>
+                <a id="anima-refine-in-chat-link" class="btn-secondary" href="#/chat">Refine in chat →</a>
+              </div>
+            </div>
+          </section>
+
+        </div>
       </div>
-    </div>
+    </section>
 
-    <!-- ─── Save directive modal (ADR 0009) ────────────────────────── -->
-    <div id="save-directive-modal" class="modal" hidden role="dialog" aria-labelledby="save-directive-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content">
-        <header class="modal-header">
-          <h3 id="save-directive-modal-title">Save directive</h3>
-          <button type="button" id="save-directive-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <form id="save-directive-form" class="modal-body">
-          <label for="save-directive-name-input" class="label">Directive name</label>
-          <input
-            type="text"
-            id="save-directive-name-input"
-            class="text-input"
-            maxlength="60"
-            required
-            autocomplete="off"
-            aria-describedby="save-directive-count"
-          >
-          <span id="save-directive-count" class="char-count char-count--inline">0 / 60</span>
+    <!-- ─── VIEW: Library (spec §4.2, UI-R3) ────────────────────────── -->
+    <section class="view" id="view-library" role="tabpanel" aria-labelledby="nav-library" hidden>
+      <h1 class="view-title" id="view-library-title" tabindex="-1">Library</h1>
+      <p class="view-sub">Saved presets, palettes, and directives — the reusable starting points for every analysis.</p>
 
-          <label for="save-directive-tags-input" class="label">Tags (optional, comma-separated)</label>
-          <input
-            type="text"
-            id="save-directive-tags-input"
-            class="text-input"
-            placeholder="color, composition, mood"
-            autocomplete="off"
-            aria-describedby="save-directive-tags-hint"
-          >
-          <span id="save-directive-tags-hint" class="field-action-hint">Lowercase, kebab-case identifiers. Up to 8 tags.</span>
-
-          <label class="label">Content preview</label>
-          <p id="save-directive-content-preview" class="save-directive-content-preview" aria-live="polite"></p>
-
-          <div class="modal-actions">
-            <button type="button" id="save-directive-cancel" class="btn-secondary">Cancel</button>
-            <button type="submit" id="save-directive-save" class="btn-primary">Save directive</button>
-          </div>
-        </form>
+      <div class="library-tabs" role="tablist" aria-label="Library sections">
+        <button type="button" role="tab" id="library-tab-presets" class="library-tab" aria-selected="true" aria-controls="library-panel-region" data-library-tab="presets" tabindex="0">Presets</button>
+        <button type="button" role="tab" id="library-tab-palettes" class="library-tab" aria-selected="false" aria-controls="library-panel-region" data-library-tab="palettes" tabindex="-1">Palettes</button>
+        <button type="button" role="tab" id="library-tab-directives" class="library-tab" aria-selected="false" aria-controls="library-panel-region" data-library-tab="directives" tabindex="-1">Directives</button>
       </div>
-    </div>
 
-    <!-- ─── Manage directives modal (ADR 0009) ────────────────────── -->
-    <div id="directives-manager-modal" class="modal" hidden role="dialog" aria-labelledby="directives-manager-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content modal-content--wide">
-        <header class="modal-header">
-          <h3 id="directives-manager-modal-title">Saved directives</h3>
-          <button type="button" id="directives-manager-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <div class="modal-body">
-          <div class="directive-manager-controls">
-            <label for="directives-manager-search" class="label">Search by name or tag</label>
-            <input
-              type="search"
-              id="directives-manager-search"
-              class="text-input"
-              placeholder="Type to filter…"
-              autocomplete="off"
-              aria-label="Search saved directives by name or tag"
-            >
-
-            <fieldset class="directive-manager-sort">
-              <legend class="label">Sort order</legend>
-              <label class="directive-sort-option">
-                <input type="radio" name="directive-sort" value="newest" checked>
-                Newest first
-              </label>
-              <label class="directive-sort-option">
-                <input type="radio" name="directive-sort" value="oldest">
-                Oldest first
-              </label>
-              <label class="directive-sort-option">
-                <input type="radio" name="directive-sort" value="most-used">
-                Most used
-              </label>
-              <label class="directive-sort-option">
-                <input type="radio" name="directive-sort" value="name">
-                Name A–Z
-              </label>
-            </fieldset>
-
-            <div id="directives-tag-filter" class="directive-tag-filter" hidden>
-              <span class="label-hint">Tag filter:</span>
+      <div class="library-layout">
+        <div class="library-list-region">
+          <div class="library-list-toolbar">
+            <input type="search" id="library-search" class="text-input" placeholder="Filter by name…" autocomplete="off" aria-label="Filter library items">
+            <span id="library-count" class="library-count" aria-live="polite"></span>
+            <div class="library-toolbar-actions">
+              <button type="button" id="library-import-presets-btn" class="btn-secondary">Import presets…</button>
+              <a id="library-export-presets-link" class="btn-secondary" href="/api/presets/export/all">Export all presets</a>
             </div>
           </div>
-
-          <div id="directives-manager-status" class="directive-manager-status" role="status" aria-live="polite">Loading…</div>
-          <ul id="directives-manager-list" class="directive-manager-list" hidden></ul>
-
-          <div class="modal-actions">
-            <button type="button" id="directives-import-btn" class="btn-secondary">Import…</button>
-            <input type="file" id="directives-import-input" accept="application/json,.json" hidden>
-            <button type="button" id="directives-export-btn" class="btn-secondary">Export all</button>
-            <button type="button" id="directives-manager-cancel" class="btn-secondary">Close</button>
+          <ul id="library-list" class="library-list"></ul>
+          <p id="library-empty" class="library-empty" hidden></p>
+        </div>
+        <div class="library-panel-region" id="library-panel-region" role="tabpanel" aria-label="Selected item details">
+          <div id="library-panel" class="library-panel">
+            <p class="library-panel__placeholder">Select an item to see its details.</p>
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- ─── Edit directive modal (ADR 0009) ──────────────────────── -->
-    <div id="edit-directive-modal" class="modal" hidden role="dialog" aria-labelledby="edit-directive-modal-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-content modal-content--wide">
-        <header class="modal-header">
-          <h3 id="edit-directive-modal-title">Edit directive</h3>
-          <button type="button" id="edit-directive-modal-close" class="btn-dismiss" aria-label="Close">×</button>
-        </header>
-        <form id="edit-directive-form" class="modal-body">
-          <label for="edit-directive-name-input" class="label">Name</label>
-          <input
-            type="text"
-            id="edit-directive-name-input"
-            class="text-input"
-            maxlength="60"
-            required
-            autocomplete="off"
-            aria-describedby="edit-directive-name-count"
+    <!-- ─── VIEW: Chat (spec §4.3, UI-R4 — promoted from gated Step 5) ── -->
+    <section class="view" id="view-chat" role="tabpanel" aria-labelledby="nav-chat" hidden>
+      <h1 class="view-title" id="view-chat-title" tabindex="-1">Chat</h1>
+      <p class="view-sub">Refine a generated prompt conversationally. Revisions stay proposals until you apply them.</p>
+
+      <section class="panel" id="step-chat" aria-label="Refine via chat">
+        <div class="panel-body">
+          <p class="chat-hint">
+            Discuss the prompt, ask for recommendations, or request a change. Proposed revisions stay unapplied until you choose Apply proposal or say “apply it”.
+          </p>
+          <p
+            id="token-reminder-banner"
+            class="token-reminder-banner"
+            role="status"
+            aria-live="polite"
+            hidden
           >
-          <span id="edit-directive-name-count" class="char-count char-count--inline">0 / 60</span>
+            Current prompt is approaching or past the 1024-token / 750-word ceiling. Z-Image will silently truncate above that; consider trimming adjectives in the chat before generating.
+          </p>
 
-          <label for="edit-directive-tags-input" class="label">Tags (comma-separated)</label>
-          <input
-            type="text"
-            id="edit-directive-tags-input"
-            class="text-input"
-            placeholder="color, composition, mood"
-            autocomplete="off"
-            aria-describedby="edit-directive-tags-hint"
-          >
-          <span id="edit-directive-tags-hint" class="field-action-hint">Lowercase, kebab-case identifiers. Up to 8 tags.</span>
+          <div class="chat-session-bar">
+            <label for="chat-session-select" class="label">Conversation</label>
+            <div class="chat-session-bar__row">
+              <select id="chat-session-select" class="select" aria-label="Active chat session">
+                <option value="">— This prompt's conversation —</option>
+              </select>
+              <button type="button" id="chat-session-delete-btn" class="btn-secondary btn-danger-outline" disabled>Delete conversation</button>
+            </div>
+            <p id="chat-session-status" class="chat-session-status" hidden></p>
+          </div>
 
-          <label for="edit-directive-content-input" class="label">
-            Content
-            <span id="edit-directive-content-count" class="char-count char-count--inline">0 / 1000</span>
-          </label>
-          <textarea
-            id="edit-directive-content-input"
-            class="textarea"
-            rows="4"
-            maxlength="1000"
-            required
-            aria-describedby="edit-directive-content-count"
-          ></textarea>
+          <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-label="Chat history"></div>
 
-          <fieldset class="directive-history-fieldset">
-            <legend class="label">Version history</legend>
-            <ul id="directive-history-list" class="directive-history-list"></ul>
+          <form id="chat-form" class="chat-form" autocomplete="off">
+            <label for="chat-input" class="label">
+              Message
+              <span id="chat-input-count" class="char-count char-count--inline">0 / 2000</span>
+            </label>
+            <textarea
+              id="chat-input"
+              class="textarea"
+              rows="3"
+              maxlength="2000"
+              placeholder="Discuss the prompt, request a recommendation, or ask for a change — e.g. &quot;make the lighting more dramatic&quot;, &quot;shorten the subject line&quot;, &quot;rewrite in comma-separated tags&quot;…"
+              required
+            ></textarea>
+            <div class="chat-form__actions">
+              <span id="chat-form-status" class="chat-form-status" role="status" aria-live="polite"></span>
+              <button type="submit" id="chat-send-btn" class="btn-primary">
+                <span class="btn-text">Send</span>
+                <span class="btn-spinner" hidden aria-hidden="true"></span>
+              </button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </section>
+
+    <!-- ─── VIEW: Providers & keys (spec §6, UI-R2 — the new module) ── -->
+    <section class="view" id="view-providers" role="tabpanel" aria-labelledby="nav-providers" hidden>
+      <h1 class="view-title" id="view-providers-title" tabindex="-1">Providers &amp; keys</h1>
+      <p class="view-sub">
+        Keys are stored on this machine only (<code>data/provider_keys.json</code>) and are never sent back to the browser —
+        only a masked fingerprint. Environment variables always take precedence over keys saved here.
+      </p>
+      <div id="provider-cards" class="provider-cards" aria-busy="true"></div>
+    </section>
+
+    <!-- ─── VIEW: Settings (spec §4.5, UI-R4) ───────────────────────── -->
+    <section class="view" id="view-settings" role="tabpanel" aria-labelledby="nav-settings" hidden>
+      <h1 class="view-title" id="view-settings-title" tabindex="-1">Settings</h1>
+      <p class="view-sub">Defaults applied to every new prompt. Keys live under Providers &amp; keys.</p>
+
+      <form id="settings-form" class="panel settings-panel">
+        <h2 class="panel-title">Defaults</h2>
+        <div class="panel-body">
+          <label for="settings-provider" class="label">Default provider</label>
+          <select id="settings-provider" class="select">
+            <option value="kilo_code">Kilo Code</option>
+            <option value="minimax">MiniMax direct</option>
+            <option value="alibaba">Alibaba DashScope</option>
+          </select>
+
+          <label for="settings-llm-model" class="label">Default generation model</label>
+          <select id="settings-llm-model" class="select">
+            <option value="minimax/minimax-m3">MiniMax M3</option>
+            <option value="openai/gpt-5.6-luna">GPT-5.6 Luna</option>
+            <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+            <option value="google/gemini-3.5-flash">Gemini 3.5 Flash</option>
+            <option value="nvidia/nemotron-3-ultra-550b-a55b">Nemotron 3 Ultra</option>
+            <option value="x-ai/grok-4.3">Grok 4.3</option>
+          </select>
+
+          <fieldset class="settings-radio-group">
+            <legend class="label">Default prompt format</legend>
+            <label class="settings-radio-option">
+              <input type="radio" name="settings-model" value="zimage_turbo" checked> Z-Image Turbo
+            </label>
+            <label class="settings-radio-option">
+              <input type="radio" name="settings-model" value="anima"> Anima
+            </label>
           </fieldset>
 
-          <div class="modal-actions">
-            <button type="button" id="edit-directive-cancel" class="btn-secondary">Cancel</button>
-            <button type="button" id="edit-directive-delete" class="btn-danger">Delete</button>
-            <button type="submit" id="edit-directive-save" class="btn-primary">Save changes</button>
+          <label for="settings-anima-variant" class="label">Default Anima variant</label>
+          <select id="settings-anima-variant" class="select">
+            <option value="base">Base</option>
+            <option value="aesthetic">Aesthetic</option>
+            <option value="turbo">Turbo</option>
+          </select>
+
+          <div class="settings-actions">
+            <button type="submit" class="btn-primary">Save defaults</button>
+            <span id="settings-status" class="settings-status" role="status" aria-live="polite"></span>
           </div>
-        </form>
+        </div>
+      </form>
+
+      <div class="panel settings-panel">
+        <h2 class="panel-title">System prompts</h2>
+        <div class="panel-body">
+          <p class="settings-hint">
+            The subject-extraction prompt is sent to the vision model whenever you click
+            <strong>Populate with AI</strong> on the subject field. It applies to every preset.
+          </p>
+          <button type="button" id="settings-subject-prompt-btn" class="btn-secondary">Edit subject-extraction prompt…</button>
+          <p class="settings-hint">
+            Stage 2 synthesis prompts live with each preset — edit them via Create → Edit prompt,
+            or manage presets in the <a href="#/library?tab=presets">Library</a>.
+          </p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ─── Error toast (global, cross-cutting failures only — spec §5) ── -->
+  <div id="error-toast" class="error-toast" hidden role="alert">
+    <span id="error-message"></span>
+    <button type="button" id="error-dismiss-btn" class="btn-dismiss" aria-label="Dismiss error">×</button>
+  </div>
+
+  <!-- ─── Live region for screen-reader announcements (AX5) ─────────── -->
+  <div id="a11y-announcer" class="visually-hidden" aria-live="polite" role="status"></div>
+
+  <!-- ─── Quick-action dialogs (retained per spec §4.2) ─────────────── -->
+
+  <!-- Preset editor modal -->
+  <div id="preset-modal" class="modal" hidden role="dialog" aria-labelledby="preset-modal-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <header class="modal-header">
+        <h3 id="preset-modal-title">Edit preset</h3>
+        <button type="button" id="preset-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <form id="preset-form" class="modal-body">
+        <label for="preset-name-input" class="label">Name</label>
+        <input type="text" id="preset-name-input" class="text-input" maxlength="100" required>
+
+        <label for="preset-stage1-input" class="label">
+          Stage 1 system prompt
+          <span class="label-hint">— sent to the vision LLM; controls how the image is analyzed</span>
+        </label>
+        <textarea id="preset-stage1-input" class="textarea" rows="8" maxlength="5000" required></textarea>
+
+        <fieldset class="fields-fieldset">
+          <legend class="label">Stage 1 fields</legend>
+          <p class="label-hint">— which attributes Stage 1 should extract from the image</p>
+          <div id="preset-fields-grid" class="fields-grid"></div>
+        </fieldset>
+
+        <label for="preset-stage2-input" class="label">
+          Stage 2 system prompt
+          <span class="label-hint">— sent to the text LLM; controls how the analysis is converted into a final prompt</span>
+        </label>
+        <textarea id="preset-stage2-input" class="textarea" rows="8" maxlength="5000" required></textarea>
+
+        <div class="modal-actions">
+          <button type="button" id="preset-modal-cancel" class="btn-secondary">Cancel</button>
+          <button type="button" id="preset-modal-delete" class="btn-danger" hidden>Delete</button>
+          <button type="submit" id="preset-modal-save" class="btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Subject prompt editor modal (ADR 0005) -->
+  <div id="subject-prompt-modal" class="modal" hidden role="dialog" aria-labelledby="subject-prompt-modal-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content modal-content--wide">
+      <header class="modal-header">
+        <h3 id="subject-prompt-modal-title">Edit subject-extraction prompt</h3>
+        <button type="button" id="subject-prompt-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <form id="subject-prompt-form" class="modal-body">
+        <p class="modal-hint">
+          This system prompt is sent to the vision LLM whenever you click
+          <strong>Populate with AI</strong> beneath the subject textarea.
+          It controls how the subject field is extracted from the uploaded
+          image. Independent of the active preset — changes apply to all
+          presets at once.
+        </p>
+
+        <label for="subject-prompt-input" class="label">
+          System prompt
+          <span id="subject-prompt-status" class="label-hint"></span>
+        </label>
+        <textarea
+          id="subject-prompt-input"
+          class="textarea subject-prompt-textarea"
+          rows="18"
+          spellcheck="false"
+          required
+        ></textarea>
+        <span id="subject-prompt-count" class="char-count char-count--inline">0 / 10000</span>
+
+        <div class="modal-actions">
+          <button type="button" id="subject-prompt-reset" class="btn-danger">Reset to default</button>
+          <div class="modal-actions__right">
+            <button type="button" id="subject-prompt-cancel" class="btn-secondary">Cancel</button>
+            <button type="submit" id="subject-prompt-save" class="btn-primary">Save</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Stage 2 prompt editor modal (ADR 0007) -->
+  <div id="stage2-prompt-modal" class="modal" hidden role="dialog" aria-labelledby="stage2-prompt-modal-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content modal-content--wide">
+      <header class="modal-header">
+        <h3 id="stage2-prompt-modal-title">Edit final-prompt synthesis prompt</h3>
+        <button type="button" id="stage2-prompt-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <form id="stage2-prompt-form" class="modal-body">
+        <p class="modal-hint">
+          This system prompt controls how the structured analysis is
+          synthesized into the final image-generation prompt. It overrides
+          the active preset's built-in prompt without editing the preset
+          itself. The override applies only to <strong id="stage2-prompt-preset-name">the current preset</strong>.
+        </p>
+
+        <label for="stage2-prompt-input" class="label">
+          System prompt
+          <span id="stage2-prompt-status" class="label-hint"></span>
+        </label>
+        <textarea
+          id="stage2-prompt-input"
+          class="textarea stage2-prompt-textarea"
+          rows="18"
+          spellcheck="false"
+          required
+        ></textarea>
+        <span id="stage2-prompt-count" class="char-count char-count--inline">0 / 10000</span>
+
+        <div class="modal-actions">
+          <button type="button" id="stage2-prompt-use-default" class="btn-danger">Use preset default</button>
+          <div class="modal-actions__right">
+            <button type="button" id="stage2-prompt-reset" class="btn-secondary">Reset to default</button>
+            <button type="button" id="stage2-prompt-cancel" class="btn-secondary">Cancel</button>
+            <button type="submit" id="stage2-prompt-save" class="btn-primary">Save</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Save palette modal (ADR 0006) -->
+  <div id="save-palette-modal" class="modal" hidden role="dialog" aria-labelledby="save-palette-modal-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <header class="modal-header">
+        <h3 id="save-palette-modal-title">Save color palette</h3>
+        <button type="button" id="save-palette-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <form id="save-palette-form" class="modal-body">
+        <p id="save-palette-source" class="modal-hint"></p>
+
+        <label for="save-palette-name-input" class="label">Palette name</label>
+        <input
+          type="text"
+          id="save-palette-name-input"
+          class="text-input"
+          maxlength="60"
+          required
+          autocomplete="off"
+          aria-describedby="save-palette-count"
+        >
+        <span id="save-palette-count" class="char-count char-count--inline">0 / 60</span>
+
+        <div class="modal-actions">
+          <button type="button" id="save-palette-cancel" class="btn-secondary">Cancel</button>
+          <button type="submit" id="save-palette-save" class="btn-primary">Save palette</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Palette manager modal (ADR 0006) -->
+  <div id="palette-manager-modal" class="modal" hidden role="dialog" aria-labelledby="palette-manager-modal-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content modal-content--wide">
+      <header class="modal-header">
+        <h3 id="palette-manager-modal-title">Saved palettes</h3>
+        <button type="button" id="palette-manager-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <div class="palette-manager-controls">
+          <label for="palette-manager-search" class="label">Search by name</label>
+          <input
+            type="search"
+            id="palette-manager-search"
+            class="text-input"
+            placeholder="Type to filter…"
+            autocomplete="off"
+            aria-label="Search saved palettes by name"
+          >
+
+          <fieldset class="palette-manager-sort">
+            <legend class="label">Sort order</legend>
+            <label class="palette-sort-option">
+              <input type="radio" name="palette-sort" value="newest" checked>
+              Newest first
+            </label>
+            <label class="palette-sort-option">
+              <input type="radio" name="palette-sort" value="oldest">
+              Oldest first
+            </label>
+          </fieldset>
+        </div>
+
+        <div id="palette-manager-status" class="palette-manager-status" role="status" aria-live="polite">Loading…</div>
+        <ul id="palette-manager-list" class="palette-manager-list" hidden></ul>
+
+        <div class="modal-actions">
+          <button type="button" id="palette-manager-new-btn" class="btn-primary">New palette…</button>
+          <button type="button" id="palette-manager-cancel" class="btn-secondary">Close</button>
+        </div>
       </div>
     </div>
-  </main>
+  </div>
+
+  <!-- Edit palette modal (ADR 0013) -->
+  <div id="edit-palette-modal" class="modal" hidden role="dialog" aria-labelledby="edit-palette-modal-title" aria-describedby="edit-palette-modal-hint">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content modal-content--wide">
+      <header class="modal-header">
+        <h3 id="edit-palette-modal-title">Edit palette</h3>
+        <button type="button" id="edit-palette-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <form id="edit-palette-form" class="modal-body" novalidate>
+        <p id="edit-palette-modal-hint" class="modal-hint">
+          Change the name, tweak the colors, or add a new color. Hex, rgb(), and hsl() inputs are all accepted. Drag rows to set priority (top of the list is highest) and flag any color as a punchy accent to influence distribution in generated prompts.
+        </p>
+
+        <div class="edit-palette-source-row" id="edit-palette-source-row" hidden>
+          <span class="label-hint">Source:</span>
+          <span id="edit-palette-source" class="edit-palette-source"></span>
+        </div>
+
+        <label for="edit-palette-name-input" class="label">Palette name</label>
+        <input
+          type="text"
+          id="edit-palette-name-input"
+          class="text-input"
+          maxlength="60"
+          required
+          autocomplete="off"
+          aria-describedby="edit-palette-name-count edit-palette-name-error"
+        >
+        <span id="edit-palette-name-count" class="char-count char-count--inline">0 / 60</span>
+        <span id="edit-palette-name-error" class="edit-palette-error" role="alert" hidden></span>
+
+        <div class="edit-palette-preview-row">
+          <span class="label-hint">Preview</span>
+          <div id="edit-palette-preview" class="palette-preview" aria-live="polite" aria-label="Live preview of the palette as you edit it"></div>
+        </div>
+
+        <div class="edit-palette-distribution-row">
+          <span class="label-hint">Target distribution</span>
+          <div id="edit-palette-distribution" class="palette-preview__bars" aria-live="polite" aria-label="Live target distribution as you reorder and flag accents"></div>
+          <span id="edit-palette-distribution-sum" class="palette-preview__bars-sum" aria-live="polite"></span>
+        </div>
+
+        <fieldset class="edit-palette-colors-fieldset">
+          <legend class="label">Colors</legend>
+
+          <div class="edit-palette-accent-cap-row">
+            <label for="edit-palette-accent-max" class="label-hint">Accent cap</label>
+            <input
+              type="number"
+              id="edit-palette-accent-max"
+              class="text-input edit-palette-accent-cap-input"
+              min="1"
+              max="5"
+              step="1"
+              value="2"
+              aria-describedby="edit-palette-accent-max-hint"
+            >
+            <span id="edit-palette-accent-max-hint" class="field-action-hint">Max total mentions across all accent colors (1–5). Lower = sparser accents.</span>
+          </div>
+
+          <div class="edit-palette-strength-row">
+            <label for="edit-palette-strength" class="label-hint">Strength</label>
+            <select
+              id="edit-palette-strength"
+              class="text-input edit-palette-strength-input"
+              aria-describedby="edit-palette-strength-hint"
+            >
+              <option value="subtle">Subtle — gentle reference colors</option>
+              <option value="moderate" selected>Moderate — honor the palette closely</option>
+              <option value="strong">Strong — every named color appears at least once</option>
+              <option value="strict">Strict — per-color count is locked (validated post-hoc)</option>
+            </select>
+            <span id="edit-palette-strength-hint" class="field-action-hint">How aggressively the generated prompt should honor this palette. Subtle allows complementary tones; strict requires exact mention counts and is validated.</span>
+          </div>
+
+          <ul id="edit-palette-colors-list" class="edit-palette-colors-list"></ul>
+
+          <div class="edit-palette-add-row">
+            <label for="edit-palette-add-picker" class="visually-hidden-label">Pick a color</label>
+            <input type="color" id="edit-palette-add-picker" class="edit-palette-add-picker" value="#3b82f6" aria-label="Pick a color for the new entry">
+
+            <label for="edit-palette-add-hex" class="visually-hidden-label">Color value</label>
+            <input
+              type="text"
+              id="edit-palette-add-hex"
+              class="text-input edit-palette-add-hex"
+              placeholder="#d97706 / rgb(245,158,11) / hsl(36,91%,56%)"
+              value="#3b82f6"
+              aria-describedby="edit-palette-add-hex-hint"
+            >
+            <span id="edit-palette-add-hex-hint" class="field-action-hint">Accepts #hex, rgb(), or hsl().</span>
+
+            <label for="edit-palette-add-name" class="visually-hidden-label">Color name</label>
+            <input type="text" id="edit-palette-add-name" class="text-input edit-palette-add-name" placeholder="Color name" maxlength="60" autocomplete="off">
+
+            <button type="button" id="edit-palette-add-btn" class="btn-secondary">+ Add color</button>
+            <span id="edit-palette-add-error" class="edit-palette-error" role="alert" hidden></span>
+          </div>
+        </fieldset>
+
+        <fieldset class="palette-history-fieldset">
+          <legend class="label">Version history</legend>
+          <ul id="palette-history-list" class="palette-history-list"></ul>
+        </fieldset>
+
+        <details id="edit-palette-distribution-details" class="palette-distribution-details">
+          <summary class="palette-distribution-details__summary">Distribution dashboard</summary>
+          <div id="edit-palette-distribution-dashboard" class="palette-distribution-dashboard" aria-live="polite">
+            <p id="edit-palette-distribution-empty" class="palette-distribution-empty" hidden>
+              No runs yet for this palette. Click <strong>Generate prompt</strong> from the main wizard with this palette selected, then reopen the edit modal to see the target vs measured comparison.
+            </p>
+            <div id="edit-palette-distribution-content" hidden>
+              <p class="palette-distribution-meta">
+                <span id="edit-palette-distribution-recorded-at" class="palette-distribution-recorded-at"></span>
+                <span id="edit-palette-distribution-mentions" class="palette-distribution-mentions"></span>
+              </p>
+              <table class="palette-distribution-table" aria-label="Target vs measured color distribution from the latest run">
+                <thead>
+                  <tr>
+                    <th scope="col">Color</th>
+                    <th scope="col">Target</th>
+                    <th scope="col">Measured</th>
+                  </tr>
+                </thead>
+                <tbody id="edit-palette-distribution-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </details>
+
+        <div class="modal-actions">
+          <button type="button" id="edit-palette-delete" class="btn-danger">Delete palette…</button>
+          <button type="button" id="edit-palette-cancel" class="btn-secondary">Cancel</button>
+          <button type="submit" id="edit-palette-save" class="btn-primary">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Save directive modal (ADR 0009) -->
+  <div id="save-directive-modal" class="modal" hidden role="dialog" aria-labelledby="save-directive-modal-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <header class="modal-header">
+        <h3 id="save-directive-modal-title">Save directive</h3>
+        <button type="button" id="save-directive-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <form id="save-directive-form" class="modal-body">
+        <label for="save-directive-name-input" class="label">Directive name</label>
+        <input
+          type="text"
+          id="save-directive-name-input"
+          class="text-input"
+          maxlength="60"
+          required
+          autocomplete="off"
+          aria-describedby="save-directive-count"
+        >
+        <span id="save-directive-count" class="char-count char-count--inline">0 / 60</span>
+
+        <label for="save-directive-tags-input" class="label">Tags (optional, comma-separated)</label>
+        <input
+          type="text"
+          id="save-directive-tags-input"
+          class="text-input"
+          placeholder="color, composition, mood"
+          autocomplete="off"
+          aria-describedby="save-directive-tags-hint"
+        >
+        <span id="save-directive-tags-hint" class="field-action-hint">Lowercase, kebab-case identifiers. Up to 8 tags.</span>
+
+        <label class="label">Content preview</label>
+        <p id="save-directive-content-preview" class="save-directive-content-preview" aria-live="polite"></p>
+
+        <div class="modal-actions">
+          <button type="button" id="save-directive-cancel" class="btn-secondary">Cancel</button>
+          <button type="submit" id="save-directive-save" class="btn-primary">Save directive</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Manage directives modal (ADR 0009) -->
+  <div id="directives-manager-modal" class="modal" hidden role="dialog" aria-labelledby="directives-manager-modal-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content modal-content--wide">
+      <header class="modal-header">
+        <h3 id="directives-manager-modal-title">Saved directives</h3>
+        <button type="button" id="directives-manager-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <div class="directive-manager-controls">
+          <label for="directives-manager-search" class="label">Search by name or tag</label>
+          <input
+            type="search"
+            id="directives-manager-search"
+            class="text-input"
+            placeholder="Type to filter…"
+            autocomplete="off"
+            aria-label="Search saved directives by name or tag"
+          >
+
+          <fieldset class="directive-manager-sort">
+            <legend class="label">Sort order</legend>
+            <label class="directive-sort-option">
+              <input type="radio" name="directive-sort" value="newest" checked>
+              Newest first
+            </label>
+            <label class="directive-sort-option">
+              <input type="radio" name="directive-sort" value="oldest">
+              Oldest first
+            </label>
+            <label class="directive-sort-option">
+              <input type="radio" name="directive-sort" value="most-used">
+              Most used
+            </label>
+            <label class="directive-sort-option">
+              <input type="radio" name="directive-sort" value="name">
+              Name A–Z
+            </label>
+          </fieldset>
+
+          <div id="directives-tag-filter" class="directive-tag-filter" hidden>
+            <span class="label-hint">Tag filter:</span>
+          </div>
+        </div>
+
+        <div id="directives-manager-status" class="directive-manager-status" role="status" aria-live="polite">Loading…</div>
+        <ul id="directives-manager-list" class="directive-manager-list" hidden></ul>
+
+        <div class="modal-actions">
+          <button type="button" id="directives-import-btn" class="btn-secondary">Import…</button>
+          <input type="file" id="directives-import-input" accept="application/json,.json" hidden>
+          <button type="button" id="directives-export-btn" class="btn-secondary">Export all</button>
+          <button type="button" id="directives-manager-cancel" class="btn-secondary">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit directive modal (ADR 0009) -->
+  <div id="edit-directive-modal" class="modal" hidden role="dialog" aria-labelledby="edit-directive-modal-title">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content modal-content--wide">
+      <header class="modal-header">
+        <h3 id="edit-directive-modal-title">Edit directive</h3>
+        <button type="button" id="edit-directive-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <form id="edit-directive-form" class="modal-body">
+        <label for="edit-directive-name-input" class="label">Name</label>
+        <input
+          type="text"
+          id="edit-directive-name-input"
+          class="text-input"
+          maxlength="60"
+          required
+          autocomplete="off"
+          aria-describedby="edit-directive-name-count"
+        >
+        <span id="edit-directive-name-count" class="char-count char-count--inline">0 / 60</span>
+
+        <label for="edit-directive-tags-input" class="label">Tags (comma-separated)</label>
+        <input
+          type="text"
+          id="edit-directive-tags-input"
+          class="text-input"
+          placeholder="color, composition, mood"
+          autocomplete="off"
+          aria-describedby="edit-directive-tags-hint"
+        >
+        <span id="edit-directive-tags-hint" class="field-action-hint">Lowercase, kebab-case identifiers. Up to 8 tags.</span>
+
+        <label for="edit-directive-content-input" class="label">
+          Content
+          <span id="edit-directive-content-count" class="char-count char-count--inline">0 / 1000</span>
+        </label>
+        <textarea
+          id="edit-directive-content-input"
+          class="textarea"
+          rows="4"
+          maxlength="1000"
+          required
+          aria-describedby="edit-directive-content-count"
+        ></textarea>
+
+        <fieldset class="directive-history-fieldset">
+          <legend class="label">Version history</legend>
+          <ul id="directive-history-list" class="directive-history-list"></ul>
+        </fieldset>
+
+        <div class="modal-actions">
+          <button type="button" id="edit-directive-cancel" class="btn-secondary">Cancel</button>
+          <button type="button" id="edit-directive-delete" class="btn-danger">Delete</button>
+          <button type="submit" id="edit-directive-save" class="btn-primary">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <!-- Palette controls — rendered into the colors field-row on each
        analyze. Kept here as hidden placeholders so `dom.*` references
@@ -827,5 +997,6 @@
 
   <script src="/sortable.min.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/shell.js" defer></script>
 </body>
 </html>
