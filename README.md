@@ -807,6 +807,19 @@ that advances only when the user clicks Apply on a revision.
 | `POST` | `/api/chat/sessions/:id/apply/:messageId` | Apply an assistant's `suggested_prompt` to `current_prompt` |
 | `DELETE` | `/api/chat/sessions/:id` | Hard-delete a session and its full history |
 
+### Providers & keys (ADR 0024, UI-REDESIGN-SPEC §6)
+
+Keys are stored server-side in `data/provider_keys.json` (mode `0600`, gitignored)
+and are never returned to the browser — responses carry a mask only. Resolution
+order everywhere: env var → stored key → error.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/providers` | Status list: configured/source/masked key/base URL/models/default model/last test |
+| `PUT` | `/api/providers/:id/key` | Save a key (validates format); optional `test: true` |
+| `DELETE` | `/api/providers/:id/key` | Remove a stored key (409 when the key is env-provided) |
+| `POST` | `/api/providers/:id/test` | Cheapest-possible live ping; failure never blocks save |
+
 ### `POST /api/chat/sessions` body shape
 
 ```json

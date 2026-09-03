@@ -4927,8 +4927,10 @@ test('ADR 0017: stylesheet has accent / priority chip / drag handle / distributi
   // weight selector removed (ADR 0017)
   assertTrue(!/\.edit-palette-color-row__weight/.test(css),
              'weight slider CSS REMOVED');
-  // Distinct from --accent (the UI blue)
-  assertTrue(/--accent:\s*#3b82f6/.test(css), '--accent UI blue preserved');
+  // Distinct from --accent (the UI accent). UI-R5 / UI-REDESIGN-SPEC §7.1
+  // (Q3 resolved, approved) supersedes the old Tailwind blue with cyanotype.
+  assertTrue(/--accent:\s*#3fb6c8/.test(css), '--accent is the approved cyanotype');
+  assertTrue(/--color-accent:\s*#f59e0b/.test(css), '--color-accent amber unchanged (ADR 0014)');
 });
 
 // JS — buffer shape + render functions exist for ADR 0017
@@ -8877,6 +8879,86 @@ test('Chat regression: extractChatReply still coerces empty string to the fallba
   assertEqual(out.reply, "Sorry — I couldn't generate a response for that message. Please try again or rephrase your request.");
   assertEqual(out.suggested_prompt, null);
   assertEqual(out.fallback_reason, 'empty_content');
+});
+
+// ─── Slice UI-R2 — ADR 0024: provider key store & resolution order ─────────
+
+test('ADR 0024: maskProviderKey masks without leaking the full key', () => {
+  const { maskProviderKey } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(maskProviderKey(''), null, 'empty -> null');
+  assertEqual(maskProviderKey(null), null, 'null -> null');
+  assertEqual(maskProviderKey('short'), '••••', 'short keys fully masked');
+  const masked = maskProviderKey('sk-abc123def456ghi789');
+  assertTrue(masked.startsWith('sk-'), 'mask keeps prefix');
+  assertTrue(masked.endsWith('i789'), 'mask keeps last 4');
+  assertTrue(!masked.includes('abc123def456'), 'mask must hide the middle');
+});
+
+test('ADR 0024: validateProviderKey rejects empty/short/whitespace keys', () => {
+  const { validateProviderKey } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(validateProviderKey('').ok, false, 'empty rejected');
+  assertEqual(validateProviderKey('   ').ok, false, 'blank rejected');
+  assertEqual(validateProviderKey('short').ok, false, 'too short rejected');
+  assertEqual(validateProviderKey('has space inside key').ok, false, 'spaces rejected');
+  const good = validateProviderKey('  sk-test-abcdef123456  ');
+  assertEqual(good.ok, true, 'valid key accepted');
+  assertEqual(good.apiKey, 'sk-test-abcdef123456', 'input trimmed');
+});
+
+test('ADR 0024: stored-key round-trip + resolution order (env wins, stored fallback)', () => {
+  const os = require('os');
+  const tmp = path.join(os.tmpdir(), `provider_keys_test_${Date.now()}.json`);
+  process.env.PROVIDER_KEYS_FILE = tmp;
+  try {
+    const { saveProviderKeys, loadProviderKeys, resolveProviderCredential } =
+      require(path.join(PROJECT_ROOT, 'server.js'));
+    saveProviderKeys({ minimax: { apiKey: 'eyJstoredTestKey123456', addedAt: '2026-09-03T00:00:00.000Z' } });
+    const loaded = loadProviderKeys();
+    assertEqual(loaded.minimax.apiKey, 'eyJstoredTestKey123456', 'round-trip preserves key');
+    if (!process.env.MINIMAX_API_KEY) {
+      const cred = resolveProviderCredential('minimax');
+      assertEqual(cred.source, 'stored', 'stored key resolves when env absent');
+      assertEqual(cred.apiKey, 'eyJstoredTestKey123456', 'stored key value');
+      assertTrue(cred.baseUrl.includes('minimaxi'), 'default base URL applied');
+    }
+    if (!process.env.DASHSCOPE_API_KEY) {
+      assertEqual(resolveProviderCredential('alibaba').source, null, 'no key anywhere -> null source');
+    }
+  } finally {
+    delete process.env.PROVIDER_KEYS_FILE;
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+
+test('ADR 0024: the four provider endpoints are registered', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/app\.get\('\/api\/providers'/.test(serverText), 'GET /api/providers missing');
+  assertTrue(/app\.put\('\/api\/providers\/:id\/key'/.test(serverText), 'PUT /api/providers/:id/key missing');
+  assertTrue(/app\.delete\('\/api\/providers\/:id\/key'/.test(serverText), 'DELETE /api/providers/:id/key missing');
+  assertTrue(/app\.post\('\/api\/providers\/:id\/test'/.test(serverText), 'POST /api/providers/:id/test missing');
+  assertTrue(/data\/provider_keys\.json/.test(fs.readFileSync(path.join(PROJECT_ROOT, '.gitignore'), 'utf8')),
+    'provider_keys.json must be gitignored');
+});
+
+// ─── Slice UI-R1 — app shell static checks ─────────────────────────────────
+
+test('UI-R1: index.html has five view containers, primary nav, and no gated-step sections', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  for (const v of ['view-create', 'view-library', 'view-chat', 'view-providers', 'view-settings']) {
+    assertTrue(html.includes(`id="${v}"`), `missing view container: ${v}`);
+  }
+  assertTrue(/<nav[^>]*aria-label="Primary"/.test(html), 'missing <nav aria-label="Primary">');
+  assertEqual((html.match(/<section class="step"/g) || []).length, 0, 'gated-step pattern must be gone');
+  assertTrue(/skip-link/.test(html), 'skip link missing');
+});
+
+test('UI-R0: src/shell.js exists with router, focus-trap, and live-region utilities', () => {
+  const shellPath = path.join(PROJECT_ROOT, 'src', 'shell.js');
+  assertExists(shellPath);
+  const text = fs.readFileSync(shellPath, 'utf8');
+  assertTrue(/hashchange/.test(text), 'router must listen to hashchange');
+  assertTrue(/trapFocus|focus-trap/.test(text), 'focus-trap utility missing');
+  assertTrue(/announce|aria-live/.test(text), 'live-region utility missing');
 });
 
 (async () => {

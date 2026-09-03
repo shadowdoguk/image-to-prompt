@@ -254,3 +254,20 @@ resolved. Tracked here so the audit trail is clear:
 5. **`uploads/` is empty** ✅ — multer cleans up after each analyze.
    The `node tests/run-all.js` final-invariant test
    (`No stale upload files in uploads/`) guards against regressions.
+
+### UI-R series glossary (2026-09-03)
+
+- **View** — one of the five hash-routed destinations (Create, Library, Chat,
+  Providers & keys, Settings). Exactly one is mounted at a time; reachable in
+  one navigation action from anywhere. Not a scroll section.
+- **Providers & keys** — the API key management module (ADR 0024): per-provider
+  input, server-side storage (`data/provider_keys.json`, mode 0600), switching,
+  validation, masked display. Keys never travel to the browser.
+- **Provider dot** — header status glyph per provider: green configured+tested,
+  amber configured/untested, red missing/error. Click deep-links into
+  Providers & keys.
+- **Output options** — the collapsed disclosure on Create holding provider,
+  generation model, prompt format, and aspect ratio. Configuration, not action.
+- **Contact-sheet strip** — the film-frame presentation of the generated prompt
+  (sprocket corners, gradient frame edge, mono text, exposure counter). The
+  app's signature element.

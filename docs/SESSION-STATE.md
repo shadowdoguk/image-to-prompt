@@ -1,6 +1,6 @@
 # SESSION-STATE.md — image-to-prompt
 
-**Last updated:** 2026-09-02 at end of Session #11 (chat assistant "Sorry — I couldn't generate a response" fix, issue #26)
+**Last updated:** 2026-09-03 at end of UI-R series session (UI redesign slices UI-R0…UI-R5 shipped under standing full-autonomy directive)
 
 ---
 
@@ -9,12 +9,12 @@
 | Field | Value |
 |---|---|
 | **Workflow** | Existing (continue mode) |
-| **Current phase** | **🚢 SHIPPED — Slice 1 fully through Gate G5 (sign-off: approve / ship)** |
-| **Last completed slice** | Slice 1 — texture Populate-with-AI button (commit `0542dbf`, ship-verdict PASS at Gate G5, commit `d42561b`, session close-out `f9bfdd1`) |
-| **Currently in** | Awaiting Q3 decision: polish-triage slice vs Slice 2 (Phase C re-entry) |
-| **Open questions** | 1 — see §5 (Q3) |
-| **Kill criteria status** | 0 of 3 triggered (server.js size: 6675 lines, well under 290KB kill criterion from SPEC §11) |
-| **Next action** | Q3 prompt → pick polish-triage slice or Slice 2 (continue mode) |
+| **Current phase** | **🚢 SHIPPED — UI redesign series (UI-R0…UI-R5) complete; Slice 1 also shipped** |
+| **Last completed slice** | UI-R5 (identity + a11y close-out) — series reviews in `docs/CODE-REVIEW-UI-R*.md`, all verdicts `pass` |
+| **Currently in** | Frontier open — see §2 |
+| **Open questions** | 0 |
+| **Kill criteria status** | 0 of 3 triggered (server.js grew ~300 lines for ADR 0024; still far under kill criterion) |
+| **Next action** | Pick next slice from frontier (§2) or work BACKLOG |
 
 ---
 
@@ -27,14 +27,22 @@ Image-to-prompt generator for AI artists: upload image → 14-field structured p
 | # | Slice | Blocked by | Status | Commit | Code-review verdict | Context | Notes |
 |---|---|---|---|---|---|---|---|
 | 1 | texture Populate-with-AI button | — | ✅ SHIPPED | `0542dbf` (G4 pass+minor) → G5 PASS | fresh | 6th per-field vision endpoint; 9 tests; 14 polish findings (0 blocking) |
+| UI-R0 | Foundations (router, focus-trap, live-region, tokens) | spec approval | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R0-foundations.md` |
+| UI-R1 | App shell + Create restructure | UI-R0 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R1-shell-create.md` |
+| UI-R2 | Providers & keys (ADR 0024) | UI-R1 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R2-providers-keys.md` |
+| UI-R3 | Library view | UI-R1 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R3-library.md` |
+| UI-R4 | Chat + Settings views | UI-R1 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R4-chat-settings.md` |
+| UI-R5 | Identity + a11y close-out | UI-R1…4 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R5-identity-a11y.md` |
 
-**Frontier:** empty — Slice 1 fully shipped through Gate G5. **Phase C re-entry** to pick the next slice, OR a polish-triage housekeeping slice for the 14 Gate G5 findings.
+**Frontier:** open. The UI redesign series shipped the five-view shell, the Providers & keys module (ADR 0024), and closed polish findings A1–A3 + V1. Candidate next slices: (a) BACKLOG items re-parked from POLISH-AUDIT (P1 compression, P2 asset caching), (b) chat session rail upgrade, (c) Slice 2 (Phase C re-entry).
 
 ### Frontier
 
-Empty. Decision pending: Slice 2 (continue mode) or polish-triage slice (housekeeping).
+Open — pick from §2 candidates. No blockers.
 
 ## 3. Decisions since last session
+
+**UI-R series landed (2026-09-03, full-autonomy directive).** The approved `docs/UI-REDESIGN-SPEC.md` was implemented as six slices (UI-R0…UI-R5): five-view hash-routed shell (Create / Library / Chat / Providers & keys / Settings), the Providers & keys API-key module with server-side `0600` storage and env-precedence resolution (new **ADR 0024**), cyanotype identity + contact-sheet result strip, and the a11y structural pass (Lighthouse 97). 428/428 tests green; browser demo verified the key lifecycle end-to-end. Q1–Q4 resolved per spec §11 (hard cutover, import/export in Library, cyanotype, shell-before-keys).
 
 **Slice 1 landed.** No new ADRs added (3-criteria test failed — Slice 1 mirrors ADR 0018 verbatim; adding `docs/adr/0021-...md` would be redundant). Per SPEC §13, the Slice 1 glossary terms (texture field, Populate with AI, per-field vision endpoint) are in CONTEXT.md as `Stage 1.T`.
 

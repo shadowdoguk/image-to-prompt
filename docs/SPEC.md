@@ -682,3 +682,24 @@ I heard this as: "give me a provider selector so I can route through Kilo Code, 
 - **`isProviderLive(provider)`** — server-side helper. Returns true when `${PROVIDER}_LIVE=1` env var is set. False → adapter returns deterministic stub. *Source: SPEC §16.4.*
 - **`state.provider`** — frontend state flag, default `'kilo_code'`. Sibling to `state.llmModel`. *Source: SPEC §16.4.*
 
+
+---
+
+## Slice series UI-R — UI redesign implementation (2026-09-03)
+
+**Source:** `docs/UI-REDESIGN-SPEC.md` (Approved — Q1–Q4 resolved). Approved for
+implementation by standing full-autonomy directive (2026-09-03). All six slices
+below are pre-approved G1–G3 artifacts; each ships with tests + demo + code review.
+
+| Slice | Phase | Content | Guarantee |
+|---|---|---|---|
+| UI-R0 | 0 | Foundations: hash router, focus-trap, live-region, provider poller, `--focus` + reduced-motion tokens | zero behavior change |
+| UI-R1 | 1 | App shell + nav + Create restructure (§4.1); `<section class="step">` pattern removed | all endpoints + URL params unchanged |
+| UI-R2 | 2 | Provider keys: store + 4 endpoints (§6.4) + Providers & keys view + inline Create warnings; ADR 0024 | env-only deployments unchanged; stored keys additive |
+| UI-R3 | 3 | Library view: presets/palettes/directives, list + inline edit panel, REST-driven | data files untouched |
+| UI-R4 | 4 | Chat promoted to view; Settings view (system prompts + defaults) | chat API unchanged |
+| UI-R5 | 5 | Identity: cyanotype tokens, typefaces, contact-sheet strip; a11y audit close-out | visual-only |
+
+Constraints: no framework; vanilla JS only; `src/shell.js` (new) loads after
+`src/app.js` and never mutates `app.js` internals — integration via DOM IDs,
+REST endpoints, and `hashchange`. Acceptance criteria: `UI-REDESIGN-SPEC.md` §10.

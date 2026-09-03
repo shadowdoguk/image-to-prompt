@@ -137,3 +137,20 @@ Parked items that have since shipped. The original Parked-items entry is preserv
 - **Why parked:** Slice 3 was closed via the test suite (402/0) which provides strong evidence the wiring is correct, but does not exercise the actual `<select>` click → Kilo API call → response render → Apply flow. The visual-demo gate is the methodology's safety net for wiring bugs that pass regex tests but fail at the browser level.
 - **To un-park, we'd need:** First slice that builds on Slice 3 (likely Slice 4 — Tri-provider routing). In that session, do the manual smoke test: open the app in a browser, upload an image, switch `llm-model-selector` between all 6 models, generate, confirm the response envelope's `model` field reflects the selected model. Capture screenshots and attach to the slice's PR description.
 - **Estimated impact if pursued:** **LOW effort / MEDIUM value** — ~10 minutes of manual testing, captures the screenshots that close the G4 gate. No new code.
+
+### Item: Server serving follow-ups (re-parked from POLISH-AUDIT P1/P2 by UI-R5)
+
+- **Origin:** `docs/POLISH-AUDIT.md` §5 — P1 no compression middleware, P2 no long-term asset caching. UI-R5 closed the UI-side findings (A1–A3, V1) and re-parked these two server-ops items here.
+- **Why parked:** they are deployment concerns orthogonal to the UI redesign; the app is a local single-user tool where the gain is small.
+- **To un-park:** add `compression` middleware + `Cache-Control` on static assets in `server.js`; ~20 lines + 1 dependency (dependency adoption needs its own approval per methodology).
+
+### Item: Chat session rail (UI-R4 deviation)
+
+- **Origin:** `CODE-REVIEW-UI-R4-chat-settings.md`. The Chat view currently uses the existing conversation `<select>` bar rather than the spec §4.3 left session rail.
+- **Why parked:** functionally equivalent for the current session volume; a rail is a visual upgrade, not a capability gap.
+- **To un-park:** render `state.chatSessions` (via `/api/chat/sessions`) as a left rail with new/delete; ~120 lines of shell.js + CSS.
+
+### Item: Self-hosted woff2 typefaces (UI-R5 deviation)
+
+- **Origin:** `CODE-REVIEW-UI-R5-identity-a11y.md`. Spec §7.2 asked for self-hosted Space Grotesk / IBM Plex Sans / IBM Plex Mono; UI-R5 shipped local-first font stacks instead (zero download weight for a local tool).
+- **To un-park:** subset + bundle woff2 files and `@font-face` rules if the app ever ships beyond this machine.
