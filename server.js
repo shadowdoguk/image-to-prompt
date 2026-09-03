@@ -27,8 +27,12 @@ const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE_BYTES || '10485760', 10
 
 // Kilo AI Gateway — OpenAI-compatible API gateway to 500+ models.
 // Replaces direct Kilo Code API integration (ADR 0022).
-const KILO_API_KEY = process.env.KILO_API_KEY;
-const KILO_BASE_URL = process.env.KILO_BASE_URL || 'https://api.kilo.ai/api/gateway';
+// ADR 0024 — `let` (not `const`): when no env key is set, these are
+// re-synced from the stored-key store (data/provider_keys.json) at startup
+// and after every PUT/DELETE, so the 21 legacy `if (!kiloConfigured)` guard
+// sites below keep working unchanged. Env vars always remain authoritative.
+let KILO_API_KEY = process.env.KILO_API_KEY;
+let KILO_BASE_URL = process.env.KILO_BASE_URL || 'https://api.kilo.ai/api/gateway';
 
 // Hardcoded model list for the LLM model selector (SPEC §15.8).
 // Default is Kilo Code (user's familiar baseline).
@@ -45,11 +49,122 @@ const DEFAULT_LLM_MODEL = 'minimax/minimax-m3';
 const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp'];
 
-const kiloConfigured = Boolean(
+let kiloConfigured = Boolean(
   KILO_API_KEY &&
   KILO_API_KEY !== 'your-kilo-api-key-here' &&
   KILO_API_KEY.length > 10
 );
+
+// ─── ADR 0024 — Provider key store & resolution order ──────────────────────
+// Keys the user saves in the Providers & keys view persist here. Resolution
+// order for every provider call: env var → stored key → error. Env vars are
+// authoritative and reported as source 'env' (locked). The browser can write
+// and delete stored keys but never read one back — GET surfaces a mask only.
+
+const PROVIDER_LABELS = {
+  kilo_code: 'Kilo Code',
+  minimax: 'MiniMax direct',
+  alibaba: 'Alibaba DashScope'
+};
+
+const PROVIDER_ENV_KEYS = {
+  kilo_code: 'KILO_API_KEY',
+  minimax: 'MINIMAX_API_KEY',
+  alibaba: 'DASHSCOPE_API_KEY'
+};
+
+const PROVIDER_DEFAULT_BASE_URLS = {
+  kilo_code: 'https://api.kilo.ai/api/gateway',
+  minimax: 'https://api.minimaxi.com/v1',
+  alibaba: 'https://dashscope.aliyuncs.com/compatible-mode'
+};
+
+// Test seam: read lazily so tests can redirect the store to a tmp file.
+const providerKeysFilePath = () =>
+  process.env.PROVIDER_KEYS_FILE || path.join(__dirname, 'data', 'provider_keys.json');
+
+const loadProviderKeys = () => {
+  try {
+    const raw = fs.readFileSync(providerKeysFilePath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {}; // missing or corrupt file == no stored keys
+  }
+};
+
+const saveProviderKeys = (keys) => {
+  const filePath = providerKeysFilePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(keys, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(filePath, 0o600); } catch (_) { /* best effort on non-POSIX */ }
+};
+
+const maskProviderKey = (apiKey) => {
+  if (!apiKey || typeof apiKey !== 'string') return null;
+  const trimmed = apiKey.trim();
+  if (trimmed.length <= 8) return '••••';
+  return `${trimmed.slice(0, 3)}…${trimmed.slice(-4)}`;
+};
+
+const validateProviderKey = (apiKey) => {
+  if (typeof apiKey !== 'string' || apiKey.trim().length === 0) {
+    return { ok: false, error: 'API key must be a non-empty string.' };
+  }
+  const trimmed = apiKey.trim();
+  if (trimmed.length < 12) {
+    return { ok: false, error: 'API key looks too short (minimum 12 characters).' };
+  }
+  if (/\s/.test(trimmed)) {
+    return { ok: false, error: 'API key must not contain spaces.' };
+  }
+  return { ok: true, apiKey: trimmed };
+};
+
+/**
+ * Resolve the credential for a provider: env var wins, then the stored key.
+ * @returns {{ apiKey: string|null, baseUrl: string, source: 'env'|'stored'|null }}
+ */
+const resolveProviderCredential = (providerId) => {
+  const defaultBase = PROVIDER_DEFAULT_BASE_URLS[providerId] || '';
+  const envKey = process.env[PROVIDER_ENV_KEYS[providerId]];
+  if (envKey) {
+    const envBaseVar = `${PROVIDER_ENV_KEYS[providerId].replace(/_API_KEY$/, '')}_BASE_URL`;
+    return {
+      apiKey: envKey,
+      baseUrl: process.env[envBaseVar] || defaultBase,
+      source: 'env'
+    };
+  }
+  const stored = loadProviderKeys()[providerId];
+  if (stored && typeof stored.apiKey === 'string' && stored.apiKey.length > 0) {
+    return { apiKey: stored.apiKey, baseUrl: stored.baseUrl || defaultBase, source: 'stored' };
+  }
+  return { apiKey: null, baseUrl: defaultBase, source: null };
+};
+
+/**
+ * ADR 0024 — keep the module-level KILO_* variables (consumed by the legacy
+ * callKilo* helpers) in sync with the store. Env stays authoritative.
+ */
+const syncKiloCredentialFromStore = () => {
+  if (process.env.KILO_API_KEY) {
+    KILO_API_KEY = process.env.KILO_API_KEY;
+    KILO_BASE_URL = process.env.KILO_BASE_URL || PROVIDER_DEFAULT_BASE_URLS.kilo_code;
+  } else {
+    const cred = resolveProviderCredential('kilo_code');
+    KILO_API_KEY = cred.apiKey || undefined;
+    KILO_BASE_URL = cred.baseUrl || PROVIDER_DEFAULT_BASE_URLS.kilo_code;
+  }
+  kiloConfigured = Boolean(
+    KILO_API_KEY &&
+    KILO_API_KEY !== 'your-kilo-api-key-here' &&
+    KILO_API_KEY.length > 10
+  );
+};
+
+// Boot-time sync: stored keys from a previous run arm the app immediately.
+syncKiloCredentialFromStore();
 
 /**
  * Resolve and validate the LLM model from a request body.
@@ -91,7 +206,10 @@ const PROVIDER_DEFAULT_MODEL = {
 const isProviderLive = (provider) => {
   if (provider === 'kilo_code') return true;
   const envVar = `${provider.toUpperCase()}_LIVE`;
-  return process.env[envVar] === '1';
+  if (process.env[envVar] === '1') return true;
+  // ADR 0024 — a credential (env or stored) arms the provider. Saving a key
+  // in the Providers & keys view is what makes MiniMax/Alibaba usable.
+  return Boolean(resolveProviderCredential(provider).apiKey);
 };
 
 /**
@@ -2070,6 +2188,8 @@ const sanitizeError = (message) => {
   if (!message || typeof message !== 'string') return 'An unexpected error occurred.';
   return message
     .replace(/sk-[a-zA-Z0-9]{20,}/g, '[API_KEY_REDACTED]')
+    // ADR 0024 — MiniMax JWT-shaped keys, plus generic long bearer-ish tokens
+    .replace(/eyJ[A-Za-z0-9_-]{20,}/g, '[API_KEY_REDACTED]')
     .replace(/Bearer\s+[a-zA-Z0-9_-]+/g, 'Bearer [TOKEN_REDACTED]')
     .replace(/localhost:\d+/g, '[HOST_REDACTED]')
     .substring(0, 500);
@@ -7172,6 +7292,172 @@ app.delete('/api/chat/sessions/:id', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Providers & keys — ADR 0024 / UI-REDESIGN-SPEC §6.4
+// Additive endpoints. Keys never travel to the browser: GET returns status +
+// mask only. Resolution order everywhere: env var → stored key → error.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const buildProviderStatusList = () => {
+  const stored = loadProviderKeys();
+  return ALLOWED_PROVIDERS.map((id) => {
+    const cred = resolveProviderCredential(id);
+    return {
+      id,
+      label: PROVIDER_LABELS[id] || id,
+      configured: Boolean(cred.apiKey),
+      source: cred.source, // 'env' | 'stored' | null
+      keyMasked: maskProviderKey(cred.apiKey),
+      baseUrl: cred.baseUrl,
+      models: ALLOWED_LLM_MODELS_BY_PROVIDER[id] || [],
+      defaultModel: PROVIDER_DEFAULT_MODEL[id],
+      addedAt: (stored[id] && stored[id].addedAt) || null,
+      lastTest: (stored[id] && stored[id].lastTest) || null
+    };
+  });
+};
+
+/**
+ * Cheapest-possible live ping (minimal message, small cap where the adapter
+ * supports it, 15s timeout). Failure never blocks saving a key.
+ */
+const testProviderConnection = async (providerId) => {
+  const cred = resolveProviderCredential(providerId);
+  const stamp = () => new Date().toISOString();
+  if (!cred.apiKey) {
+    return { ok: false, at: stamp(), latencyMs: 0, error: 'No key configured for this provider.' };
+  }
+  const startedAt = Date.now();
+  try {
+    if (providerId === 'kilo_code') {
+      // kilo_code dispatch is passthrough to the legacy callKilo* helpers, so
+      // ping the OpenAI-compatible gateway directly with a 5-token cap.
+      const resp = await fetch(`${cred.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cred.apiKey}` },
+        body: JSON.stringify({
+          model: PROVIDER_DEFAULT_MODEL.kilo_code,
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 5
+        }),
+        signal: AbortSignal.timeout(15000)
+      });
+      const latencyMs = Date.now() - startedAt;
+      if (resp.ok) return { ok: true, at: stamp(), latencyMs, error: null };
+      let error = `HTTP ${resp.status}`;
+      try {
+        const j = await resp.json();
+        error = (j && j.error && (j.error.message || j.error)) || error;
+      } catch (_) { /* non-JSON error body */ }
+      return { ok: false, at: stamp(), latencyMs, error: String(error).substring(0, 200) };
+    }
+    const r = await callProvider(providerId, PROVIDER_DEFAULT_MODEL[providerId], 'chat', {
+      messages: [{ role: 'user', content: 'ping' }]
+    });
+    const latencyMs = Date.now() - startedAt;
+    return {
+      ok: Boolean(r.ok && !r.stub),
+      at: stamp(),
+      latencyMs,
+      error: r.ok ? null : String(r.error || 'Unknown error').substring(0, 200)
+    };
+  } catch (e) {
+    return { ok: false, at: stamp(), latencyMs: Date.now() - startedAt, error: String((e && e.message) || e).substring(0, 200) };
+  }
+};
+
+const recordProviderTest = (providerId, result) => {
+  try {
+    const keys = loadProviderKeys();
+    keys[providerId] = Object.assign({}, keys[providerId] || {}, { lastTest: result });
+    saveProviderKeys(keys);
+  } catch (_) { /* test history is best-effort */ }
+};
+
+app.get('/api/providers', (req, res) => {
+  res.json({ success: true, data: buildProviderStatusList() });
+});
+
+app.put('/api/providers/:id/key', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!ALLOWED_PROVIDERS.includes(id)) {
+      return res.status(404).json({ success: false, error: `Unknown provider "${id}".` });
+    }
+    const body = req.body || {};
+    const check = validateProviderKey(body.apiKey);
+    if (!check.ok) return res.status(400).json({ success: false, error: check.error });
+    let baseUrl = null;
+    if (body.baseUrl !== undefined && body.baseUrl !== null && body.baseUrl !== '') {
+      if (typeof body.baseUrl !== 'string' || !/^https?:\/\//.test(body.baseUrl)) {
+        return res.status(400).json({ success: false, error: 'baseUrl must be an http(s) URL.' });
+      }
+      baseUrl = body.baseUrl.trim();
+    }
+    const keys = loadProviderKeys();
+    keys[id] = {
+      apiKey: check.apiKey,
+      ...(baseUrl ? { baseUrl } : {}),
+      addedAt: new Date().toISOString(),
+      lastTest: (keys[id] && keys[id].lastTest) || null
+    };
+    saveProviderKeys(keys);
+    syncKiloCredentialFromStore();
+    let testResult = null;
+    if (body.test === true) {
+      testResult = await testProviderConnection(id);
+      recordProviderTest(id, testResult);
+    }
+    const status = buildProviderStatusList().find((p) => p.id === id);
+    const warning = process.env[PROVIDER_ENV_KEYS[id]]
+      ? `Key saved, but the ${PROVIDER_ENV_KEYS[id]} environment variable takes precedence and will be used instead.`
+      : null;
+    res.json({ success: true, data: status, warning, testResult });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+app.delete('/api/providers/:id/key', (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!ALLOWED_PROVIDERS.includes(id)) {
+      return res.status(404).json({ success: false, error: `Unknown provider "${id}".` });
+    }
+    const cred = resolveProviderCredential(id);
+    if (cred.source === 'env') {
+      return res.status(409).json({
+        success: false,
+        error: `This provider's key comes from the ${PROVIDER_ENV_KEYS[id]} environment variable and cannot be removed from the UI.`
+      });
+    }
+    const keys = loadProviderKeys();
+    if (!keys[id]) {
+      return res.status(404).json({ success: false, error: `No stored key for provider "${id}".` });
+    }
+    delete keys[id];
+    saveProviderKeys(keys);
+    syncKiloCredentialFromStore();
+    res.json({ success: true, data: buildProviderStatusList().find((p) => p.id === id) });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+app.post('/api/providers/:id/test', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!ALLOWED_PROVIDERS.includes(id)) {
+      return res.status(404).json({ success: false, error: `Unknown provider "${id}".` });
+    }
+    const result = await testProviderConnection(id);
+    recordProviderTest(id, result);
+    res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Error handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -7247,8 +7533,10 @@ const callKiloAdapter = async (model, endpoint, args) => {
  * (chatcompletion_v2 endpoint). Live when MINIMAX_LIVE=1.
  */
 const callMiniMaxAdapter = async (model, endpoint, args) => {
-  const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY;
-  const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL || 'https://api.minimaxi.com/v1';
+  // ADR 0024 — env → stored resolution.
+  const cred = resolveProviderCredential('minimax');
+  const MINIMAX_API_KEY = cred.apiKey;
+  const MINIMAX_BASE_URL = cred.baseUrl;
   if (!MINIMAX_API_KEY) {
     return { ok: false, content: '', raw: {}, error: 'MINIMAX_API_KEY not set', provider: 'minimax', model, stub: false };
   }
@@ -7282,8 +7570,10 @@ const callMiniMaxAdapter = async (model, endpoint, args) => {
  * (compatible-mode/v1/chat/completions). Live when DASHSCOPE_LIVE=1.
  */
 const callAlibabaAdapter = async (model, endpoint, args) => {
-  const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
-  const DASHSCOPE_BASE_URL = process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode';
+  // ADR 0024 — env → stored resolution.
+  const cred = resolveProviderCredential('alibaba');
+  const DASHSCOPE_API_KEY = cred.apiKey;
+  const DASHSCOPE_BASE_URL = cred.baseUrl;
   if (!DASHSCOPE_API_KEY) {
     return { ok: false, content: '', raw: {}, error: 'DASHSCOPE_API_KEY not set', provider: 'alibaba', model, stub: false };
   }
@@ -7328,6 +7618,18 @@ module.exports = {
   PROVIDER_DEFAULT_MODEL,
   isProviderLive,
   resolveProviderAndModel,
+  // ADR 0024 — provider key store & resolution order
+  PROVIDER_LABELS,
+  PROVIDER_DEFAULT_BASE_URLS,
+  providerKeysFilePath,
+  loadProviderKeys,
+  saveProviderKeys,
+  maskProviderKey,
+  validateProviderKey,
+  resolveProviderCredential,
+  syncKiloCredentialFromStore,
+  buildProviderStatusList,
+  testProviderConnection,
   callProvider,
   callKiloAdapter,
   callMiniMaxAdapter,

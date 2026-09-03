@@ -19,6 +19,9 @@ data/palette_runs.json
 data/palettes.json
 data/stage2_overrides.json
 data/subject_prompt.json
+# ADR 0024 — provider API keys saved via the Providers & keys view.
+# Never part of the codebase.
+data/provider_keys.json
 # Agent runtime / scratch space — pre-existing untracked dirs.
 # Treated like .opencode/ above. Local-only; not part of the codebase.
 .superpowers/
