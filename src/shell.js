@@ -343,6 +343,20 @@
         }, 30);
       }
     }
+
+    // Acceptance criterion 5 — exactly one btn-primary per view: the focused
+    // (or first) unconfigured provider owns the dominant "Save key" action.
+    const hashFocus = parseHash().params.get('focus');
+    const primaryProvider =
+      providerCache.find((p) => p.id === hashFocus && !p.configured) ||
+      providerCache.find((p) => !p.configured);
+    if (primaryProvider) {
+      const btn = wrap.querySelector(`#provider-card-${primaryProvider.id} .key-save-btn`);
+      if (btn) {
+        btn.classList.remove('btn-secondary');
+        btn.classList.add('btn-primary');
+      }
+    }
   };
 
   const lastTestText = (t) => {
@@ -367,7 +381,7 @@
     </div>
     <p class="label-hint" id="key-hint-${providerId}">${escapeHtml(KEY_FORMAT_HINTS[providerId] || '')} Minimum 12 characters. Never sent back to the browser after saving.</p>
     <div class="provider-card__actions">
-      <button type="button" class="btn-primary key-save-btn" data-action="save">Save key</button>
+      <button type="button" class="btn-secondary key-save-btn" data-action="save">Save key</button>
     </div>`;
 
   const wireProviderCard = (card, provider) => {
