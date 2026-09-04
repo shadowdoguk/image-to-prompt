@@ -1,6 +1,6 @@
 # SESSION-STATE.md — image-to-prompt
 
-**Last updated:** 2026-09-03 at end of UI-R series session (UI redesign slices UI-R0…UI-R5 shipped under standing full-autonomy directive)
+**Last updated:** 2026-09-04 after slice UI-R6 (provider settings full editability + always-on test buttons, direct user directive)
 
 ---
 
@@ -10,7 +10,7 @@
 |---|---|
 | **Workflow** | Existing (continue mode) |
 | **Current phase** | **🚢 SHIPPED — UI redesign series (UI-R0…UI-R5) complete; Slice 1 also shipped** |
-| **Last completed slice** | UI-R5 (identity + a11y close-out) — series reviews in `docs/CODE-REVIEW-UI-R*.md`, all verdicts `pass` |
+| **Last completed slice** | UI-R6 (provider settings full editability + test buttons) — review in `docs/CODE-REVIEW-UI-R6-provider-editability.md`, verdict `pass` |
 | **Currently in** | Frontier open — see §2 |
 | **Open questions** | 0 |
 | **Kill criteria status** | 0 of 3 triggered (server.js grew ~300 lines for ADR 0024; still far under kill criterion) |
@@ -33,6 +33,7 @@ Image-to-prompt generator for AI artists: upload image → 14-field structured p
 | UI-R3 | Library view | UI-R1 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R3-library.md` |
 | UI-R4 | Chat + Settings views | UI-R1 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R4-chat-settings.md` |
 | UI-R5 | Identity + a11y close-out | UI-R1…4 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R5-identity-a11y.md` |
+| UI-R6 | Provider settings full editability + always-on test buttons | — | ✅ SHIPPED | 2026-09-04 | pass | `CODE-REVIEW-UI-R6-provider-editability.md` | direct user directive |
 
 **Frontier:** open. The UI redesign series shipped the five-view shell, the Providers & keys module (ADR 0024), and closed polish findings A1–A3 + V1. Candidate next slices: (a) BACKLOG items re-parked from POLISH-AUDIT (P1 compression, P2 asset caching), (b) chat session rail upgrade, (c) Slice 2 (Phase C re-entry).
 
@@ -41,6 +42,8 @@ Image-to-prompt generator for AI artists: upload image → 14-field structured p
 Open — pick from §2 candidates. No blockers.
 
 ## 3. Decisions since last session
+
+**UI-R6 landed (2026-09-04, direct user directive).** Providers & keys view rebuilt around one always-editable form per provider (key + base URL) with a Test connection button in every state. Status payload gained `defaultBaseUrl` / `envVar` / `hasStoredKey`; PUT now supports endpoint-only updates (stored key preserved, `baseUrl:''` resets to default). **Supersedes one ADR 0024 behavior:** DELETE no longer 409s on env-sourced providers — it only ever manages the local store (env vars untouched by the route). Env precedence itself is unchanged. Full E2E verified in browser; review `docs/CODE-REVIEW-UI-R6-provider-editability.md` (verdict pass).
 
 **UI-R series landed (2026-09-03, full-autonomy directive).** The approved `docs/UI-REDESIGN-SPEC.md` was implemented as six slices (UI-R0…UI-R5): five-view hash-routed shell (Create / Library / Chat / Providers & keys / Settings), the Providers & keys API-key module with server-side `0600` storage and env-precedence resolution (new **ADR 0024**), cyanotype identity + contact-sheet result strip, and the a11y structural pass (Lighthouse 97). 428/428 tests green; browser demo verified the key lifecycle end-to-end. Q1–Q4 resolved per spec §11 (hard cutover, import/export in Library, cyanotype, shell-before-keys).
 

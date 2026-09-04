@@ -286,36 +286,27 @@
         : p.lastTest && p.lastTest.ok ? 'badge badge--ok'
         : 'badge badge--untested';
       const badgeText = !p.configured ? '○ No key'
-        : p.source === 'env' ? '● Configured — provided by server environment (locked)'
+        : p.source === 'env' ? '● Configured — provided by server environment'
         : `● Key saved here · ${p.keyMasked || ''} · added ${p.addedAt ? new Date(p.addedAt).toLocaleDateString() : 'recently'}`;
 
-      let keySection = '';
-      if (p.source === 'env') {
-        keySection = `
+      // UI-R6 — one always-editable form in every state (env / stored / none).
+      // Env precedence is informational, never a lock-out.
+      const envNote = p.source === 'env' ? `
           <p class="provider-card__note">
-            This key comes from an environment variable on the server, so it cannot be
-            edited or removed from this screen. Saved keys are only used when no
-            environment variable is present.
-          </p>`;
-      } else if (p.configured) {
-        keySection = `
-          <div class="provider-card__actions">
-            <button type="button" class="btn-secondary" data-action="replace">Replace key</button>
-            <button type="button" class="btn-danger-outline btn-secondary" data-action="remove">Remove key</button>
-            <button type="button" class="btn-secondary" data-action="test">Test connection</button>
+            The <code>${escapeHtml(p.envVar || 'environment variable')}</code> is active on the server and takes
+            precedence. Values saved here are kept and used as soon as that variable is unset.
+          </p>` : '';
+      const keySection = `
+          ${envNote}
+          <div class="provider-card__keyform">
+            ${keyFormMarkup(p)}
           </div>
-          <p class="provider-card__test" data-role="test-result">${p.lastTest ? lastTestText(p.lastTest) : 'Never tested.'}</p>
-          <div class="provider-card__keyform" data-role="key-form" hidden>
-            ${keyFormMarkup(p.id)}
-          </div>`;
-      } else {
-        keySection = `
-          ${keyFormMarkup(p.id)}
           <div class="provider-card__actions">
+            <button type="button" class="btn-secondary key-save-btn" data-action="save">${p.configured ? 'Save changes' : 'Save key'}</button>
             <button type="button" class="btn-secondary" data-action="test">Test connection</button>
+            ${p.hasStoredKey ? '<button type="button" class="btn-danger-outline btn-secondary" data-action="remove">Remove saved key</button>' : ''}
           </div>
           <p class="provider-card__test" data-role="test-result">${p.lastTest ? lastTestText(p.lastTest) : 'Never tested.'}</p>`;
-      }
 
       card.innerHTML = `
         <header class="provider-card__header">
@@ -366,28 +357,37 @@
     return `Last test failed (${escapeHtml(t.error || 'unknown error')}) · ${when}`;
   };
 
-  const keyFormMarkup = (providerId) => `
-    <label for="key-input-${providerId}" class="label">API key</label>
+  const keyFormMarkup = (p) => `
+    <label for="key-input-${p.id}" class="label">API key</label>
     <div class="key-input-row">
       <input
         type="password"
-        id="key-input-${providerId}"
+        id="key-input-${p.id}"
         class="text-input key-input"
         autocomplete="off"
         spellcheck="false"
-        aria-describedby="key-hint-${providerId}"
+        placeholder="${p.configured ? 'Saved key active — type a new key to replace it' : ''}"
+        aria-describedby="key-hint-${p.id}"
       >
       <button type="button" class="btn-secondary key-show-btn" data-action="toggle-show" aria-pressed="false" aria-label="Show key">Show</button>
     </div>
-    <p class="label-hint" id="key-hint-${providerId}">${escapeHtml(KEY_FORMAT_HINTS[providerId] || '')} Minimum 12 characters. Never sent back to the browser after saving.</p>
-    <div class="provider-card__actions">
-      <button type="button" class="btn-secondary key-save-btn" data-action="save">Save key</button>
-    </div>`;
+    <p class="label-hint" id="key-hint-${p.id}">${escapeHtml(KEY_FORMAT_HINTS[p.id] || '')} Minimum 12 characters. Never sent back to the browser after saving.</p>
+    <label for="baseurl-input-${p.id}" class="label">Base URL (endpoint)</label>
+    <input
+      type="text"
+      id="baseurl-input-${p.id}"
+      class="text-input baseurl-input"
+      value="${escapeHtml(p.baseUrl || '')}"
+      placeholder="${escapeHtml(p.defaultBaseUrl || '')}"
+      autocomplete="off"
+      spellcheck="false"
+      aria-describedby="baseurl-hint-${p.id}"
+    >
+    <p class="label-hint" id="baseurl-hint-${p.id}">Editable at any time. Clear the field and save to reset to the default endpoint.</p>`;
 
   const wireProviderCard = (card, provider) => {
     const statusEl = card.querySelector('[data-role="save-status"]');
     const testEl = card.querySelector('[data-role="test-result"]');
-    const keyForm = card.querySelector('[data-role="key-form"]');
 
     card.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-action]');
@@ -402,14 +402,6 @@
         btn.textContent = show ? 'Hide' : 'Show';
         btn.setAttribute('aria-pressed', String(show));
         btn.setAttribute('aria-label', show ? 'Hide key' : 'Show key');
-        return;
-      }
-
-      if (action === 'replace') {
-        if (keyForm) {
-          keyForm.hidden = !keyForm.hidden;
-          if (!keyForm.hidden) ($(`key-input-${provider.id}`) || {}).focus && $(`key-input-${provider.id}`).focus();
-        }
         return;
       }
 
@@ -447,17 +439,28 @@
 
       if (action === 'save') {
         const input = $(`key-input-${provider.id}`);
+        const baseUrlInput = $(`baseurl-input-${provider.id}`);
         if (!input) return;
-        const apiKey = input.value;
+        const apiKey = input.value.trim();
+        if (!apiKey && !provider.configured) {
+          if (statusEl) statusEl.textContent = 'Enter an API key before saving.';
+          input.focus();
+          return;
+        }
         btn.disabled = true;
         try {
+          // UI-R6 — key field empty on a configured provider == keep the
+          // stored key (endpoint-only update); baseUrl is always editable.
+          const payload = {};
+          if (apiKey) payload.apiKey = apiKey;
+          if (baseUrlInput) payload.baseUrl = baseUrlInput.value.trim();
           const body = await api(`/api/providers/${provider.id}/key`, {
             method: 'PUT',
-            body: JSON.stringify({ apiKey })
+            body: JSON.stringify(payload)
           });
           input.value = '';
-          announce(`${provider.label} key saved.`);
-          if (statusEl) statusEl.textContent = body.warning || 'Key saved.';
+          announce(`${provider.label} settings saved.`);
+          if (statusEl) statusEl.textContent = body.warning || (apiKey ? 'Key saved.' : 'Endpoint updated.');
           await fetchProviders();
           if (pendingReturn) {
             const dest = pendingReturn;

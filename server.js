@@ -7308,6 +7308,9 @@ const buildProviderStatusList = () => {
       source: cred.source, // 'env' | 'stored' | null
       keyMasked: maskProviderKey(cred.apiKey),
       baseUrl: cred.baseUrl,
+      defaultBaseUrl: PROVIDER_DEFAULT_BASE_URLS[id] || '',
+      envVar: PROVIDER_ENV_KEYS[id] || null,
+      hasStoredKey: Boolean(stored[id] && stored[id].apiKey),
       models: ALLOWED_LLM_MODELS_BY_PROVIDER[id] || [],
       defaultModel: PROVIDER_DEFAULT_MODEL[id],
       addedAt: (stored[id] && stored[id].addedAt) || null,
@@ -7384,20 +7387,39 @@ app.put('/api/providers/:id/key', async (req, res) => {
       return res.status(404).json({ success: false, error: `Unknown provider "${id}".` });
     }
     const body = req.body || {};
-    const check = validateProviderKey(body.apiKey);
-    if (!check.ok) return res.status(400).json({ success: false, error: check.error });
-    let baseUrl = null;
-    if (body.baseUrl !== undefined && body.baseUrl !== null && body.baseUrl !== '') {
+    const keys = loadProviderKeys();
+    const existing = keys[id] && typeof keys[id].apiKey === 'string' && keys[id].apiKey.length > 0 ? keys[id] : null;
+    // UI-R6 — baseUrl semantics: undefined/null keeps the stored endpoint,
+    // '' resets to the provider default, anything else must be http(s).
+    let baseUrl;
+    if (body.baseUrl === undefined || body.baseUrl === null) {
+      baseUrl = (existing && existing.baseUrl) || null;
+    } else if (body.baseUrl === '') {
+      baseUrl = null;
+    } else {
       if (typeof body.baseUrl !== 'string' || !/^https?:\/\//.test(body.baseUrl)) {
         return res.status(400).json({ success: false, error: 'baseUrl must be an http(s) URL.' });
       }
       baseUrl = body.baseUrl.trim();
     }
-    const keys = loadProviderKeys();
+    // UI-R6 — apiKey may be omitted when a stored key exists, so the endpoint
+    // (and other settings) stay editable without re-entering credentials.
+    let apiKey;
+    let keyChanged = true;
+    if (typeof body.apiKey === 'string' && body.apiKey.trim() !== '') {
+      const check = validateProviderKey(body.apiKey);
+      if (!check.ok) return res.status(400).json({ success: false, error: check.error });
+      apiKey = check.apiKey;
+    } else if (existing) {
+      apiKey = existing.apiKey;
+      keyChanged = false;
+    } else {
+      return res.status(400).json({ success: false, error: 'API key must be a non-empty string.' });
+    }
     keys[id] = {
-      apiKey: check.apiKey,
+      apiKey,
       ...(baseUrl ? { baseUrl } : {}),
-      addedAt: new Date().toISOString(),
+      addedAt: keyChanged ? new Date().toISOString() : existing.addedAt,
       lastTest: (keys[id] && keys[id].lastTest) || null
     };
     saveProviderKeys(keys);
@@ -7423,13 +7445,9 @@ app.delete('/api/providers/:id/key', (req, res) => {
     if (!ALLOWED_PROVIDERS.includes(id)) {
       return res.status(404).json({ success: false, error: `Unknown provider "${id}".` });
     }
-    const cred = resolveProviderCredential(id);
-    if (cred.source === 'env') {
-      return res.status(409).json({
-        success: false,
-        error: `This provider's key comes from the ${PROVIDER_ENV_KEYS[id]} environment variable and cannot be removed from the UI.`
-      });
-    }
+    // UI-R6 — DELETE only ever touches the local store, so it is always
+    // allowed: an active env var is never modified by this route, and a
+    // shadowed stored key can still be cleaned up from the UI.
     const keys = loadProviderKeys();
     if (!keys[id]) {
       return res.status(404).json({ success: false, error: `No stored key for provider "${id}".` });

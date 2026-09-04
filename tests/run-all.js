@@ -8961,6 +8961,106 @@ test('UI-R0: src/shell.js exists with router, focus-trap, and live-region utilit
   assertTrue(/announce|aria-live/.test(text), 'live-region utility missing');
 });
 
+// ─── Slice UI-R6 — full provider editability + always-on test buttons ──────
+
+test('UI-R6: status list exposes envVar, hasStoredKey, defaultBaseUrl for every provider', () => {
+  const os = require('os');
+  const tmp = path.join(os.tmpdir(), `provider_keys_uir6_${Date.now()}.json`);
+  process.env.PROVIDER_KEYS_FILE = tmp;
+  try {
+    const { saveProviderKeys, buildProviderStatusList } = require(path.join(PROJECT_ROOT, 'server.js'));
+    saveProviderKeys({ minimax: { apiKey: 'eyJstoredUIR6Key123456', baseUrl: 'https://gw.example.test/v1', addedAt: '2026-09-04T00:00:00.000Z' } });
+    const list = buildProviderStatusList();
+    assertEqual(list.length, 3, 'three providers listed');
+    for (const p of list) {
+      assertTrue(typeof p.defaultBaseUrl === 'string' && /^https?:\/\//.test(p.defaultBaseUrl), `defaultBaseUrl for ${p.id}`);
+      assertTrue(typeof p.hasStoredKey === 'boolean', `hasStoredKey boolean for ${p.id}`);
+      assertTrue(typeof p.envVar === 'string' && p.envVar.endsWith('_API_KEY'), `envVar exposed for ${p.id}`);
+    }
+    const mm = list.find((p) => p.id === 'minimax');
+    assertEqual(mm.hasStoredKey, true, 'stored key flagged');
+    if (!process.env.MINIMAX_API_KEY) {
+      assertEqual(mm.baseUrl, 'https://gw.example.test/v1', 'stored baseUrl surfaced');
+    }
+  } finally {
+    delete process.env.PROVIDER_KEYS_FILE;
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+
+test('UI-R6 HTTP: endpoint-only PUT keeps stored key, empty baseUrl resets, DELETE always manages store', async () => {
+  if (process.env.MINIMAX_API_KEY) return; // env precedence would shadow the store
+  const os = require('os');
+  const tmp = path.join(os.tmpdir(), `provider_keys_uir6_http_${Date.now()}.json`);
+  process.env.PROVIDER_KEYS_FILE = tmp;
+  const srv = await startTestServer();
+  try {
+    const put = (payload) => fetchJson(`${srv.base}/api/providers/minimax/key`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    const r1 = await put({ apiKey: 'eyJfirstStoredKey12345', baseUrl: 'https://gw1.example.test/v1' });
+    assertEqual(r1.status, 200, 'initial save accepted');
+    const mask1 = r1.body.data.keyMasked;
+    assertEqual(r1.body.data.baseUrl, 'https://gw1.example.test/v1', 'endpoint saved');
+    const r2 = await put({ baseUrl: 'https://gw2.example.test/v2' }); // no apiKey -> keep key
+    assertEqual(r2.status, 200, 'endpoint-only update accepted');
+    assertEqual(r2.body.data.baseUrl, 'https://gw2.example.test/v2', 'endpoint updated');
+    assertEqual(r2.body.data.keyMasked, mask1, 'stored key preserved across endpoint-only update');
+    const r3 = await put({ baseUrl: '' }); // explicit reset
+    assertEqual(r3.status, 200, 'baseUrl reset accepted');
+    assertEqual(r3.body.data.baseUrl, r3.body.data.defaultBaseUrl, 'baseUrl reset to provider default');
+    const r4 = await fetchJson(`${srv.base}/api/providers/minimax/key`, { method: 'DELETE' });
+    assertEqual(r4.status, 200, 'DELETE removes stored key');
+    const r5 = await put({ baseUrl: 'https://gw3.example.test/v3' }); // no key anywhere
+    assertEqual(r5.status, 400, 'endpoint-only update without any stored key rejected');
+    const r6 = await fetchJson(`${srv.base}/api/providers/minimax/key`, { method: 'DELETE' });
+    assertEqual(r6.status, 404, 'DELETE with nothing stored -> 404');
+  } finally {
+    await srv.close();
+    delete process.env.PROVIDER_KEYS_FILE;
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+
+test('UI-R6 HTTP: POST /api/providers/:id/test runs the validation workflow for every provider', async () => {
+  const srv = await startTestServer();
+  try {
+    // Mock any live chat-completions ping so the workflow runs deterministically.
+    await withMockChatProvider([{}, {}, {}], async () => {
+      for (const id of ['kilo_code', 'minimax', 'alibaba']) {
+        const r = await fetchJson(`${srv.base}/api/providers/${id}/test`, { method: 'POST' });
+        assertEqual(r.status, 200, `test endpoint returns 200 for ${id}`);
+        assertTrue(r.body && r.body.success === true, `success envelope for ${id}`);
+        assertTrue(typeof r.body.data.ok === 'boolean', `boolean ok for ${id}`);
+        assertTrue(typeof r.body.data.at === 'string' && r.body.data.at.length > 0, `timestamp for ${id}`);
+        assertTrue(typeof r.body.data.latencyMs === 'number', `latencyMs for ${id}`);
+        if (r.body.data.ok === false) {
+          assertTrue(typeof r.body.data.error === 'string' && r.body.data.error.length > 0, `error surfaced for ${id}`);
+        }
+      }
+    });
+  } finally {
+    await srv.close();
+  }
+});
+
+test('UI-R6 static: DELETE route no longer refuses env-sourced providers', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(!/cannot be removed from the UI/.test(serverText), 'env 409 lock-out block must be gone');
+});
+
+test('UI-R6 static: providers view renders one always-editable form + test button in every state', () => {
+  const text = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'shell.js'), 'utf8');
+  assertTrue(/baseurl-input-\$\{p\.id\}/.test(text), 'baseUrl input rendered in the key form');
+  assertTrue(/data-action="test"/.test(text), 'test connection button present');
+  assertTrue(!/data-action="replace"/.test(text), 'hidden replace toggle must be gone (form always editable)');
+  assertTrue(!/cannot be\s+edited/i.test(text), 'no locked-out wording remains');
+  assertTrue(!/\(locked\)/.test(text), 'badge must not advertise a locked state');
+  assertTrue(/\(locked\)|badge--locked/.test(text) === /badge--locked/.test(text), 'locked badge class may stay as styling only');
+  assertTrue(/keyFormMarkup\(p\)/.test(text), 'form markup receives the full provider status object');
+  assertTrue(/p\.hasStoredKey/.test(text), 'remove button driven by hasStoredKey');
+});
+
 (async () => {
   for (const { name, fn } of QUEUED) {
     try {

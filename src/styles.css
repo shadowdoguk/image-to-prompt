@@ -3016,6 +3016,7 @@ body {
 
 .key-input-row { display: flex; gap: 0.5rem; margin-top: 0.3rem; }
 .key-input { flex: 1 1 auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+.baseurl-input { display: block; width: 100%; margin-top: 0.3rem; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
 .key-show-btn { flex-shrink: 0; }
 
 /* ─── Settings view (spec §4.5) ─────────────────────────────────────────── */
