@@ -817,8 +817,10 @@ order everywhere: env var → stored key → error.
 |---|---|---|
 | `GET` | `/api/providers` | Status list: configured/source/masked key/base URL/models/default model/last test |
 | `PUT` | `/api/providers/:id/key` | Save a key (validates format); optional `test: true` |
-| `DELETE` | `/api/providers/:id/key` | Remove a stored key (409 when the key is env-provided) |
+| `DELETE` | `/api/providers/:id/key` | Remove a stored key (manages the local store only; env vars untouched — UI-R6) |
 | `POST` | `/api/providers/:id/test` | Cheapest-possible live ping; failure never blocks save |
+| `GET` | `/api/models` | Model config per provider: catalog/custom/enabled/default model (UI-R7) |
+| `PUT` | `/api/providers/:id/models` | Replace `{ enabled, custom }` for a provider; 409 on disabling the last model (UI-R7) |
 
 ### `POST /api/chat/sessions` body shape
 

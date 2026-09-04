@@ -24,7 +24,7 @@
   // ─── §1 Utilities ────────────────────────────────────────────────────────
 
   const $ = (id) => document.getElementById(id);
-  const VIEWS = ['create', 'library', 'chat', 'providers', 'settings'];
+  const VIEWS = ['create', 'library', 'chat', 'providers', 'models', 'settings'];
 
   const announcer = $('a11y-announcer');
   /** Announce to screen readers via the polite live region (AX5). */
@@ -80,6 +80,187 @@
       fetchProviders(); // fresh status whenever the module is opened
       renderProviderCards();
     }
+    if (view === 'models') {
+      renderModelsView(); // fresh config whenever the module is opened
+    }
+  };
+
+  // ─── UI-R7 — Models view: enable/disable models per provider ─────────────
+  // GET /api/models drives one card per provider: a toggle per model plus
+  // custom-model add/remove. Every mutation goes straight to
+  // PUT /api/providers/:id/models, then window.__i2pEnabledModelsByProvider
+  // (the dropdown source app.js reads) is refreshed and every model
+  // dropdown in the app is rebuilt — changes apply immediately everywhere.
+
+  const modelManagerCard = (p) => {
+    const all = p.catalog.concat(p.custom.filter((m) => !p.catalog.includes(m)));
+    const rows = all.map((m) => {
+      const checked = p.enabled.includes(m) ? 'checked' : '';
+      const isCustom = !p.catalog.includes(m);
+      return `
+        <li class="model-row">
+          <label class="model-row__toggle">
+            <input type="checkbox" class="model-toggle" data-provider="${p.id}" data-model="${escapeHtml(m)}" ${checked}>
+            <span class="model-row__name"><code>${escapeHtml(m)}</code>${isCustom ? ' <span class="model-row__badge">custom</span>' : ''}</span>
+          </label>
+          ${isCustom ? `<button type="button" class="btn-danger-outline btn-secondary model-remove-btn" data-provider="${p.id}" data-model="${escapeHtml(m)}" data-action="remove-custom" aria-label="Remove custom model ${escapeHtml(m)}">Remove</button>` : ''}
+        </li>`;
+    }).join('');
+    return `
+    <article class="provider-card model-card" data-provider-id="${p.id}">
+      <header class="provider-card__header">
+        <h2 class="provider-card__title">${escapeHtml(p.label)}</h2>
+        <p class="provider-card__models-count" data-role="count">${p.enabled.length} of ${all.length} models enabled</p>
+      </header>
+      <ul class="model-list">${rows}</ul>
+      <div class="model-add-row">
+        <label for="custom-model-input-${p.id}" class="label">Add a custom model</label>
+        <div class="model-add-controls">
+          <input type="text" id="custom-model-input-${p.id}" class="text-input custom-model-input" placeholder="e.g. vendor/model-name" autocomplete="off" spellcheck="false">
+          <button type="button" class="btn-secondary" data-action="add-custom" data-provider="${p.id}">Add model</button>
+        </div>
+      </div>
+      <p class="provider-card__test" data-role="model-status" aria-live="polite"></p>
+    </article>`;
+  };
+
+  const refreshModelDropdowns = async () => {
+    // Single source of truth for every model dropdown in the app.
+    let list;
+    try {
+      list = (await api('/api/models')).data;
+    } catch (_) {
+      return; // leave static defaults in place until the server is reachable
+    }
+    const map = {};
+    for (const p of list) map[p.id] = p.enabled;
+    window.__i2pEnabledModelsByProvider = map;
+
+    const fill = (select, models) => {
+      if (!select || !models.length) return;
+      const prev = select.value;
+      select.innerHTML = '';
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        select.appendChild(opt);
+      }
+      select.value = models.includes(prev) ? prev : models[0];
+    };
+
+    // Create view: rebuild for the currently selected provider.
+    const providerSel = $('provider-selector');
+    const llmSel = $('llm-model-selector');
+    const current = providerSel ? providerSel.value : 'kilo_code';
+    if (llmSel && map[current]) {
+      fill(llmSel, map[current]);
+      llmSel.dispatchEvent(new Event('change', { bubbles: true })); // sync app.js state
+    }
+
+    // Settings view: rebuild for the selected default provider.
+    const sProv = $('settings-provider');
+    const sLlm = $('settings-llm-model');
+    if (sProv && sLlm && map[sProv.value]) fill(sLlm, map[sProv.value]);
+  };
+
+  const renderModelsView = async () => {
+    const root = $('model-manager-root');
+    if (!root) return;
+    root.setAttribute('aria-busy', 'true');
+    let list;
+    try {
+      list = (await api('/api/models')).data;
+    } catch (err) {
+      root.textContent = `Could not load model configuration: ${err.message}`;
+      root.removeAttribute('aria-busy');
+      return;
+    }
+    root.innerHTML = list.map(modelManagerCard).join('');
+    root.removeAttribute('aria-busy');
+  };
+
+  const wireModelManager = () => {
+    const root = $('model-manager-root');
+    if (!root) return;
+
+    const statusFor = (providerId) =>
+      root.querySelector(`[data-provider-id="${providerId}"] [data-role="model-status"]`);
+
+    const submitModelConfig = async (providerId, payload, statusEl) => {
+      try {
+        const body = await api(`/api/providers/${providerId}/models`, {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+        if (statusEl) statusEl.textContent = '';
+        announce(`${body.label || providerId} model configuration saved.`);
+        await refreshModelDropdowns();
+        await renderModelsView(); // re-render from the fresh server state
+        return true;
+      } catch (err) {
+        if (statusEl) statusEl.textContent = err.message;
+        announce(`Model change rejected: ${err.message}`);
+        await renderModelsView(); // revert the UI to the server's state
+        return false;
+      }
+    };
+
+    // Toggle: send the card's full enabled list (custom list untouched).
+    root.addEventListener('change', async (e) => {
+      const box = e.target.closest('.model-toggle');
+      if (!box) return;
+      const providerId = box.dataset.provider;
+      const card = root.querySelector(`[data-provider-id="${providerId}"]`);
+      if (!card) return;
+      const enabled = Array.from(card.querySelectorAll('.model-toggle'))
+        .filter((b) => b.checked)
+        .map((b) => b.dataset.model);
+      await submitModelConfig(providerId, { enabled }, statusFor(providerId));
+    });
+
+    root.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const providerId = btn.dataset.provider;
+      const statusEl = statusFor(providerId);
+      const card = root.querySelector(`[data-provider-id="${providerId}"]`);
+      if (!card) return;
+
+      if (btn.dataset.action === 'remove-custom') {
+        const modelId = btn.dataset.model;
+        const boxes = Array.from(card.querySelectorAll('.model-toggle'));
+        const enabled = boxes.filter((b) => b.checked && b.dataset.model !== modelId).map((b) => b.dataset.model);
+        const custom = boxes
+          .filter((b) => b.closest('.model-row').querySelector('[data-action="remove-custom"]'))
+          .map((b) => b.dataset.model)
+          .filter((m) => m !== modelId);
+        await submitModelConfig(providerId, { enabled, custom }, statusEl);
+        return;
+      }
+
+      if (btn.dataset.action === 'add-custom') {
+        const input = $(`custom-model-input-${providerId}`);
+        if (!input) return;
+        const modelId = input.value.trim();
+        if (!modelId) {
+          if (statusEl) statusEl.textContent = 'Enter a model ID before adding.';
+          input.focus();
+          return;
+        }
+        const boxes = Array.from(card.querySelectorAll('.model-toggle'));
+        const enabled = boxes.filter((b) => b.checked).map((b) => b.dataset.model);
+        const custom = boxes
+          .filter((b) => b.closest('.model-row').querySelector('[data-action="remove-custom"]'))
+          .map((b) => b.dataset.model);
+        // A freshly added model is enabled immediately.
+        const ok = await submitModelConfig(providerId, { enabled: [...enabled, modelId], custom: [...custom, modelId] }, statusEl);
+        if (ok) {
+          const fresh = $(`custom-model-input-${providerId}`);
+          if (fresh) fresh.focus();
+        }
+      }
+    });
   };
 
   const onRoute = () => {
@@ -906,6 +1087,14 @@
     fetchProviders();
     window.setInterval(fetchProviders, 60000);
     window.addEventListener('focus', fetchProviders);
+
+    // UI-R7 — model config boot wiring: enabled models drive every dropdown.
+    wireModelManager();
+    refreshModelDropdowns();
+    const settingsProviderSel = $('settings-provider');
+    if (settingsProviderSel) {
+      settingsProviderSel.addEventListener('change', () => refreshModelDropdowns());
+    }
 
     if (!location.hash) {
       history.replaceState(null, '', '#/create');

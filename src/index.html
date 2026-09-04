@@ -24,6 +24,7 @@
           <a role="tab" id="nav-library" class="nav-link" href="#/library" aria-controls="view-library" tabindex="-1">Library</a>
           <a role="tab" id="nav-chat" class="nav-link" href="#/chat" aria-controls="view-chat" tabindex="-1">Chat</a>
           <a role="tab" id="nav-providers" class="nav-link" href="#/providers" aria-controls="view-providers" tabindex="-1">Providers &amp; keys</a>
+          <a role="tab" id="nav-models" class="nav-link" href="#/models" aria-controls="view-models" tabindex="-1">Models</a>
           <a role="tab" id="nav-settings" class="nav-link" href="#/settings" aria-controls="view-settings" tabindex="-1">Settings</a>
         </div>
       </nav>
@@ -412,6 +413,12 @@
     </section>
 
     <!-- ─── VIEW: Settings (spec §4.5, UI-R4) ───────────────────────── -->
+    <section class="view" id="view-models" role="tabpanel" aria-labelledby="nav-models" hidden>
+      <h1 class="view-title" id="view-models-title" tabindex="-1">Models</h1>
+      <p class="view-sub">Choose which models each provider offers in the app. Disabled models disappear from every dropdown immediately. At least one model must stay enabled per provider.</p>
+      <div id="model-manager-root" class="model-manager" aria-busy="true">Loading model configuration…</div>
+    </section>
+
     <section class="view" id="view-settings" role="tabpanel" aria-labelledby="nav-settings" hidden>
       <h1 class="view-title" id="view-settings-title" tabindex="-1">Settings</h1>
       <p class="view-sub">Defaults applied to every new prompt. Keys live under Providers &amp; keys.</p>

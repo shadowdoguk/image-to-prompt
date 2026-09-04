@@ -8942,9 +8942,10 @@ test('ADR 0024: the four provider endpoints are registered', () => {
 
 // ─── Slice UI-R1 — app shell static checks ─────────────────────────────────
 
-test('UI-R1: index.html has five view containers, primary nav, and no gated-step sections', () => {
+test('UI-R1: index.html has six view containers, primary nav, and no gated-step sections', () => {
+  // UI-R7 added view-models (Models manager) to the original five.
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
-  for (const v of ['view-create', 'view-library', 'view-chat', 'view-providers', 'view-settings']) {
+  for (const v of ['view-create', 'view-library', 'view-chat', 'view-providers', 'view-models', 'view-settings']) {
     assertTrue(html.includes(`id="${v}"`), `missing view container: ${v}`);
   }
   assertTrue(/<nav[^>]*aria-label="Primary"/.test(html), 'missing <nav aria-label="Primary">');
@@ -9059,6 +9060,159 @@ test('UI-R6 static: providers view renders one always-editable form + test butto
   assertTrue(/\(locked\)|badge--locked/.test(text) === /badge--locked/.test(text), 'locked badge class may stay as styling only');
   assertTrue(/keyFormMarkup\(p\)/.test(text), 'form markup receives the full provider status object');
   assertTrue(/p\.hasStoredKey/.test(text), 'remove button driven by hasStoredKey');
+});
+
+// ─── Slice UI-R7 — model enablement manager ────────────────────────────────
+
+test('UI-R7: GET /api/models exposes catalog, custom, enabled, defaultModel per provider', async () => {
+  const os = require('os');
+  const tmp = path.join(os.tmpdir(), `model_config_uir7_get_${Date.now()}.json`);
+  process.env.MODEL_CONFIG_FILE = tmp;
+  const srv = await startTestServer();
+  try {
+    const r = await fetchJson(`${srv.base}/api/models`);
+    assertEqual(r.status, 200, 'GET /api/models -> 200');
+    assertTrue(r.body.success === true, 'success envelope');
+    const data = r.body.data;
+    assertEqual(data.length, 3, 'three providers');
+    for (const p of data) {
+      assertTrue(Array.isArray(p.catalog) && p.catalog.length > 0, `${p.id} has a non-empty catalog`);
+      assertTrue(Array.isArray(p.custom), `${p.id} custom is an array`);
+      assertEqual(p.custom.length, 0, `${p.id} starts with no custom models`);
+      assertEqual(p.enabled.join('|'), p.catalog.join('|'), `${p.id} defaults to the full catalog`);
+      assertTrue(p.enabled.includes(p.defaultModel), `${p.id} default model is enabled`);
+    }
+  } finally {
+    await srv.close();
+    delete process.env.MODEL_CONFIG_FILE;
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+
+test('UI-R7 HTTP: enable/disable persists to disk and drives /api/providers', async () => {
+  const os = require('os');
+  const tmp = path.join(os.tmpdir(), `model_config_uir7_put_${Date.now()}.json`);
+  process.env.MODEL_CONFIG_FILE = tmp;
+  const srv = await startTestServer();
+  try {
+    const put = (payload) => fetchJson(`${srv.base}/api/providers/kilo_code/models`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    const before = await fetchJson(`${srv.base}/api/models`);
+    const catalog = before.body.data.find((p) => p.id === 'kilo_code').catalog;
+    const subset = catalog.slice(0, 2);
+    const r1 = await put({ enabled: subset });
+    assertEqual(r1.status, 200, 'subset accepted');
+    assertEqual(r1.body.data.enabled.join('|'), subset.join('|'), 'enabled reflected in response');
+    const onDisk = JSON.parse(fs.readFileSync(tmp, 'utf8'));
+    assertEqual(onDisk.kilo_code.enabled.join('|'), subset.join('|'), 'persisted to the data file');
+    const prov = await fetchJson(`${srv.base}/api/providers`);
+    const kilo = prov.body.data.find((p) => p.id === 'kilo_code');
+    assertEqual(kilo.models.join('|'), subset.join('|'), '/api/providers models == enabled only');
+    const r2 = await put({ enabled: ['nope/does-not-exist'] });
+    assertEqual(r2.status, 400, 'unknown model rejected');
+    const r3 = await fetchJson(`${srv.base}/api/providers/bogus/models`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: ['x'] })
+    });
+    assertEqual(r3.status, 404, 'unknown provider -> 404');
+  } finally {
+    await srv.close();
+    delete process.env.MODEL_CONFIG_FILE;
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+
+test('UI-R7 HTTP: custom models add, enable, remove; validation errors are clear', async () => {
+  const os = require('os');
+  const tmp = path.join(os.tmpdir(), `model_config_uir7_custom_${Date.now()}.json`);
+  process.env.MODEL_CONFIG_FILE = tmp;
+  const srv = await startTestServer();
+  try {
+    const put = (payload) => fetchJson(`${srv.base}/api/providers/minimax/models`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    const r1 = await put({ custom: ['custom/model-x'], enabled: ['MiniMax-M1', 'custom/model-x'] });
+    assertEqual(r1.status, 200, 'custom model added');
+    assertTrue(r1.body.data.custom.includes('custom/model-x'), 'custom listed in response');
+    assertTrue(r1.body.data.enabled.includes('custom/model-x'), 'custom enabled');
+    const prov = await fetchJson(`${srv.base}/api/providers`);
+    const mm = prov.body.data.find((p) => p.id === 'minimax');
+    assertTrue(mm.models.includes('custom/model-x'), 'custom model visible in /api/providers');
+    const r2 = await put({ custom: [], enabled: ['MiniMax-M1'] });
+    assertEqual(r2.status, 200, 'custom model removed');
+    assertEqual(r2.body.data.custom.length, 0, 'custom list empty after removal');
+    const r3 = await put({ custom: ['MiniMax-M1'] });
+    assertEqual(r3.status, 400, 'catalog collision rejected');
+    const r4 = await put({ custom: [''] });
+    assertEqual(r4.status, 400, 'empty custom ID rejected');
+    const r5 = await put({ custom: ['a/b', 'a/b'] });
+    assertEqual(r5.status, 400, 'duplicate custom ID rejected');
+  } finally {
+    await srv.close();
+    delete process.env.MODEL_CONFIG_FILE;
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+
+test('UI-R7 HTTP: last-model guard refuses to disable the final model (409)', async () => {
+  const os = require('os');
+  const tmp = path.join(os.tmpdir(), `model_config_uir7_guard_${Date.now()}.json`);
+  process.env.MODEL_CONFIG_FILE = tmp;
+  const srv = await startTestServer();
+  try {
+    const put = (payload) => fetchJson(`${srv.base}/api/providers/alibaba/models`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    const r1 = await put({ enabled: ['qwen-vl-max'] });
+    assertEqual(r1.status, 200, 'single-model config accepted');
+    const r2 = await put({ enabled: [] });
+    assertEqual(r2.status, 409, 'disabling the last model refused');
+    assertTrue(/at least one/i.test(r2.body.error || ''), 'clear guard message');
+    const after = await fetchJson(`${srv.base}/api/models`);
+    const ali = after.body.data.find((p) => p.id === 'alibaba');
+    assertEqual(ali.enabled.length, 1, 'config unchanged after refused request');
+  } finally {
+    await srv.close();
+    delete process.env.MODEL_CONFIG_FILE;
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+
+test('UI-R7 HTTP: default falls back to first enabled when hardcoded default is disabled', async () => {
+  const os = require('os');
+  const tmp = path.join(os.tmpdir(), `model_config_uir7_default_${Date.now()}.json`);
+  process.env.MODEL_CONFIG_FILE = tmp;
+  const srv = await startTestServer();
+  try {
+    const r1 = await fetchJson(`${srv.base}/api/providers/kilo_code/models`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: ['x-ai/grok-4.3'] })
+    });
+    assertEqual(r1.status, 200, 'single-model config accepted');
+    assertEqual(r1.body.data.defaultModel, 'x-ai/grok-4.3', 'effective default follows the enabled set');
+    const prov = await fetchJson(`${srv.base}/api/providers`);
+    const kilo = prov.body.data.find((p) => p.id === 'kilo_code');
+    assertEqual(kilo.defaultModel, 'x-ai/grok-4.3', '/api/providers defaultModel updated too');
+  } finally {
+    await srv.close();
+    delete process.env.MODEL_CONFIG_FILE;
+    try { fs.unlinkSync(tmp); } catch (_) {}
+  }
+});
+
+test('UI-R7 static: Models view wired into nav, shell, and app.js dropdown source', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  assertTrue(html.includes('id="nav-models"'), 'nav tab missing');
+  assertTrue(html.includes('id="view-models"'), 'view container missing');
+  assertTrue(html.includes('id="model-manager-root"'), 'manager root missing');
+  const shell = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'shell.js'), 'utf8');
+  assertTrue(/'models'/.test(shell), "models missing from VIEWS");
+  assertTrue(shell.includes('renderModelsView'), 'renderModelsView missing');
+  assertTrue(shell.includes('refreshModelDropdowns'), 'refreshModelDropdowns missing');
+  assertTrue(shell.includes('wireModelManager'), 'wireModelManager missing');
+  assertTrue(shell.includes('__i2pEnabledModelsByProvider'), 'dropdown-source global missing in shell.js');
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(app.includes('__i2pEnabledModelsByProvider'), 'app.js must read the enabled-models global');
 });
 
 (async () => {

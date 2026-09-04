@@ -100,6 +100,32 @@ const saveProviderKeys = (keys) => {
   try { fs.chmodSync(filePath, 0o600); } catch (_) { /* best effort on non-POSIX */ }
 };
 
+// ─── UI-R7 — Model enablement store (see ADR 0025) ─────────────────────────
+// Per-provider model configuration persists here. Shape:
+//   { [providerId]: { enabled: string[], custom: string[] } }
+// Missing entry == every built-in catalog model enabled, no custom models.
+// Enabled models are the ONLY models routable through resolveProviderAndModel
+// and the only ones shown in every frontend model dropdown.
+const modelConfigFilePath = () =>
+  process.env.MODEL_CONFIG_FILE || path.join(__dirname, 'data', 'model_config.json');
+
+const loadModelConfig = () => {
+  try {
+    const raw = fs.readFileSync(modelConfigFilePath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_) {
+    return {}; // missing or corrupt file == defaults
+  }
+};
+
+const saveModelConfig = (cfg) => {
+  const filePath = modelConfigFilePath();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  try { fs.chmodSync(filePath, 0o600); } catch (_) { /* best effort on non-POSIX */ }
+};
+
 const maskProviderKey = (apiKey) => {
   if (!apiKey || typeof apiKey !== 'string') return null;
   const trimmed = apiKey.trim();
@@ -196,6 +222,41 @@ const PROVIDER_DEFAULT_MODEL = {
 };
 
 /**
+ * UI-R7 — effective model configuration for a provider.
+ * Catalog = built-in allowlist; custom = user-added IDs; enabled = the
+ * active subset (defaults to the full catalog when nothing is stored).
+ * Corrupt/stale entries are filtered out; enabled is never empty (falls
+ * back to the universe, matching the PUT route's last-model guard).
+ * @param {string} id - provider ID
+ * @returns {{ catalog: string[], custom: string[], enabled: string[] }}
+ */
+const getProviderModelConfig = (id) => {
+  const catalog = ALLOWED_LLM_MODELS_BY_PROVIDER[id] || [];
+  const entry = loadModelConfig()[id];
+  const custom = entry && Array.isArray(entry.custom)
+    ? entry.custom.filter((m) => typeof m === 'string' && m.trim().length > 0)
+    : [];
+  const universe = catalog.concat(custom.filter((m) => !catalog.includes(m)));
+  let enabled = entry && Array.isArray(entry.enabled)
+    ? [...new Set(entry.enabled)].filter((m) => universe.includes(m))
+    : [...catalog];
+  if (enabled.length === 0 && universe.length > 0) enabled = [...universe];
+  return { catalog, custom, enabled };
+};
+
+const getEnabledModels = (id) => getProviderModelConfig(id).enabled;
+
+/**
+ * UI-R7 — the model generation falls back to. The hardcoded default when
+ * it is enabled, otherwise the first enabled model.
+ */
+const effectiveDefaultModel = (id) => {
+  const enabled = getEnabledModels(id);
+  const def = PROVIDER_DEFAULT_MODEL[id];
+  return enabled.includes(def) ? def : enabled[0];
+};
+
+/**
  * Slice 4 — is the given provider configured for live API calls?
  * Kilo Code is always live (Slice 3 ship state). MiniMax and Alibaba
  * are gated by their respective env vars so the architecture is provably
@@ -223,9 +284,11 @@ const isProviderLive = (provider) => {
 const resolveProviderAndModel = (body) => {
   const rawProvider = body && typeof body.provider === 'string' ? body.provider : DEFAULT_PROVIDER;
   const provider = ALLOWED_PROVIDERS.includes(rawProvider) ? rawProvider : DEFAULT_PROVIDER;
-  const allowed = ALLOWED_LLM_MODELS_BY_PROVIDER[provider] || [];
+  // UI-R7 — only user-enabled models are routable; the fallback is the
+  // effective default (first enabled model when the hardcoded default is off).
+  const allowed = getEnabledModels(provider);
   const rawModel = body && (typeof body.model === 'string' ? body.model : (typeof body.llmModel === 'string' ? body.llmModel : null));
-  const model = rawModel && allowed.includes(rawModel) ? rawModel : PROVIDER_DEFAULT_MODEL[provider];
+  const model = rawModel && allowed.includes(rawModel) ? rawModel : effectiveDefaultModel(provider);
   return { provider, model };
 };
 
@@ -7311,8 +7374,8 @@ const buildProviderStatusList = () => {
       defaultBaseUrl: PROVIDER_DEFAULT_BASE_URLS[id] || '',
       envVar: PROVIDER_ENV_KEYS[id] || null,
       hasStoredKey: Boolean(stored[id] && stored[id].apiKey),
-      models: ALLOWED_LLM_MODELS_BY_PROVIDER[id] || [],
-      defaultModel: PROVIDER_DEFAULT_MODEL[id],
+      models: getEnabledModels(id), // UI-R7 — only user-enabled models
+      defaultModel: effectiveDefaultModel(id),
       addedAt: (stored[id] && stored[id].addedAt) || null,
       lastTest: (stored[id] && stored[id].lastTest) || null
     };
@@ -7470,6 +7533,97 @@ app.post('/api/providers/:id/test', async (req, res) => {
     const result = await testProviderConnection(id);
     recordProviderTest(id, result);
     res.json({ success: true, data: result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─── UI-R7 — Model enablement management ───────────────────────────────────
+// GET  /api/models                    — full config per provider
+// PUT  /api/providers/:id/models      — replace { enabled, custom } for one provider
+
+app.get('/api/models', (req, res) => {
+  res.json({
+    success: true,
+    data: ALLOWED_PROVIDERS.map((id) => {
+      const { catalog, custom, enabled } = getProviderModelConfig(id);
+      return { id, label: PROVIDER_LABELS[id] || id, catalog, custom, enabled, defaultModel: effectiveDefaultModel(id) };
+    })
+  });
+});
+
+app.put('/api/providers/:id/models', (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!ALLOWED_PROVIDERS.includes(id)) {
+      return res.status(404).json({ success: false, error: `Unknown provider "${id}".` });
+    }
+    const body = req.body || {};
+    const current = getProviderModelConfig(id);
+    const catalog = current.catalog;
+
+    // ── custom list ──
+    let custom = current.custom;
+    if (body.custom !== undefined) {
+      if (!Array.isArray(body.custom)) {
+        return res.status(400).json({ success: false, error: 'custom must be an array of model IDs.' });
+      }
+      const seen = new Set();
+      for (const raw of body.custom) {
+        if (typeof raw !== 'string' || raw.trim().length === 0) {
+          return res.status(400).json({ success: false, error: 'Custom model IDs must be non-empty strings.' });
+        }
+        const m = raw.trim();
+        if (m.length > 120) {
+          return res.status(400).json({ success: false, error: `Custom model ID too long (max 120 characters).` });
+        }
+        if (catalog.includes(m)) {
+          return res.status(400).json({ success: false, error: `"${m}" is already in this provider's built-in catalog.` });
+        }
+        if (seen.has(m)) {
+          return res.status(400).json({ success: false, error: `Duplicate custom model ID: "${m}".` });
+        }
+        seen.add(m);
+      }
+      custom = [...seen];
+    }
+
+    const universe = catalog.concat(custom);
+
+    // ── enabled list ──
+    let enabled = current.enabled;
+    if (body.enabled !== undefined) {
+      if (!Array.isArray(body.enabled)) {
+        return res.status(400).json({ success: false, error: 'enabled must be an array of model IDs.' });
+      }
+      const cleaned = [...new Set(body.enabled)];
+      for (const m of cleaned) {
+        if (typeof m !== 'string' || !universe.includes(m)) {
+          return res.status(400).json({ success: false, error: `"${m}" is not an available model for this provider.` });
+        }
+      }
+      enabled = cleaned;
+    } else if (body.custom !== undefined) {
+      // custom list changed but enabled untouched: drop enabled IDs that no longer exist
+      enabled = enabled.filter((m) => universe.includes(m));
+    }
+
+    // ── last-model guard (per provider ⇒ global): a provider with zero
+    // enabled models would break generation on that provider entirely.
+    if (enabled.length === 0) {
+      return res.status(409).json({
+        success: false,
+        error: `${PROVIDER_LABELS[id] || id} needs at least one enabled model — disabling the last model would break generation with this provider.`
+      });
+    }
+
+    const cfg = loadModelConfig();
+    cfg[id] = { enabled, custom };
+    saveModelConfig(cfg);
+    res.json({
+      success: true,
+      data: { id, label: PROVIDER_LABELS[id] || id, catalog, custom, enabled, defaultModel: effectiveDefaultModel(id) }
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: sanitizeError(error.message) });
   }
@@ -7648,6 +7802,13 @@ module.exports = {
   syncKiloCredentialFromStore,
   buildProviderStatusList,
   testProviderConnection,
+  // UI-R7 — model enablement store
+  modelConfigFilePath,
+  loadModelConfig,
+  saveModelConfig,
+  getProviderModelConfig,
+  getEnabledModels,
+  effectiveDefaultModel,
   callProvider,
   callKiloAdapter,
   callMiniMaxAdapter,

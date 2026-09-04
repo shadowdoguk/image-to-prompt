@@ -703,3 +703,32 @@ below are pre-approved G1–G3 artifacts; each ships with tests + demo + code re
 Constraints: no framework; vanilla JS only; `src/shell.js` (new) loads after
 `src/app.js` and never mutates `app.js` internals — integration via DOM IDs,
 REST endpoints, and `hashchange`. Acceptance criteria: `UI-REDESIGN-SPEC.md` §10.
+
+---
+
+## Slice UI-R7 — Model enablement manager (2026-09-04)
+
+**Pre-approved G1–G3 under the standing full-autonomy directive (2026-09-04).**
+Ships with tests + browser E2E demo + code review.
+
+**Problem:** model lists were hardcoded in three places (server allowlist,
+index.html `<option>`s, app.js map) with no user control. Users need to choose
+which models are active per provider, persistently.
+
+**Shape:**
+- New dedicated view `#/models` (nav tab "Models"): one card per provider,
+  checkbox toggle per model, custom-model add/remove, live status line.
+- New store `data/model_config.json` (0600): `{ [providerId]: { enabled, custom } }`.
+  Missing entry ⇒ full catalog enabled.
+- New endpoints: `GET /api/models`; `PUT /api/providers/:id/models`
+  (body `{ enabled?, custom? }`, whole-state replace for that provider).
+- Enforcement: `resolveProviderAndModel` and `GET /api/providers` expose only
+  enabled models; `window.__i2pEnabledModelsByProvider` (set by shell.js)
+  drives `validateLlmModel` / `rebuildLlmModelSelectorOptions` in app.js, so
+  Create + Settings dropdowns show only enabled models.
+- Guard: `enabled` may never be empty for a provider — 409 with a clear
+  message (disabling the last model would break generation on that provider).
+- Custom models: non-empty ≤120 chars, no duplicates, must not collide with
+  the built-in catalog; new customs are auto-enabled.
+- Effective default: hardcoded `PROVIDER_DEFAULT_MODEL` when enabled, else
+  first enabled model.

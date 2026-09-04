@@ -1982,7 +1982,12 @@
     // Falls back to the provider's first allowed model if the raw value
     // is invalid for the current provider (matches the Slice 3.3
     // helper's behavior for kilo_code, generalized across providers).
-    const providerModels = ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider] || ALLOWED_LLM_MODELS;
+    // UI-R7 — prefer the user's enabled-model config (window global set by
+    // shell.js from GET /api/models); fall back to the static map so the
+    // app still works before the first fetch resolves.
+    const providerModels =
+      (window.__i2pEnabledModelsByProvider && window.__i2pEnabledModelsByProvider[state.provider]) ||
+      ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider] || ALLOWED_LLM_MODELS;
     if (providerModels.includes(raw)) return raw;
     return providerModels[0];
   };
@@ -2165,7 +2170,10 @@
   // HTML list which only covers kilo_code).
   const rebuildLlmModelSelectorOptions = () => {
     if (!dom.llmModelSelector) return;
-    const allowedModels = ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider] || ALLOWED_LLM_MODELS;
+    // UI-R7 — options come from the user's enabled-model config when loaded.
+    const allowedModels =
+      (window.__i2pEnabledModelsByProvider && window.__i2pEnabledModelsByProvider[state.provider]) ||
+      ALLOWED_LLM_MODELS_BY_PROVIDER[state.provider] || ALLOWED_LLM_MODELS;
     dom.llmModelSelector.innerHTML = '';
     for (const modelId of allowedModels) {
       const opt = document.createElement('option');
