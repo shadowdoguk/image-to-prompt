@@ -848,6 +848,71 @@ revised prompt text the user can apply with one click). The
 `json_schema`-enforced response from the model always includes both
 fields.
 
+## RAG (Retrieval-Augmented Generation) API
+
+CR-series (Slice 17+, ADR 0025). The chat assistant is grounded by a
+dedicated vector database at `data/rag_index.json`. The corpus is seeded
+from three curated JSON files in `data/rag_corpus/` (composition,
+historical art, oil-painting style) and auto-grows with each successful
+Stage 2 output and chat proposal. The vector store is hand-rolled cosine
+similarity over JSON; embeddings come from the Kilo gateway at
+`text-embedding-3-small`. On retrieval failure, the chat degrades to
+no-RAG mode with a UI banner.
+
+### `GET /api/rag/corpus`
+
+Returns the chunk titles + sources for the "what the AI knows"
+affordance. Embeddings are not returned. Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "chunks": [{ "id": "...", "source": "composition", "title": "...", "embedded": true }],
+    "sources": ["composition", "historical_art", "oil_painting_style"],
+    "embedding_model": "text-embedding-3-small"
+  }
+}
+```
+
+### `POST /api/rag/reindex`
+
+Re-embed every chunk in the index. Used after an embedding-model swap
+or to backfill the curated seed on first install. Returns `{ embedded,
+total }`. Requires `KILO_API_KEY`; returns 503 otherwise.
+
+### `POST /api/rag/search`
+
+Preview the retrieval for a query. Body: `{ query: string, k?: number }`
+(k defaults to 4, max 20). Returns the top-k chunks the chat would
+inject, with their cosine scores.
+
+## Chat Attachment API
+
+CR-series (Slice 18+, ADR 0025). Users can attach concept images to a
+chat session so the assistant sees them as visual context. Attachments
+live under `data/chat_attachments/<session_id>/`, referenced by id
+(`att_<16 hex>`) in messages. Vision-capable models (matched via the
+model name against `m3|minimax|gpt-4o|claude|vision|qwen-vl|gemini|llava|pixtral`)
+receive the attachments as image_url parts; non-vision models get a
+text-only fallback with a note. Each attachment is 10 MB max, 4 per
+message.
+
+### `POST /api/chat/sessions/:id/attachments`
+
+Multipart upload (field name `image`). Accepts `image/png`, `image/jpeg`,
+`image/webp` (max 10 MB). Returns `{ id, filename, mime, size }`.
+
+### `GET /api/chat/attachments/:id`
+
+Serves the attachment inline with the correct `Content-Type` and
+`Content-Disposition: inline`.
+
+### `DELETE /api/chat/attachments/:id`
+
+Hard-deletes the file and unlinks the id from every chat message that
+referenced it. Also runs as part of the session-delete cascade (below).
+
 ## Project Structure
 
 ```

@@ -3061,3 +3061,165 @@ body {
 .custom-model-input { flex: 1; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
 .model-remove-btn { flex-shrink: 0; }
 .provider-card__models-count { margin: 0; font-size: 0.85rem; opacity: 0.8; }
+
+/* ─── CR-2 — Chat attachments (paperclip + thumbnails) ───────────── */
+
+.chat-attach-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.chat-pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+}
+
+.chat-pending-card {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  position: relative;
+}
+
+.chat-pending-card__thumb {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.chat-pending-card__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.chat-pending-card__name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+.chat-pending-card__size {
+  font-size: 0.75rem;
+  opacity: 0.65;
+}
+
+.chat-pending-card__remove {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.2rem;
+  border-radius: 3px;
+}
+
+.chat-pending-card__remove:hover,
+.chat-pending-card__remove:focus-visible {
+  background: rgba(255, 80, 80, 0.2);
+  color: rgba(255, 100, 100, 1);
+}
+
+.chat-message__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.chat-message__thumb {
+  display: inline-block;
+  width: 64px;
+  height: 64px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  transition: transform 120ms ease;
+}
+
+.chat-message__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.chat-message__thumb:hover,
+.chat-message__thumb:focus-visible {
+  transform: scale(1.05);
+  outline: 2px solid var(--focus, #4af);
+}
+
+/* ─── CR-3 — Working-prompt inline editor ─────────────────────────── */
+
+.chat-working-prompt {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.75rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+.chat-working-prompt__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.chat-working-prompt__label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.7;
+}
+
+.chat-edit-btn {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.chat-working-prompt__text {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 3px;
+  font-family: 'IBM Plex Mono', ui-monospace, monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.chat-working-prompt__editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.chat-working-prompt__editor-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}

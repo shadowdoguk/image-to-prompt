@@ -47,6 +47,8 @@
     chatSessions: [],           // ADR 0011 — all chat sessions, newest first
     chatSessionId: null,        // ADR 0011 — id of the session anchored to the current generated prompt
     chatIsSending: false,       // ADR 0011 — true while waiting on /api/chat/sessions/:id/messages
+    chatPendingAttachmentIds: [], // CR-2 — attachment ids queued for the next send
+    chatPendingAttachmentMeta: {}, // CR-2 — map id → { filename, mime, size } for the preview UI
     selectedAspectRatio: '',    // ADR 0019 Issue #15 — '' means "auto / no preference"
     // Slice 2.1 — ADR 0021 — the model-fork. Pre-Generate model picker
     // chooses which contract runs (Z-Image Turbo or Anima). Anima mode
@@ -283,6 +285,17 @@
     chatInputCount: $('chat-input-count'),
     chatSendBtn: $('chat-send-btn'),
     chatFormStatus: $('chat-form-status'),
+    chatAttachBtn: $('chat-attach-btn'),
+    chatAttachInput: $('chat-attach-input'),
+    chatPendingAttachments: $('chat-pending-attachments'),
+    // CR-3 — inline working-prompt editor
+    chatWorkingPrompt: $('chat-working-prompt'),
+    chatWorkingPromptText: $('chat-working-prompt-text'),
+    chatEditCurrentBtn: $('chat-edit-current-btn'),
+    chatEditCurrentInput: $('chat-edit-current-input'),
+    chatEditCurrentCancel: $('chat-edit-current-cancel'),
+    chatEditCurrentSave: $('chat-edit-current-save'),
+    chatEditCurrentStatus: $('chat-edit-current-status'),
 
     stepPreset: $('step-preset'),
     stepUpload: $('step-upload'),
@@ -4611,7 +4624,112 @@
       dom.chatSessionStatus.hidden = true;
       dom.chatSessionStatus.textContent = '';
     }
+    // CR-2 — clear any pending attachments when the chat is reset.
+    state.chatPendingAttachmentIds = [];
+    state.chatPendingAttachmentMeta = {};
+    renderChatPendingAttachments();
     updateChatSendButton();
+  };
+
+  // ─── CR-2 — chat attachment helpers ────────────────────────────────
+
+  /**
+   * Upload one file to the active chat session and register it as a
+   * pending attachment. Surface errors inline (no toast).
+   */
+  const uploadChatAttachment = async (file) => {
+    if (!state.chatSessionId) {
+      setChatFormStatus('Generate a prompt first, then attach an image.', true);
+      return null;
+    }
+    if (state.chatPendingAttachmentIds.length >= 4) {
+      setChatFormStatus('Maximum 4 attachments per message.', true);
+      return null;
+    }
+    const fd = new FormData();
+    fd.append('image', file);
+    try {
+      const r = await fetch(`/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}/attachments`, {
+        method: 'POST',
+        body: fd
+      });
+      const json = await r.json();
+      if (!r.ok || !json.success) {
+        setChatFormStatus(json.error || `Upload failed (${r.status}).`, true);
+        return null;
+      }
+      state.chatPendingAttachmentIds.push(json.data.id);
+      state.chatPendingAttachmentMeta[json.data.id] = {
+        filename: json.data.filename,
+        mime: json.data.mime,
+        size: json.data.size
+      };
+      renderChatPendingAttachments();
+      setChatFormStatus(`Attached ${json.data.filename}.`, false);
+      return json.data;
+    } catch (err) {
+      setChatFormStatus(`Upload failed: ${err.message}`, true);
+      return null;
+    }
+  };
+
+  /**
+   * Render the strip of pending attachments above the textarea. Each
+   * item is a small thumbnail (image preview) + filename + remove
+   * button. Click remove → DELETE /api/chat/attachments/:id.
+   */
+  const renderChatPendingAttachments = () => {
+    if (!dom.chatPendingAttachments) return;
+    const ids = Array.isArray(state.chatPendingAttachmentIds) ? state.chatPendingAttachmentIds : [];
+    dom.chatPendingAttachments.innerHTML = '';
+    if (ids.length === 0) {
+      dom.chatPendingAttachments.hidden = true;
+      return;
+    }
+    dom.chatPendingAttachments.hidden = false;
+    const frag = document.createDocumentFragment();
+    for (const id of ids) {
+      const meta = state.chatPendingAttachmentMeta[id] || { filename: id, mime: 'image/*', size: 0 };
+      const card = document.createElement('div');
+      card.className = 'chat-pending-card';
+      card.dataset.attachmentId = id;
+
+      const thumb = document.createElement('img');
+      thumb.className = 'chat-pending-card__thumb';
+      thumb.alt = meta.filename;
+      thumb.src = `/api/chat/attachments/${encodeURIComponent(id)}`;
+      card.appendChild(thumb);
+
+      const meta1 = document.createElement('div');
+      meta1.className = 'chat-pending-card__meta';
+      const name = document.createElement('span');
+      name.className = 'chat-pending-card__name';
+      name.textContent = meta.filename;
+      const size = document.createElement('span');
+      size.className = 'chat-pending-card__size';
+      size.textContent = `${Math.max(1, Math.round((meta.size || 0) / 1024))} KB`;
+      meta1.appendChild(name);
+      meta1.appendChild(size);
+      card.appendChild(meta1);
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'chat-pending-card__remove';
+      remove.setAttribute('aria-label', `Remove ${meta.filename}`);
+      remove.textContent = '×';
+      remove.addEventListener('click', async () => {
+        try {
+          await fetch(`/api/chat/attachments/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        } catch (_) { /* best-effort */ }
+        state.chatPendingAttachmentIds = state.chatPendingAttachmentIds.filter((x) => x !== id);
+        delete state.chatPendingAttachmentMeta[id];
+        renderChatPendingAttachments();
+      });
+      card.appendChild(remove);
+
+      frag.appendChild(card);
+    }
+    dom.chatPendingAttachments.appendChild(frag);
   };
 
   /**
@@ -4642,10 +4760,99 @@
    * Append-only render — re-rendering the whole list is cheap enough
    * that we don't need a virtual list at the 200-message cap.
    */
+  // ─── CR-3 — working-prompt inline editor (SPEC §19.1) ──────────────
+
+  /**
+   * Render the "Current working prompt" strip at the top of the chat
+   * panel. The strip is hidden when no session is active. The display
+   * shows the live `current_prompt`; the editor is hidden until the
+   * user clicks Edit.
+   */
+  const renderChatWorkingPrompt = (session) => {
+    if (!dom.chatWorkingPrompt) return;
+    const hasSession = session && typeof session.current_prompt === 'string';
+    if (!hasSession) {
+      dom.chatWorkingPrompt.hidden = true;
+      return;
+    }
+    dom.chatWorkingPrompt.hidden = false;
+    if (dom.chatWorkingPromptText) dom.chatWorkingPromptText.textContent = session.current_prompt;
+    if (dom.chatEditCurrentInput) dom.chatEditCurrentInput.value = session.current_prompt;
+    // Always collapse the editor on a fresh render.
+    const editor = dom.chatWorkingPrompt?.querySelector('.chat-working-prompt__editor');
+    const display = dom.chatWorkingPrompt?.querySelector('.chat-working-prompt__display');
+    if (editor) editor.hidden = true;
+    if (display) display.hidden = false;
+    if (dom.chatEditCurrentStatus) dom.chatEditCurrentStatus.textContent = '';
+  };
+
+  const showChatWorkingPromptEditor = () => {
+    const editor = dom.chatWorkingPrompt?.querySelector('.chat-working-prompt__editor');
+    const display = dom.chatWorkingPrompt?.querySelector('.chat-working-prompt__display');
+    if (!editor || !display) return;
+    display.hidden = true;
+    editor.hidden = false;
+    if (dom.chatEditCurrentInput) {
+      dom.chatEditCurrentInput.focus();
+      dom.chatEditCurrentInput.setSelectionRange(0, 0);
+    }
+  };
+
+  const hideChatWorkingPromptEditor = () => {
+    const editor = dom.chatWorkingPrompt?.querySelector('.chat-working-prompt__editor');
+    const display = dom.chatWorkingPrompt?.querySelector('.chat-working-prompt__display');
+    if (!editor || !display) return;
+    editor.hidden = true;
+    display.hidden = false;
+    if (dom.chatEditCurrentStatus) dom.chatEditCurrentStatus.textContent = '';
+  };
+
+  const submitChatCurrentPromptEdit = async () => {
+    if (!state.chatSessionId) return;
+    const text = dom.chatEditCurrentInput?.value?.trim() || '';
+    if (text.length === 0) {
+      if (dom.chatEditCurrentStatus) {
+        dom.chatEditCurrentStatus.textContent = 'Working prompt must not be empty.';
+        dom.chatEditCurrentStatus.classList.add('is-error');
+      }
+      return;
+    }
+    if (dom.chatEditCurrentSave) dom.chatEditCurrentSave.disabled = true;
+    try {
+      const updated = await apiCall(`/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current_prompt: text })
+      });
+      // Splice the updated session into state.chatSessions so the
+      // selector reflects the new updated_at.
+      const idx = state.chatSessions.findIndex((s) => s.id === updated.id);
+      if (idx >= 0) state.chatSessions[idx] = updated;
+      else state.chatSessions.unshift(updated);
+      // Mirror to the result panel if this is the active prompt.
+      if (state.finalPrompt !== undefined) {
+        state.finalPrompt = updated.current_prompt;
+        if (dom.resultPrompt) dom.resultPrompt.textContent = updated.current_prompt;
+        if (typeof updateTokenReminderBanner === 'function') updateTokenReminderBanner();
+      }
+      renderChatMessages(updated);
+      hideChatWorkingPromptEditor();
+    } catch (err) {
+      if (dom.chatEditCurrentStatus) {
+        dom.chatEditCurrentStatus.textContent = err.message || 'Edit failed.';
+        dom.chatEditCurrentStatus.classList.add('is-error');
+      }
+    } finally {
+      if (dom.chatEditCurrentSave) dom.chatEditCurrentSave.disabled = false;
+    }
+  };
+
   const renderChatMessages = (session) => {
     if (!dom.chatMessages) return;
     dom.chatMessages.innerHTML = '';
     const messages = Array.isArray(session?.messages) ? session.messages : [];
+    // CR-3 — keep the working-prompt display in sync with every render.
+    renderChatWorkingPrompt(session);
 
     if (messages.length === 0) {
       const empty = document.createElement('p');
@@ -4709,6 +4916,27 @@
     body.className = 'chat-message__content';
     body.textContent = m.content || '';
     node.appendChild(body);
+
+    // CR-2 — render attachment thumbnails under the message body.
+    if (Array.isArray(m.attachment_ids) && m.attachment_ids.length > 0) {
+      const attWrap = document.createElement('div');
+      attWrap.className = 'chat-message__attachments';
+      for (const attId of m.attachment_ids) {
+        const a = document.createElement('a');
+        a.className = 'chat-message__thumb';
+        a.href = `/api/chat/attachments/${encodeURIComponent(attId)}`;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.setAttribute('aria-label', `Attachment ${attId}`);
+        const img = document.createElement('img');
+        img.src = a.href;
+        img.alt = `Attachment ${attId}`;
+        img.loading = 'lazy';
+        a.appendChild(img);
+        attWrap.appendChild(a);
+      }
+      node.appendChild(attWrap);
+    }
 
     if (m.role === 'assistant' && typeof m.suggested_prompt === 'string' && m.suggested_prompt.length > 0) {
       const previewLabel = document.createElement('div');
@@ -5140,7 +5368,14 @@
         // Slice 3.4 — ADR 0022 — forward the LLM model so the server
         // routes the chat reply through the user's chosen model.
         // Slice 4 — ADR 0023 — forward the provider too.
-        body: JSON.stringify({ content: text, llmModel: state.llmModel, provider: state.provider })
+        body: JSON.stringify({
+        content: text,
+        llmModel: state.llmModel,
+        provider: state.provider,
+        // CR-2 — include any pending attachment ids. The server validates
+        // that each id belongs to this session.
+        attachment_ids: Array.isArray(state.chatPendingAttachmentIds) ? [...state.chatPendingAttachmentIds] : []
+      })
       });
       const prevSession = state.chatSessions.find((s) => s.id === updated.id);
       const lastMsg = Array.isArray(updated.messages) && updated.messages.length > 0
@@ -5405,6 +5640,45 @@
 
   if (dom.chatForm) {
     dom.chatForm.addEventListener('submit', submitChatMessage);
+
+    // CR-2 — wire up the paperclip + file input handlers.
+    if (dom.chatAttachBtn && dom.chatAttachInput) {
+      dom.chatAttachBtn.addEventListener('click', () => {
+        if (!state.chatSessionId) {
+          setChatFormStatus('Generate a prompt first, then attach an image.', true);
+          return;
+        }
+        dom.chatAttachInput.click();
+      });
+      dom.chatAttachInput.addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files || []);
+        e.target.value = ''; // reset so re-selecting the same file works
+        for (const file of files) {
+          // eslint-disable-next-line no-await-in-loop -- sequential uploads preserve order
+          await uploadChatAttachment(file);
+          if (state.chatPendingAttachmentIds.length >= 4) break;
+        }
+      });
+    }
+
+    // CR-3 — wire up the inline working-prompt editor buttons.
+    if (dom.chatEditCurrentBtn) {
+      dom.chatEditCurrentBtn.addEventListener('click', () => {
+        if (!state.chatSessionId) return;
+        // Pre-fill the textarea with the current value.
+        const session = state.chatSessions.find((s) => s.id === state.chatSessionId);
+        if (session && dom.chatEditCurrentInput) {
+          dom.chatEditCurrentInput.value = session.current_prompt || '';
+        }
+        showChatWorkingPromptEditor();
+      });
+    }
+    if (dom.chatEditCurrentCancel) {
+      dom.chatEditCurrentCancel.addEventListener('click', () => hideChatWorkingPromptEditor());
+    }
+    if (dom.chatEditCurrentSave) {
+      dom.chatEditCurrentSave.addEventListener('click', () => submitChatCurrentPromptEdit());
+    }
   }
   if (dom.chatInput) {
     dom.chatInput.addEventListener('input', () => {

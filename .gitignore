@@ -22,6 +22,12 @@ data/subject_prompt.json
 # ADR 0024 — provider API keys saved via the Providers & keys view.
 # Never part of the codebase.
 data/provider_keys.json
+# CR-series (SPEC §17–20 / ADR 0025) — auto-managed RAG index and
+# user-uploaded chat attachments. The curated seed in data/rag_corpus/
+# IS tracked (it's part of the codebase). The index is auto-managed
+# from the seed + Stage 2 outputs + chat proposals at runtime.
+data/rag_index.json
+data/chat_attachments/
 # Agent runtime / scratch space — pre-existing untracked dirs.
 # Treated like .opencode/ above. Local-only; not part of the codebase.
 .superpowers/

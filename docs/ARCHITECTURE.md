@@ -655,3 +655,68 @@ Trigger the next refactor if:
 
 ---
 
+
+## CR-series — Chat redesign (oil-painting RAG edition)
+
+**Source:** `docs/SPEC.md` §17–20 + ADR 0025. Pre-approved under full-autonomy directive (2026-09-04).
+
+### CR-A1. New modules
+
+| Module | Path | Purpose |
+|---|---|---|
+| `rag.js` | `server/lib/rag.js` | Hand-rolled cosine similarity over `data/rag_index.json`. `indexChunks()`, `appendChunkToIndex()`, `retrieveRelevantChunks(query, k)`, `loadCorpus()`, `getCorpusSummary()`. |
+| `embeddings.js` | `server/lib/embeddings.js` | Kilo gateway embedding wrapper (`text-embedding-3-small`). `embedBatch(texts)`, retry-on-429 with back-off. |
+| `rag_ingest.js` | `server/lib/rag_ingest.js` | Auto-ingest hooks: `ingestStage2Output()`, `ingestChatProposal()`. Debounced + capped at 5,000 chunks. |
+
+### CR-A2. New data files
+
+| Path | Purpose | Mode |
+|---|---|---|
+| `data/rag_corpus/composition.json` | Curated seed: composition topics | 0644, gitignored (generated) |
+| `data/rag_corpus/historical_art.json` | Curated seed: historical conventions | 0644, gitignored |
+| `data/rag_corpus/oil_painting_style.json` | Curated seed: brushwork + pigment | 0644, gitignored |
+| `data/rag_index.json` | Vector index: `{ chunks: [...] }` | 0600, gitignored |
+| `data/chat_attachments/<session_id>/...` | User-uploaded images per session | 0600, gitignored |
+
+### CR-A3. New endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/rag/reindex` | Re-embed every chunk (admin; debounced) |
+| `GET` | `/api/rag/corpus` | Chunk titles + sources for UI affordance |
+| `POST` | `/api/rag/search` | Preview the retrieval (`{ query, k }`) |
+| `POST` | `/api/chat/sessions/:id/attachments` | Upload an image (mul­ter, 10 MB cap) |
+| `GET` | `/api/chat/attachments/:id` | Serve an attachment (inline) |
+| `DELETE` | `/api/chat/attachments/:id` | Hard-delete + unlink from messages |
+| `PATCH` | `/api/chat/sessions/:id` | Direct edit of `current_prompt` |
+| `POST` | `/api/chat/sessions/:id/revert/:messageId` | Rewind `current_prompt` to a prior message |
+| `POST` | `/api/chat/sessions/:id/fork-from/:messageId` | Mint a new session whose `original_prompt` is the parent's `current_prompt` at fork point |
+
+### CR-A4. Chat system prompt structure (after CR-1)
+
+```
+DEFAULT_CHAT_SYSTEM_PROMPT          ← oil-painting persona (rewritten)
+SESSION CONTEXT (original/current/pending/analysis)
+RETRIEVAL block (top-k chunks, k=4)
+ZIMAGE_CHAT_CONSTRAINTS_BLOCK       ← if Z-Image preset
+ANIMA_CHAT_CONSTRAINTS_BLOCK        ← if Anima preset
+```
+
+### CR-A5. Failure modes (CR-series)
+
+1. **Kilo embedding 429.** Back-off retry; if all 3 attempts fail, run chat in no-RAG mode with a banner in the UI ("retrieval unavailable").
+2. **Index corruption on load.** Reload from `data/rag_corpus/` (curated seed) and re-embed in a debounced background task. Logged.
+3. **Attachment upload exceeds 10 MB.** Multer rejects; UI surfaces the error inline.
+4. **Session-delete cascade race.** The attachment directory is removed synchronously after the JSON write succeeds. On any fs error, log + continue (best-effort).
+5. **Vision message body too large.** Cap at 4 attachments × 10 MB = 40 MB per request; refuse with 413 if exceeded.
+6. **Auto-ingest cap hit.** FIFO-evict oldest non-curated chunk. Curated seed is never evicted.
+
+### CR-A6. Refactor-trigger criteria (CR-series)
+
+- Corpus exceeds 5,000 chunks AND cosine scan latency > 50 ms p95 → expand-contract to LanceDB (ADR 0025 rejected alternatives §1).
+- Embedding model swap → re-embed in background; bump `embedding_model` on the index.
+- Attachment storage exceeds 1 GB total → add a per-session cap + warning.
+- A user wants cross-device sync → separate slice (out of CR-series scope per ADR 0025 consequences).
+
+---
+

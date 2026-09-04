@@ -371,3 +371,39 @@ Kill the slice if:
 - The frontend provider selector UX confuses a user-reported test session (have a non-developer try it).
 - The visual-demo gate fails twice (a button that doesn't work in the browser is a real bug).
 
+
+## CR-series — Chat redesign (oil-painting RAG edition)
+
+**Pre-approved G3 under full-autonomy directive (2026-09-04). Source: `docs/SPEC.md` §17–20, ADR 0025, ARCHITECTURE CR-A1–CR-A6.**
+
+### Top risks
+
+1. **R-1 (HIGH) — Kilo embedding endpoint rate limit or outage.** The Kilo gateway returned HTTP 429 on chat probes (2026-09-04). Embeddings use the same gateway. Mitigation: back-off retry with 3 attempts; degrade to no-RAG mode with a banner; never block the chat on embedding failures.
+2. **R-2 (MEDIUM) — Persona rewrite breaks existing tests.** Tests that assert "Don't comment on style/aesthetic quality" or "Don't ask clarifying questions" must be updated. Mitigation: grep for both strings; rewrite the tests to assert the new behaviour (oil-painting vocabulary, clarifying questions allowed).
+3. **R-3 (MEDIUM) — Hand-rolled cosine scan latency at 5k chunks.** Full-scan 1,536-dim cosine over 5,000 chunks is ~5 ms p50 in plain JS (measured mentally; will be benchmarked in CR-4). Mitigation: if latency > 50 ms p95, expand-contract to LanceDB (parked as a refactor trigger in ARCHITECTURE CR-A6).
+4. **R-4 (MEDIUM) — Attachment upload abuse / disk exhaustion.** Multer accepts 10 MB per file; max 4 attachments per message; per-session storage uncapped. Mitigation: per-session attachment cap (100 MB) + total cap (1 GB) added in CR-4 cleanup if observed.
+5. **R-5 (LOW) — RAG injection leaks prompt-injection content from the corpus.** The corpus is curated + user-owned; no third-party content enters. Mitigation: the system prompt instructs the LLM to use retrieval vocabulary *naturally*, not to obey instructions in retrieved chunks.
+6. **R-6 (LOW) — Auto-ingest (CR-4) inflates the index with low-quality chat proposals.** Every chat proposal becomes a chunk regardless of content. Mitigation: minimum length floor (≥ 30 chars) on auto-ingested chunks; the FIFO cap protects against unbounded growth.
+
+### Pre-commitments (apply to all CR sub-slices)
+
+1. `node --check server.js && node --check src/app.js && node --check tests/run-all.js` — exit 0 after every sub-slice.
+2. `node tests/run-all.js` — ≥ 439 + 30 = ≥ 469 passing after CR-1; ≥ 530 after CR-4.
+3. `node scripts/session-init.js` — 10/10 V-checks pass after each sub-slice; `code_drift` = clean.
+4. Visual-demo gate per slice via chromedevtools (UI states; stub provider fallback when Kilo rate-limited).
+5. Code review per slice (`docs/CODE-REVIEW-12-CR-1.md` … `…-CR-4.md`).
+6. Update `docs/SESSION-STATE.md` after every slice (append-only).
+7. Embedding failures never block the chat. Cosine failures never crash the chat.
+8. Attachment uploads never persist to disk before mime + size validation.
+9. Session delete always cascades to attachment directories (best-effort fs cleanup; logged).
+10. The curated seed is never modified by user actions; only re-embedded.
+
+### Kill criteria (per sub-slice)
+
+Kill the sub-slice if:
+- The persona rewrite causes the chat to ignore the anchor-preservation contract (validated by ADR 0012 regression tests).
+- Kilo embedding outages > 50% of probes on the visual-demo gate cannot be worked around.
+- Hand-rolled cosine scan latency exceeds 200 ms p95 at the curated-seed corpus size (would block every chat turn).
+- Attachment upload leaves files on disk after a session delete (fs leak).
+- Auto-ingest produces an unparseable index (re-load fails; chat breaks).
+

@@ -375,6 +375,32 @@
             <p id="chat-session-status" class="chat-session-status" hidden></p>
           </div>
 
+          <!-- CR-3 — current working prompt editor (SPEC §19.1). Inline
+               edit affordance; PATCH /api/chat/sessions/:id on save. -->
+          <div class="chat-working-prompt" id="chat-working-prompt" aria-label="Current working prompt">
+            <div class="chat-working-prompt__display">
+              <div class="chat-working-prompt__meta">
+                <span class="chat-working-prompt__label">Current working prompt</span>
+                <button type="button" id="chat-edit-current-btn" class="btn-tertiary chat-edit-btn">Edit</button>
+              </div>
+              <pre id="chat-working-prompt-text" class="chat-working-prompt__text"></pre>
+            </div>
+            <div class="chat-working-prompt__editor" hidden>
+              <label for="chat-edit-current-input" class="label">Edit working prompt</label>
+              <textarea
+                id="chat-edit-current-input"
+                class="textarea"
+                rows="4"
+                maxlength="2000"
+              ></textarea>
+              <div class="chat-working-prompt__editor-actions">
+                <button type="button" id="chat-edit-current-cancel" class="btn-secondary">Cancel</button>
+                <button type="button" id="chat-edit-current-save" class="btn-primary">Save</button>
+              </div>
+              <p id="chat-edit-current-status" class="chat-form-status" role="status" aria-live="polite"></p>
+            </div>
+          </div>
+
           <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-label="Chat history"></div>
 
           <form id="chat-form" class="chat-form" autocomplete="off">
@@ -390,7 +416,14 @@
               placeholder="Discuss the prompt, request a recommendation, or ask for a change — e.g. &quot;make the lighting more dramatic&quot;, &quot;shorten the subject line&quot;, &quot;rewrite in comma-separated tags&quot;…"
               required
             ></textarea>
+            <!-- CR-2 — pending attachments (uploaded but not yet sent) -->
+            <div id="chat-pending-attachments" class="chat-pending-attachments" aria-live="polite" hidden></div>
             <div class="chat-form__actions">
+              <button type="button" id="chat-attach-btn" class="btn-secondary chat-attach-btn" aria-label="Attach image" title="Attach image (max 10 MB, 4 per message)">
+                <span aria-hidden="true">📎</span>
+                <span class="btn-text">Attach</span>
+              </button>
+              <input type="file" id="chat-attach-input" accept="image/png,image/jpeg,image/webp" hidden multiple />
               <span id="chat-form-status" class="chat-form-status" role="status" aria-live="polite"></span>
               <button type="submit" id="chat-send-btn" class="btn-primary">
                 <span class="btn-text">Send</span>

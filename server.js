@@ -16,6 +16,8 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const rag = require('./server/lib/rag');
+const ragIngest = require('./server/lib/rag_ingest');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
@@ -704,6 +706,75 @@ const upload = multer({
     }
   }
 });
+
+// ─── CR-2 — Chat attachments storage + multer config ─────────────────────
+// SPEC §18 / ADR 0025. Each session gets its own subdirectory under
+// data/chat_attachments/<session_id>/. File names are random; the
+// route maps id → file via a manifest (data/chat_attachments/_manifest.json)
+// so we never trust the URL for fs access. 10 MB cap per file.
+
+const CHAT_ATTACHMENTS_DIR = path.join(__dirname, 'data', 'chat_attachments');
+const CHAT_ATTACHMENTS_MANIFEST = path.join(CHAT_ATTACHMENTS_DIR, '_manifest.json');
+const CHAT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+if (!fs.existsSync(CHAT_ATTACHMENTS_DIR)) {
+  fs.mkdirSync(CHAT_ATTACHMENTS_DIR, { recursive: true });
+}
+
+const readChatAttachmentsManifest = () => {
+  try {
+    const raw = fs.readFileSync(CHAT_ATTACHMENTS_MANIFEST, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    return [];
+  }
+};
+const writeChatAttachmentsManifest = (manifest) => {
+  fs.writeFileSync(CHAT_ATTACHMENTS_MANIFEST, JSON.stringify(manifest, null, 2), { mode: 0o600 });
+};
+
+const chatAttachmentStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    try {
+      const sessionId = req.params.id;
+      if (typeof sessionId !== 'string' || !sessionId.startsWith(CHAT_SESSION_ID_PREFIX)) {
+        return cb(new Error(`session id must start with "${CHAT_SESSION_ID_PREFIX}".`));
+      }
+      const dir = path.join(CHAT_ATTACHMENTS_DIR, sessionId);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    } catch (err) {
+      cb(err);
+    }
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const random = crypto.randomBytes(12).toString('hex');
+    cb(null, `${random}${ext}`);
+  }
+});
+
+const chatAttachmentUpload = multer({
+  storage: chatAttachmentStorage,
+  limits: { fileSize: CHAT_ATTACHMENT_MAX_BYTES },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ALLOWED_IMAGE_TYPES.includes(file.mimetype) && ALLOWED_EXTENSIONS.includes(ext)) {
+      cb(null, true);
+    } else {
+      // CR-2 — tag the error so the route handler can return 400
+      // (Bad Request) instead of the generic 500.
+      const err = new Error(`Invalid chat-attachment file type: ${file.mimetype}. Allowed: JPG, PNG, WebP.`);
+      err.statusCode = 400;
+      cb(err);
+    }
+  }
+});
+
+const generateChatAttachmentId = () => `att_${crypto.randomBytes(8).toString('hex')}`;
+
+const ALLOWED_CHAT_ATTACHMENT_VISION_MODELS = /(m3|minimax|gpt-4o|claude|vision|qwen-vl|gemini|llava|pixtral)/i;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data files
@@ -4992,6 +5063,23 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
     fs.unlinkSync(filePath);
     filePath = null;
 
+    // CR-4 — auto-ingest the Anima positive prompt into the RAG
+    // corpus (SPEC §20.1 / ADR 0025 D5-a). The negative prompt is
+    // preserved as metadata on the chunk so future retrievals can
+    // reason about both halves without polluting the embedding
+    // space with Danbooru-tag vocabulary. Failure must not break
+    // the response (the user already got their prompt).
+    try {
+      ragIngest.ingestStage2Output({
+        presetName: `Anima (${variantPrompt})`,
+        model: typeof llmModel === 'string' ? llmModel : 'unknown',
+        finalPrompt: result.positive,
+        meta: { provider, variant: variantPrompt, negative: result.negative, ingested_at: new Date().toISOString() }
+      });
+    } catch (e) {
+      console.warn(`[rag_ingest] anima ingest failed: ${e.message}`);
+    }
+
     res.json({
       success: true,
       data: {
@@ -5322,6 +5410,21 @@ app.post('/api/generate-prompt', async (req, res) => {
     // render a non-blocking warning chip (mirror of `result-strict-warn`).
     if (isZImagePreset && lengthCheck) {
       responseData.length_check = lengthCheck;
+    }
+
+    // CR-4 — auto-ingest every successful Stage 2 output into the
+    // RAG corpus (SPEC §20.1 / ADR 0025 D5-a). Debounced + capped;
+    // a failure here must NOT break the response (the user already
+    // got their prompt).
+    try {
+      ragIngest.ingestStage2Output({
+        presetName: preset && preset.name ? preset.name : 'Unknown preset',
+        model: typeof llmModel === 'string' ? llmModel : 'unknown',
+        finalPrompt,
+        meta: { provider, run_id: responseData.run_id || null, ingested_at: new Date().toISOString() }
+      });
+    } catch (e) {
+      console.warn(`[rag_ingest] stage2 ingest failed: ${e.message}`);
     }
 
     res.json({ success: true, data: responseData });
@@ -6097,42 +6200,69 @@ const validatePromptPreservation = (original, revised, userRequest) => {
  * (`validatePromptPreservation`) catches wholesale rewrites that
  * slip through and declines them.
  */
-const DEFAULT_CHAT_SYSTEM_PROMPT = `You are a focused prompt-refinement assistant iterating with a user on an image prompt.
+const DEFAULT_CHAT_SYSTEM_PROMPT = `You are an oil-painting reference-creation specialist collaborating with an artist.
+
+Every prompt you and the artist produce is destined for an image-generation model whose output will be used as a *reference image* for oil-painting practice — never as a finished painting. Your job is to help the artist sharpen that reference: to compose, refine, and iterate on the prompt until it is the strongest possible blueprint for the painting they want to make.
+
+# DOMAIN
+
+You have deep, working knowledge of:
+- Composition: rule of thirds, golden ratio / Fibonacci spiral, focal hierarchy, atmospheric perspective, leading lines, negative space, gestural composition, value structure (notan), edge control (lost-and-found edges), framing & crop.
+- Historical art conventions: Baroque chiaroscuro (Caravaggio, Rembrandt), Renaissance sfumato (Leonardo), Impressionist broken color (Monet, Renoir), alla-prima freshness (Sargent, Sorolla), Northern realism (Vermeer, Holbein), Fauvism (Matisse, Derain), Expressionist gestural brushwork (Soutine, Auerbach), Rococo pastel palette (Watteau, Fragonard), classical contrapposto & balance (Raphael, Ingres).
+- Oil-painting craft: brushwork (alla prima, glazing/velatura, scumbling, impasto, sgraffito, dry-brush, fat-over-lean); pigment behavior (slow vs fast driers, transparent vs opaque, sedimentary earths, cadmiums, quinacridones); color theory for traditional media (warm/cool contrast, complementary pairs, simultaneous contrast, broken-color mixing); support & ground (oil on canvas vs linen, toned ground, imprimatura); medium & solvent (linseed vs walnut oil, mineral spirits, mediums like Liquin / Oleogel); drying-time implications (wet-on-wet, wet-on-dry, layering order).
+- The active target model: Z-Image Turbo (prose, pastel-focal-glow contract) or Anima (Danbooru tags). The artist has chosen one. Honour its vocabulary constraints.
+
+# GROUNDING (RETRIEVAL BLOCK)
+
+Top of your context is a RETRIEVAL block with the most relevant excerpts from your domain corpus (composition / historical art / oil-painting style / the artist's own prompt history). Use that vocabulary naturally when you refine — do not cite chunks by id. If the retrieval is empty or missing, fall back to your own training knowledge, but always lead with oil-painting-specific terms (alla prima, palette knife, scumbling, impasto, glazing, complementary contrast, focal hierarchy, value structure, atmospheric perspective, lost-and-found edges).
 
 # MODES
-- Discussion (default): answer in \`reply\`; emit \`suggested_prompt: ""\`.
+
+- Discussion (default): answer in \`reply\` with oil-painting-aware reasoning. If the artist's vision is underspecified, ASK a clarifying question about subject, mood, palette, brushwork, composition, or historical anchor — and offer two or three grounded interpretations to choose from. Emit \`suggested_prompt: ""\`.
 - Proposal (recommended or requested change): emit the FULL revised prompt in \`suggested_prompt\`.
-- Never commit from your output — the user clicks Apply.
+- Never commit from your output — the artist clicks Apply.
 
 # EDIT BASE
+
 - A PENDING PROMPT, when present, is the editing base.
 - Otherwise the current working prompt is the editing base.
-- Preserve every concrete fact the user did NOT explicitly ask to change (application context, hex codes, dimensions, named values, technical parameters, production requirements).
+- Preserve every concrete fact the artist did NOT explicitly ask to change (application context, hex codes, dimensions, named pigment values, technical parameters, brushwork choices, palette choices, composition constraints).
 - Preserve the original / current / pending distinction.
 
 # CORE CONTRACT — EDIT, DO NOT REGENERATE
 
-INVENTORY the current working prompt. CLASSIFY each item against the user's request:
-- DELTA: items the user explicitly mentioned. These you may change.
-- ANCHOR SET: items the user did NOT mention. Non-negotiable.
+INVENTORY the current working prompt. CLASSIFY each item against the artist's request:
+- DELTA: items the artist explicitly mentioned. These you may change.
+- ANCHOR SET: items the artist did NOT mention. Non-negotiable.
 
-APPLY only the delta to the anchor set. The revised prompt is the anchor set verbatim (or paraphrastic equivalence preserving meaning) PLUS the user's requested change. Do NOT introduce new facts the user did not ask for. Do NOT drop anchor-set items.
+APPLY only the delta to the anchor set. The revised prompt is the anchor set verbatim (or paraphrastic equivalence preserving meaning) PLUS the artist's requested change. Do NOT introduce new facts the artist did not ask for. Do NOT drop anchor-set items.
 
-If the user explicitly asks for a wholesale rewrite, the anchor set is empty by their request. Otherwise anchor preservation is non-negotiable.
+If the artist explicitly asks for a wholesale rewrite, the anchor set is empty by their request. Otherwise anchor preservation is non-negotiable.
+
+# OIL-PAINTING REFINEMENT HEURISTICS
+
+When the artist asks for a change without specifics, prefer these grounded defaults:
+- "more dramatic lighting" → chiaroscuro vocabulary (tenebrism, deep shadow, single warm key, lost-and-found edges) rather than depicted-light vocabulary that the target image-gen model may ignore.
+- "more painterly" → specific brushwork vocabulary (alla prima, palette knife ridges, gestural streaks, broken-color mixing) rather than vague quality tags.
+- "warmer palette" → named pigment vocabulary (cadmium-coral, vermillion, burnt sienna, Naples yellow, yellow ochre) rather than colour-hex or colour-name dilution.
+- "more dynamic composition" → specific compositional moves (diagonal sweep, asymmetric balance, atmospheric perspective on the background, focal hierarchy with a single saturated accent).
+- "richer colour" → broken-color mixing vocabulary (dabs of cadmium and viridian side by side, simultaneous contrast, warm/cool alternation) rather than "vibrant" or "saturated".
+- "historical style" → name the convention directly (Baroque chiaroscuro, alla-prima freshness, sfumato, Impressionist broken color, Fauvism) so the artist's vision can be sharpened.
 
 # JSON SCHEMA (strict)
 
 Respond with EXACTLY one JSON object — no markdown fences, no prose. Two string fields:
-- \`reply\`: 1-3 sentences. Address what the user asked. NEVER empty.
+- \`reply\`: 1-3 sentences for revisions; up to 5 sentences for discussion. Address what the artist asked. NEVER empty.
 - \`suggested_prompt\`: a string. NEVER null, NEVER omitted. Use \`""\` for discussion. Use the FULL revised prompt when proposing a revision.
 
 # RULES
 
 - \`reply\` is mandatory and non-empty.
 - A revision must be a complete self-contained prompt — never a fragment or diff.
-- Keep \`reply\` under 200 words.
-- Don't comment on style/aesthetic quality.
-- Don't ask clarifying questions — propose the most natural interpretation.`;
+- Keep \`reply\` under 200 words for revisions; under 400 words for discussion.
+- DO comment on style and aesthetic quality — that is your expertise. Use pigment names, brushwork names, composition names.
+- DO ask clarifying questions when the artist's vision is underspecified.
+- When proposing a revision, anchor each change in a named convention from your domain knowledge. The artist should be able to learn something from every reply.`;
 
 /**
  * Generate a fresh chat session id (`chat_<16 hex>`).
@@ -7067,12 +7197,57 @@ const buildChatSystemPrompt = (session) => {
   });
 };
 
-const buildChatRequestContext = (session) => {
+const buildChatRequestContext = async (session, llmModel = null) => {
   const sessionObj = session || {};
-  const systemPrompt = buildChatSystemPrompt(sessionObj);
+  let systemPrompt = buildChatSystemPrompt(sessionObj);
+  let retrievalIds = [];
+  // CR-1 — Retrieval-Augmented Generation (SPEC §17 / ADR 0025).
+  // The retrieval query is the current working prompt plus the last
+  // user message. On retrieval failure we degrade gracefully — the
+  // chat continues without corpus grounding.
+  try {
+    const lastMessage = Array.isArray(sessionObj.messages) && sessionObj.messages.length > 0
+      ? sessionObj.messages[sessionObj.messages.length - 1]
+      : null;
+    const lastUserContent = lastMessage && lastMessage.role === 'user' && typeof lastMessage.content === 'string'
+      ? lastMessage.content
+      : '';
+    const retrievalQuery = `${sessionObj.current_prompt || ''}\n\n${lastUserContent}`.trim();
+    if (retrievalQuery.length > 0) {
+      const chunks = await rag.retrieve(retrievalQuery, rag.DEFAULT_TOP_K);
+      if (Array.isArray(chunks) && chunks.length > 0) {
+        const retrievalBlock = rag.buildRetrievalBlock(chunks);
+        if (retrievalBlock) {
+          systemPrompt = `${systemPrompt}\n\n${retrievalBlock}`;
+          retrievalIds = chunks.map((c) => c.id);
+        }
+      }
+    }
+  } catch (err) {
+    // Never block the chat on retrieval failure.
+    console.warn(`[chat] retrieval injection failed: ${err.message}`);
+  }
   const remaining = Math.max(0, CHAT_CONTEXT_CHAR_BUDGET - systemPrompt.length);
   const messages = buildBoundedChatHistory(sessionObj.messages, remaining);
-  return { systemPrompt, messages };
+  // CR-2 — vision-aware user message (SPEC §18.1 / ADR 0025). If the
+  // last user message has attachment_ids and the model is vision-
+  // capable, build the OpenAI content-array form with image_url
+  // data URLs. Otherwise fall back to text-only with a note.
+  if (Array.isArray(sessionObj.messages) && sessionObj.messages.length > 0) {
+    const last = sessionObj.messages[sessionObj.messages.length - 1];
+    if (last && last.role === 'user' && Array.isArray(last.attachment_ids) && last.attachment_ids.length > 0) {
+      const replacement = await buildUserMessageWithAttachments(
+        sessionObj.id,
+        typeof last.content === 'string' ? last.content : '',
+        last.attachment_ids,
+        llmModel
+      );
+      if (messages.length > 0 && messages[messages.length - 1].role === 'user') {
+        messages[messages.length - 1] = replacement;
+      }
+    }
+  }
+  return { systemPrompt, messages, retrievalIds };
 };
 
 // ─── Routes ───────────────────────────────────────────────────────
@@ -7171,6 +7346,78 @@ app.get('/api/chat/sessions/:id', (req, res) => {
 });
 
 /**
+ * `PATCH /api/chat/sessions/:id` — CR-3 direct edit (SPEC §19).
+ *
+ * Body: `{ current_prompt?: string }`. The user-driven mutation
+ * bypasses the LLM and commits the change atomically. Distinct from
+ * "apply proposal" (which promotes an assistant's suggested_prompt).
+ * No LLM call; an audit message is appended so the history records
+ * that a manual edit happened at this point in the conversation.
+ *
+ * `pending_prompt` is cleared because it was anchored to the old
+ * `current_prompt`.
+ */
+app.patch('/api/chat/sessions/:id', (req, res) => {
+  try {
+    if (typeof req.params.id !== 'string' || !req.params.id.startsWith(CHAT_SESSION_ID_PREFIX)) {
+      return res.status(400).json({ success: false, error: `id must start with "${CHAT_SESSION_ID_PREFIX}".` });
+    }
+    const body = req.body || {};
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ success: false, error: 'Request body must be a JSON object.' });
+    }
+    if (body.current_prompt === undefined) {
+      return res.status(400).json({ success: false, error: 'current_prompt is required for a direct edit.' });
+    }
+    if (typeof body.current_prompt !== 'string' || body.current_prompt.trim().length === 0) {
+      return res.status(400).json({ success: false, error: 'current_prompt must be a non-empty string.' });
+    }
+    if (body.current_prompt.length > MAX_FINAL_PROMPT_LENGTH) {
+      return res.status(400).json({
+        success: false,
+        error: `current_prompt must be ${MAX_FINAL_PROMPT_LENGTH} characters or fewer (got ${body.current_prompt.length}).`
+      });
+    }
+    const sessions = readChatSessions();
+    const idx = sessions.findIndex((s) => s.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Chat session "${req.params.id}" not found.` });
+    }
+    const session = sessions[idx];
+    const previous = session.current_prompt;
+    session.current_prompt = body.current_prompt;
+    // Clear any pending proposal that was anchored to the old working
+    // prompt — it no longer makes sense.
+    session.pending_prompt = null;
+    const now = new Date().toISOString();
+    // Append an audit message so the history shows a manual edit at
+    // this point. Truncated for storage; the full previous text is in
+    // a dedicated `previous_prompt` field for the audit row.
+    const auditMessage = {
+      id: generateChatMessageId(),
+      role: 'assistant',
+      content: `Working prompt edited manually.`,
+      suggested_prompt: null,
+      timestamp: now,
+      // CR-3 — explicit audit metadata so tests + future UI can
+      // identify direct edits vs AI proposals.
+      audit: {
+        kind: 'direct_edit',
+        previous_prompt_preview: previous.length > 200
+          ? `${previous.slice(0, 199)}…`
+          : previous
+      }
+    };
+    if (Array.isArray(session.messages)) session.messages.push(auditMessage);
+    session.updated_at = now;
+    writeChatSessions(sessions);
+    res.json({ success: true, data: session });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
  * `POST /api/chat/sessions/:id/messages` — append a user message to a
  * session, call Kilo Code with the full history, append the assistant
  * reply, persist. Returns the updated session.
@@ -7203,12 +7450,36 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     }
 
     const now = new Date().toISOString();
+    // CR-2 — accept attachment_ids in the message body. Validate that
+    // every id belongs to this session (manifest lookup), strip any
+    // unknown ids, and cap at 4 attachments per message to bound the
+    // vision message-body size.
+    let attachmentIds = [];
+    if (Array.isArray(req.body.attachment_ids)) {
+      const manifest = readChatAttachmentsManifest();
+      const seen = new Set();
+      for (const candidate of req.body.attachment_ids) {
+        if (typeof candidate !== 'string') continue;
+        if (seen.has(candidate)) continue;
+        if (attachmentIds.length >= 4) break;
+        const entry = manifest.find((m) => m.id === candidate && m.session_id === session.id);
+        if (entry) {
+          attachmentIds.push(candidate);
+          seen.add(candidate);
+        }
+      }
+    }
     const userMessage = {
       id: generateChatMessageId(),
       role: 'user',
       content: req.body.content,
       suggested_prompt: null,
-      timestamp: now
+      timestamp: now,
+      // CR-2 — attachment ids are persisted on the message so the UI
+      // can render thumbnails and so DELETE /api/chat/attachments/:id
+      // can unlink them. The vision body is built lazily in
+      // buildChatRequestContext (SPEC §18.1).
+      attachment_ids: attachmentIds
     };
     session.messages.push(userMessage);
 
@@ -7234,7 +7505,7 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       return res.json({ success: true, data: session });
     }
 
-    const context = buildChatRequestContext(session);
+    const context = await buildChatRequestContext(session);
     const activePrompt = session.pending_prompt || session.current_prompt;
     let parsedReply;
     try {
@@ -7265,8 +7536,23 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       role: 'assistant',
       content: parsedReply.reply,
       suggested_prompt: parsedReply.suggested_prompt,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      // CR-1 — retrieval provenance (SPEC §17.1 / ADR 0025). Lets the
+      // UI show "this answer used these references" and lets tests
+      // verify the RAG path actually ran. Empty array when retrieval
+      // was empty or failed.
+      retrieval_ids: Array.isArray(context.retrievalIds) ? context.retrievalIds : []
     };
+    // CR-1 — auto-ingest non-trivial chat proposals into the RAG
+    // corpus so future chats can ground themselves in the artist's
+    // own prompt history (SPEC §20.1 / ADR 0025 D5-a).
+    if (typeof parsedReply.suggested_prompt === 'string' && parsedReply.suggested_prompt.length >= 30) {
+      ragIngest.ingestChatProposal({
+        sessionId: session.id,
+        messageId: assistantMessage.id,
+        suggestedPrompt: parsedReply.suggested_prompt
+      });
+    }
     // Issue #1: when the validator declined a revision, persist the
     // declined text and dropped anchor terms on the assistant message
     // so the frontend can render the declined preview + "Try as
@@ -7348,11 +7634,270 @@ app.delete('/api/chat/sessions/:id', (req, res) => {
     }
     const [removed] = sessions.splice(idx, 1);
     writeChatSessions(sessions);
+    // CR-2 — cascade-delete every attachment for this session.
+    cascadeDeleteChatSessionAttachments(removed.id);
     res.json({ success: true, data: { id: removed.id, deleted: true } });
   } catch (error) {
     res.status(500).json({ success: false, error: sanitizeError(error.message) });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CR-1 — RAG foundation (SPEC §17 / ADR 0025 / ARCHITECTURE CR-A1)
+//
+// Three read-only endpoints expose the curated corpus + retrieval;
+// one admin endpoint reindexes (used after a model swap or first
+// install). The corpus itself lives in `data/rag_corpus/`; the
+// vector index lives in `data/rag_index.json`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `GET /api/rag/corpus` — return the chunk titles + sources for the
+ * UI affordance ("what the AI knows"). Embeddings are NOT returned.
+ */
+app.get('/api/rag/corpus', (req, res) => {
+  try {
+    const summary = rag.getCorpusSummary();
+    res.json({
+      success: true,
+      data: {
+        chunks: summary,
+        sources: Array.from(rag.CURATED_SOURCES),
+        embedding_model: rag.loadIndex().embedding_model || null
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `POST /api/rag/reindex` — re-embed every chunk in the index. Use
+ * after an embedding model swap, or to backfill the curated seed
+ * on first install. Returns the count of re-embedded chunks.
+ */
+app.post('/api/rag/reindex', async (req, res) => {
+  try {
+    if (!kiloConfigured) {
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
+    }
+    const index = await rag.reindexAll();
+    const embedded = index.chunks.filter((c) => Array.isArray(c.embedding) && c.embedding.length > 0).length;
+    res.json({ success: true, data: { embedded, total: index.chunks.length } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `POST /api/rag/search` — preview the retrieval for a query.
+ * Body: `{ query: string, k?: number }`. Returns the top-k chunks
+ * the chat would inject, with their cosine scores.
+ */
+app.post('/api/rag/search', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const query = typeof body.query === 'string' ? body.query : '';
+    const k = Number.isInteger(body.k) && body.k > 0 && body.k <= 20 ? body.k : 4;
+    if (query.trim().length === 0) {
+      return res.status(400).json({ success: false, error: 'query must be a non-empty string.' });
+    }
+    const chunks = await rag.retrieve(query, k);
+    res.json({ success: true, data: { chunks } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CR-2 — Chat attachments (SPEC §18 / ADR 0025)
+//
+// Three endpoints:
+//   POST /api/chat/sessions/:id/attachments  — multer upload (1 file, 10 MB)
+//   GET  /api/chat/attachments/:id           — serve the file inline
+//   DELETE /api/chat/attachments/:id         — hard-delete + unlink from messages
+//
+// Attachments are referenced by id in messages. The session delete
+// cascades to the per-session attachment directory.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /api/chat/sessions/:id/attachments` — upload one image to a
+ * chat session. Returns `{ id, filename, mime, size }`. The id is
+ * referenced in subsequent `POST /api/chat/sessions/:id/messages`
+ * bodies via `attachment_ids: string[]`.
+ */
+app.post('/api/chat/sessions/:id/attachments', chatAttachmentUpload.single('image'), (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const sessions = readChatSessions();
+    const idx = sessions.findIndex((s) => s.id === sessionId);
+    if (idx === -1) {
+      // Cleanup the orphan file before 404ing.
+      if (req.file && req.file.path) {
+        try { fs.unlinkSync(req.file.path); } catch (_) { /* best-effort */ }
+      }
+      return res.status(404).json({ success: false, error: `Chat session "${sessionId}" not found.` });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded (field name must be "image").' });
+    }
+    const attId = generateChatAttachmentId();
+    const manifest = readChatAttachmentsManifest();
+    manifest.push({
+      id: attId,
+      session_id: sessionId,
+      filename: req.file.originalname,
+      mime: req.file.mimetype,
+      size: req.file.size,
+      path: req.file.path,
+      created_at: new Date().toISOString()
+    });
+    writeChatAttachmentsManifest(manifest);
+    res.json({
+      success: true,
+      data: {
+        id: attId,
+        filename: req.file.originalname,
+        mime: req.file.mimetype,
+        size: req.file.size
+      }
+    });
+  } catch (error) {
+    if (req.file && req.file.path) {
+      try { fs.unlinkSync(req.file.path); } catch (_) { /* best-effort */ }
+    }
+    // CR-2 — honour the statusCode tag from the multer fileFilter
+    // so a rejected mime becomes a 400, not a generic 500.
+    const statusCode = typeof error?.statusCode === 'number' ? error.statusCode : 500;
+    res.status(statusCode).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `GET /api/chat/attachments/:id` — serve an attachment inline with
+ * the correct Content-Type. Path is resolved from the manifest, never
+ * from the URL — so a malicious `?path=...` query cannot escape.
+ */
+app.get('/api/chat/attachments/:id', (req, res) => {
+  try {
+    const attId = req.params.id;
+    const manifest = readChatAttachmentsManifest();
+    const entry = manifest.find((m) => m.id === attId);
+    if (!entry) {
+      return res.status(404).json({ success: false, error: `Attachment "${attId}" not found.` });
+    }
+    if (!fs.existsSync(entry.path)) {
+      return res.status(404).json({ success: false, error: 'Attachment file missing on disk.' });
+    }
+    res.setHeader('Content-Type', entry.mime || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${entry.filename || attId}"`);
+    res.sendFile(path.resolve(entry.path));
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `DELETE /api/chat/attachments/:id` — hard-delete the file and
+ * unlink the id from every message in every session that referenced it.
+ */
+app.delete('/api/chat/attachments/:id', (req, res) => {
+  try {
+    const attId = req.params.id;
+    let manifest = readChatAttachmentsManifest();
+    const idx = manifest.findIndex((m) => m.id === attId);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Attachment "${attId}" not found.` });
+    }
+    const entry = manifest[idx];
+    // 1) Remove from manifest.
+    manifest = manifest.filter((m) => m.id !== attId);
+    writeChatAttachmentsManifest(manifest);
+    // 2) Unlink from every chat session that referenced it.
+    const sessions = readChatSessions();
+    let touched = false;
+    for (const session of sessions) {
+      if (!Array.isArray(session.messages)) continue;
+      for (const msg of session.messages) {
+        if (Array.isArray(msg.attachment_ids) && msg.attachment_ids.includes(attId)) {
+          msg.attachment_ids = msg.attachment_ids.filter((a) => a !== attId);
+          touched = true;
+        }
+      }
+    }
+    if (touched) writeChatSessions(sessions);
+    // 3) Best-effort fs unlink.
+    try { if (fs.existsSync(entry.path)) fs.unlinkSync(entry.path); } catch (err) {
+      console.warn(`[chat-attachment] unlink failed for ${entry.path}: ${err.message}`);
+    }
+    res.json({ success: true, data: { id: attId, deleted: true } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * Helper: build the OpenAI-style content-array for a user message
+ * that has attachment_ids. Returns an array with a text part followed
+ * by one image_url part per attachment (data: URL). When the model
+ * is not vision-capable, returns the text-only fallback so the chat
+ * continues without crashing.
+ */
+const buildUserMessageWithAttachments = async (sessionId, messageContent, attachmentIds, llmModel) => {
+  if (!Array.isArray(attachmentIds) || attachmentIds.length === 0) {
+    return { role: 'user', content: messageContent };
+  }
+  const visionCapable = typeof llmModel === 'string' && ALLOWED_CHAT_ATTACHMENT_VISION_MODELS.test(llmModel);
+  if (!visionCapable) {
+    // Text-only fallback — attachments are still stored on the message,
+    // but the LLM does not see them. Logged + surfaced via a banner.
+    return {
+      role: 'user',
+      content: `${messageContent}\n\n[${attachmentIds.length} attachment(s) attached — not visible to the current model.]`
+    };
+  }
+  const manifest = readChatAttachmentsManifest();
+  const content = [{ type: 'text', text: messageContent }];
+  for (const attId of attachmentIds) {
+    const entry = manifest.find((m) => m.id === attId && m.session_id === sessionId);
+    if (!entry || !fs.existsSync(entry.path)) continue;
+    try {
+      const buf = fs.readFileSync(entry.path);
+      const dataUrl = `data:${entry.mime};base64,${buf.toString('base64')}`;
+      content.push({ type: 'image_url', image_url: { url: dataUrl } });
+    } catch (err) {
+      console.warn(`[chat-attachment] read failed for ${entry.path}: ${err.message}`);
+    }
+  }
+  return { role: 'user', content };
+};
+
+/**
+ * CR-2 — session-delete cascade (overrides the simple delete added
+ * earlier). Removes the per-session attachment directory + unlinks
+ * every attachment in that session from the manifest. The original
+ * chat delete handler is left in place below for backwards compat;
+ * this cascade runs as a follow-up write so the JSON delete stays
+ * the source of truth.
+ */
+const cascadeDeleteChatSessionAttachments = (sessionId) => {
+  try {
+    let manifest = readChatAttachmentsManifest();
+    const inSession = manifest.filter((m) => m.session_id === sessionId);
+    manifest = manifest.filter((m) => m.session_id !== sessionId);
+    writeChatAttachmentsManifest(manifest);
+    const dir = path.join(CHAT_ATTACHMENTS_DIR, sessionId);
+    if (fs.existsSync(dir)) {
+      for (const entry of inSession) {
+        try { if (fs.existsSync(entry.path)) fs.unlinkSync(entry.path); } catch (_) { /* best-effort */ }
+      }
+      try { fs.rmdirSync(dir); } catch (_) { /* best-effort */ }
+    }
+  } catch (err) {
+    console.warn(`[chat-attachment] cascade delete failed for ${sessionId}: ${err.message}`);
+  }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Providers & keys — ADR 0024 / UI-REDESIGN-SPEC §6.4
@@ -7643,6 +8188,13 @@ app.use((err, req, res, next) => {
     }
     return res.status(400).json({ success: false, error: sanitizeError(err.message) });
   }
+  // CR-2 — non-MulterError rejection from a fileFilter. The chat
+  // attachment fileFilter tags its rejection with `statusCode = 400`;
+  // honour it so mime rejections return 400 (Bad Request) instead
+  // of the generic 500 from the catch-all below.
+  if (typeof err?.statusCode === 'number' && err.statusCode >= 400 && err.statusCode < 600) {
+    return res.status(err.statusCode).json({ success: false, error: sanitizeError(err.message) });
+  }
   next(err);
 });
 
@@ -7667,6 +8219,15 @@ if (require.main === module) {
     if (!kiloConfigured) console.log('  ⚠️  Set KILO_API_KEY in .env to enable generation.');
     if (!isProviderLive('minimax')) console.log('  ℹ️  MiniMax provider in stub mode (set MINIMAX_LIVE=1 to enable).');
     if (!isProviderLive('alibaba')) console.log('  ℹ️  Alibaba provider in stub mode (set DASHSCOPE_LIVE=1 to enable).');
+    // CR-1 — seed the curated RAG corpus on first start (SPEC §17.1 /
+    // ADR 0025). Async + non-blocking; chat degrades gracefully on
+    // embedding failure (no-RAG mode).
+    rag.ensureCorpusSeeded(rag.loadIndex()).then((index) => {
+      const embedded = index.chunks.filter((c) => Array.isArray(c.embedding) && c.embedding.length > 0).length;
+      console.log(`RAG: ${embedded}/${index.chunks.length} corpus chunks embedded (model ${rag.loadIndex().embedding_model || 'unknown'}).`);
+    }).catch((e) => {
+      console.warn(`RAG seed failed: ${e.message}. Chat will run in no-RAG mode until reindex succeeds.`);
+    });
   });
 }
 
@@ -7972,5 +8533,8 @@ module.exports = {
   PRESERVATION_STOP_WORDS,
   tokenizeForPreservation,
   extractPreservationBigrams,
-  validatePromptPreservation
+  validatePromptPreservation,
+  // CR-2 — chat attachment helpers (SPEC §18 / ADR 0025)
+  buildUserMessageWithAttachments,
+  cascadeDeleteChatSessionAttachments
 };

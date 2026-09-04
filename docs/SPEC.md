@@ -732,3 +732,254 @@ which models are active per provider, persistently.
   the built-in catalog; new customs are auto-enabled.
 - Effective default: hardcoded `PROVIDER_DEFAULT_MODEL` when enabled, else
   first enabled model.
+
+---
+
+## Slice series CR — Chat Redesign (oil-painting RAG edition, 2026-09-04)
+
+**Pre-approved G1–G3 under the standing full-autonomy directive (2026-09-04).**
+Four slices below ship the redesign end-to-end. Each slice ships with tests +
+browser E2E demo + code review + SESSION-STATE update.
+
+**Strategic anchor:** All prompts generated through this tool are *exclusively*
+used to create reference images for oil-painting practice. The chat assistant
+becomes a specialised oil-painting-reference-creation expert grounded by a
+dedicated vector database (composition, historical art data, oil-painting
+style guides, previously generated prompt assets). Decisions D1–D5 (resolved
+at G1): hand-rolled cosine vector store over JSON, Kilo gateway embeddings,
+chat-only scope (Stage 1/2 contracts unchanged), curated default corpus
+seeded on first read, auto-ingest of all generated prompts.
+
+**Acceptance guarantees (across the whole series):**
+
+1. Every chat turn has top-k RAG retrieval injected into the system prompt
+   before the model is called. Retrieval provenance is captured per message.
+2. The persona is oil-painting-reference-creation-specific: brushwork,
+   pigment-aware color theory, fine-art composition, historical conventions.
+3. The chat accepts image attachments; the server embeds them in the
+   vision-capable message body for kilo_code; non-vision providers
+   degrade gracefully (attachment stored, message text-only).
+4. Direct in-place edit of `current_prompt` is available from the chat view.
+5. The conversation persists: history, attachments, prompt revisions survive
+   server restart; sync is a single-source-of-truth server + frontend refresh.
+6. Anchor preservation (ADR 0012) remains in force; the wholesale-rewrite
+   escape is preserved. Per-model sessions (ADR 0021) remain in force.
+
+### Slice CR-1 — RAG foundation + persona rewrite (2026-09-04)
+
+**Problem:** the chat system prompt is generic and explicitly forbids
+aesthetic commentary; there is no domain corpus; the model lacks
+oil-painting-specific grounding.
+
+**Shape:**
+- New `server/lib/rag.js` (~150 LOC): cosine similarity over a JSON-backed
+  vector index. Embeddings stored as `Float32Array`-serialised float arrays
+  next to each chunk. Query = (a) embed the user's last message + current
+  prompt, (b) dot-product top-k against every chunk, (c) return the
+  chunks above a similarity threshold.
+- New `server/lib/embeddings.js` (~80 LOC): Kilo gateway embedding wrapper
+  (`text-embedding-3-small`). One-call-per-batch with retry-on-429 back-off.
+  Embedding source stored on every chunk so we can re-embed on swap.
+- New `data/rag_corpus/` directory + 3 curated seed files:
+  - `composition.json` — rule of thirds, golden ratio, focal hierarchy,
+    atmospheric perspective, leading lines, negative space, gestural
+    composition, value structure, edge control.
+  - `historical_art.json` — Baroque chiaroscuro, Renaissance sfumato,
+    Impressionist broken color, alla-prima freshness, Northern realism,
+    Fauvism, Expressionist gestural brushwork.
+  - `oil_painting_style.json` — brushwork techniques (alla prima, glazing,
+    scumbling, impasto, sgraffito, dry-brush, fat-over-lean), color theory
+    for traditional media (warm/cool contrast, complementary pairs, pigment
+    properties), support/pigment notes, drying-time implications.
+- New `data/rag_index.json` (0600): `{ chunks: [{ id, source, title,
+  content, embedding: number[], embedding_model, embedded_at }] }`.
+- New `POST /api/rag/reindex` (admin): re-embed every chunk (used after a
+  model swap, or to backfill on first install).
+- New `GET /api/rag/corpus`: returns the chunk titles + sources for the UI
+  to render a "what the AI knows" affordance.
+- Rewrite `DEFAULT_CHAT_SYSTEM_PROMPT`:
+  - Persona: "You are an oil-painting reference-creation specialist
+    collaborating with an artist. Every prompt you produce is destined
+    for an image-gen model whose output will be used as a *reference*
+    for oil-painting practice, never as a finished painting."
+  - Drop the "Don't comment on style/aesthetic quality" rule.
+  - Drop the "Don't ask clarifying questions" rule.
+  - Add: "When refining, ground every recommendation in composition,
+    brushwork, pigment behaviour, and historical convention."
+  - Add: "Top of your context is a RETRIEVAL block with the most
+    relevant excerpts from your domain corpus — cite them implicitly
+    by using the same vocabulary."
+  - Keep the anchor-preservation contract (ADR 0012) intact.
+  - Keep the JSON schema (strict `{ reply, suggested_prompt }`).
+- In `POST /api/chat/sessions/:id/messages`: before building the LLM
+  request body, call `retrieveRelevantChunks(context, k=4)`, embed the
+  result as a `RETRIEVAL` block in the system prompt, and stamp the
+  retrieval ids onto the assistant message for provenance.
+- Tests: ≥15 new tests covering (a) cosine math, (b) corpus seed load,
+  (c) embedding-batch round-trip, (d) retrieval-injection in chat,
+  (e) persona prompt structure (string contains the new keywords),
+  (f) retrieval provenance on assistant messages.
+
+### Slice CR-2 — Image attachments + vision (2026-09-04)
+
+**Problem:** chat messages are text-only; users cannot share concept
+images; the chat cannot see what the artist is iterating on.
+
+**Shape:**
+- New `POST /api/chat/sessions/:id/attachments` (mul­ter, 10 MB cap,
+  mime allowlist: image/png, image/jpeg, image/webp). Stored under
+  `data/chat_attachments/<session_id>/<attachment_id>.<ext>`.
+- New `DELETE /api/chat/attachments/:id` (hard-delete one file + unlink
+  from any message referencing it).
+- New `GET /api/chat/attachments/:id` (serve the file with
+  `Content-Disposition: inline` + correct mime).
+- Message shape gains `attachments: [{ id, filename, mime, size }]`.
+  Multiple attachments per message allowed.
+- When `provider === 'kilo_code'` and the model supports vision
+  (heuristic: model name contains `m3` / `minimax` / `gpt-4o` /
+  `claude` / `vision` — fail-open if unknown), build the message
+  body as a content-array: `[{ type: 'text', text }, { type: 'image_url',
+  image_url: { url: 'data:<mime>;base64,...' } }, ...]`. Otherwise,
+  fall back to text-only with a note that attachments are stored.
+- `POST /api/chat/sessions/:id` (delete): cascade-delete every
+  attachment directory for the session.
+- `data/chat_sessions.json` shape unchanged at the JSON level (the
+  attachment id is enough to look up the file).
+- UI: attach button (paperclip) in the chat form; attachment
+  thumbnails under the textarea; thumbnails in the transcript
+  (click to enlarge in a lightbox modal).
+- Tests: ≥8 new tests covering (a) upload round-trip, (b) mime
+  rejection, (c) session-delete cascade, (d) vision message-body
+  build, (e) text-only fallback for non-vision providers, (f)
+  attachment GET serves correct mime, (g) attachment id is on the
+  message, (h) attachment unlinked from messages after DELETE.
+
+### Slice CR-3 — Two-way UX upgrade + direct edits (2026-09-04)
+
+**Problem:** the chat feels transactional (input → reply → apply). The
+"edit any stage" affordance is implicit; there is no direct hand-edit
+of `current_prompt`; the transcript lacks ChatGPT-style polish.
+
+**Shape:**
+- New `PATCH /api/chat/sessions/:id` body `{ current_prompt?: string }`:
+  in-place edit of the committed working prompt. Does NOT trigger an
+  LLM call. Returns the updated session.
+- New `POST /api/chat/sessions/:id/revert/:messageId`: revert
+  `current_prompt` to whatever value it had at the moment the given
+  message was applied. Does NOT mutate history; just rewinds the
+  working prompt. Disabled if the message was a discussion (no
+  prompt change at that turn).
+- New `POST /api/chat/sessions/:id/fork-from/:messageId`: mint a
+  *new* chat session whose `original_prompt` is `current_prompt` at
+  the fork point. The original session is closed (read-only). Lets the
+  user branch without losing either thread.
+- UI: in the chat transcript, every assistant message with a
+  `suggested_prompt` now also has an "Edit & apply" button that
+  opens an inline editor pre-filled with the suggestion; on save,
+  PATCH `/current_prompt` and POST `/apply/:messageId` atomically.
+- UI: the "Current working prompt" header is editable (textarea +
+  Save button). Save → PATCH.
+- UI: ChatGPT-style polish — typing indicator while waiting on the
+  LLM, smooth scroll-to-bottom on new message, message grouping by
+  sender, draft autosave (localStorage), "Edit any prior message"
+  hover affordance.
+- Tests: ≥6 new tests covering (a) PATCH current_prompt round-trip,
+  (b) revert round-trip, (c) fork mints a new session, (d) cascade
+  integrity after edit, (e) draft autosave persistence, (f) PATCH
+  rejection of empty/oversized prompt.
+
+### Slice CR-4 — Auto-ingest + sync hardening + G5 polish (2026-09-04)
+
+**Problem:** the curated corpus is static; the user's own prompt history
+is the most domain-relevant signal we have; sync across restarts is not
+explicitly tested; G5 audit hasn't run.
+
+**Shape:**
+- New `server/lib/rag_ingest.js` (~40 LOC): on every successful Stage 2
+  (`POST /api/generate-prompt`) and every successful Anima Stage 2
+  (`POST /api/anima`), call `appendChunkToIndex({ source: 'stage2',
+  title: <preset name>, content: <final prompt> })`. The chunk is
+  embedded lazily on the next retrieval (or eagerly on a debounced
+  reindex). On every chat proposal that produces a non-null
+  `suggested_prompt`, call `appendChunkToIndex({ source: 'chat',
+  title: 'chat proposal <id>', content: <suggested_prompt> })`.
+- Reindex is debounced (5 s) so a burst of activity doesn't hammer the
+  embedding endpoint. On startup, finish any pending embeds.
+- Cap the auto-ingested index at 5,000 chunks (oldest evicted
+  first); the curated seed is never evicted (its `source` is in
+  `['composition', 'historical_art', 'oil_painting_style']`).
+- New `POST /api/rag/search` body `{ query, k }`: expose the
+  underlying retrieval to the UI so users can preview what the AI
+  sees (transparency affordance).
+- Sync hardening tests: kill-server-restart-survives for (a) chat
+  history, (b) attachments, (c) RAG index, (d) current/pending
+  prompts.
+- `docs/POLISH-AUDIT-CR.md`: full 7-section audit (accessibility,
+  visual, prose, copy, performance, discipline, dependency). All
+  blocking findings fixed inline; non-blocking parked in BACKLOG.
+
+### File touchpoints (preview)
+
+| File | Touch | Lines (est.) |
+|---|---|---|
+| `server.js` | persona rewrite + retrieval + attachments + PATCH + auto-ingest | +600 / −120 |
+| `src/app.js` | chat view rewrite (UX + edit + lightbox + draft autosave) | +400 / −80 |
+| `src/index.html` | chat panel markup + lightbox | +60 |
+| `src/styles.css` | chat polish | +120 |
+| `tests/run-all.js` | new tests across all 4 slices | +500 |
+| `server/lib/rag.js` | new | ~150 |
+| `server/lib/embeddings.js` | new | ~80 |
+| `server/lib/rag_ingest.js` | new | ~40 |
+| `data/rag_corpus/*.json` | new (curated seed) | ~30 KB total |
+| `data/rag_index.json` | new (auto-managed) | grows with usage |
+| `data/chat_attachments/` | new dir (auto-managed) | grows with usage |
+| `docs/SPEC.md` | §17–20 (this entry) | +260 |
+| `docs/adr/0025-rag-foundation.md` | new | ~150 |
+| `docs/ARCHITECTURE.md` | CR appendices | +200 |
+| `docs/PRE-MORTEM.md` | CR risks + pre-commitments | +100 |
+| `docs/CODE-REVIEW-12-CR-1.md`, `…-CR-2.md`, `…-CR-3.md`, `…-CR-4.md` | new | ~200 each |
+| `docs/VISUAL-DEMO-CR-1.md` … `…-CR-4.md` | new | ~80 each |
+| `docs/POLISH-AUDIT-CR.md` | new | ~300 |
+| `docs/SESSION-STATE.md` | per-slice updates | +200 |
+
+### Glossary point-in-time (CR-series additions)
+
+- **RAG** — Retrieval-Augmented Generation. At chat-message time, the
+  server embeds the user's last message + current prompt, retrieves the
+  top-k most similar chunks from the vector store, and injects them into
+  the chat system prompt as a `RETRIEVAL` block before the LLM is
+  called. *Source: SPEC §17.1.*
+- **Vector store** — JSON-backed cosine index at `data/rag_index.json`.
+  Every chunk has an embedding (Float32Array-serialised) and an
+  embedding-model stamp. Hand-rolled; no external dependencies. *Source:
+  SPEC §17.1, D1.*
+- **Curated seed** — the three static JSON files in `data/rag_corpus/`
+  that the app ships with on first read. Never evicted by the 5,000-cap
+  logic. *Source: SPEC §17.1, D4.*
+- **Auto-ingested chunk** — a chunk created by `appendChunkToIndex`
+  from a Stage 2 output or a chat proposal. Subject to the 5,000-cap
+  FIFO eviction. *Source: SPEC §20.1, D5.*
+- **Retrieval provenance** — the list of chunk ids the server stamped
+  on each assistant message in `retrieval_ids: string[]`. Lets the UI
+  show "this answer used these references" and lets tests verify the
+  RAG path actually ran. *Source: SPEC §17.1.*
+- **Attachment** — a user-uploaded image stored under
+  `data/chat_attachments/<session_id>/<attachment_id>.<ext>`. Referenced
+  by id in messages. *Source: SPEC §18.1.*
+- **Direct edit** — `PATCH /api/chat/sessions/:id` with
+  `current_prompt`. A user-driven mutation that bypasses the AI and
+  commits the change atomically. Distinct from "apply proposal". *Source:
+  SPEC §19.1.*
+- **Fork** — `POST /api/chat/sessions/:id/fork-from/:messageId`. Mints
+  a new session whose `original_prompt` is the parent's
+  `current_prompt` at the fork point. The parent is closed. *Source:
+  SPEC §19.1.*
+
+### Out-of-scope (parked in BACKLOG, not CR-series)
+
+- Streaming responses (ChatGPT-style token streaming).
+- Cross-device sync (no second user).
+- Multi-user collaboration (still single-user).
+- Per-attachment alt-text auto-generation.
+- RAG re-ranking via cross-encoder (overkill for the corpus size).
+- Live OCR of attached concept images.
