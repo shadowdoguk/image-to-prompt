@@ -918,3 +918,86 @@ the three-criteria test (`docs/PRINCIPLES.md` §8).
 > parked beyond what's in `docs/POLISH-AUDIT-CR.md` §"Parked".** The CR series
 > is the closeout of the original standing directive.
 
+
+---
+
+## Session 2026-09-04 — Bugfix: Analyze Image button silent failure
+
+### What was reported
+
+> Clicking the "Analyze Image" button on the create page fails to trigger
+> any action or produce any output.
+
+### Investigation
+
+1. **Event listener attachment** — `src/app.js:1943`
+   ```js
+   dom.analyzeBtn.addEventListener('click', runAnalysis);
+   ```
+   Attached correctly, JS syntax passes `node --check`.
+
+2. **Button enable logic** — `updateButtons()` at `src/app.js:332`
+   ```js
+   dom.analyzeBtn.disabled = !state.selectedPresetId || !state.currentFile || state.isAnalyzing;
+   ```
+   Both `handleFile` (FileReader.onload) and the preset-select handler call
+   `updateButtons()`, so the button correctly enables once an image is
+   uploaded and a preset is picked.
+
+3. **Click handler body** — `runAnalysis` at `src/app.js:1165`
+   ```js
+   const runAnalysis = async () => {
+     if (!state.currentFile || !state.selectedPresetId) return;
+     ...
+   ```
+   **Root cause found.** The combined guard returned silently — no
+   `console.warn`, no `showError`, no state log. If state drifted between
+   the last `updateButtons()` call and the click (e.g. user cleared the
+   image, or selected a preset then cleared it), the click produced zero
+   feedback. Compounded by:
+   - **No `console.log`** anywhere in the handler — the entire flow was
+     invisible to DevTools.
+   - **No response-shape validation** — a 200 with `success: true` but a
+     missing `analysis` object would throw inside `renderAnalysisEditor`
+     with no actionable context.
+
+4. **Server route** — `server.js:4631` (`POST /api/analyze`) accepts
+   `req.file`, `req.body.presetId`, `req.body.paletteId`,
+   `resolveProviderAndModel(req.body)` (consumes `provider` + `model`).
+   Contract matches client payload.
+
+### Fix (`src/app.js:1165`)
+
+- Split the combined guard into two specific checks, each with
+  `console.warn` + `showError` + a return.
+- Added `console.log` at handler entry (file metadata, presetId, provider,
+  model) and at success (run_id, field keys).
+- Added `console.error` in the catch block.
+- Added response-shape guard: `if (!data || typeof data !== 'object' ||
+  !data.analysis) throw new Error('Server returned no analysis data.');`
+  so a malformed response surfaces as a user-visible error instead of a
+  confusing crash inside `renderAnalysisEditor`.
+
+### Verification
+
+- `node --check src/app.js` → OK
+- Structural grep: `runAnalysis` defined, guard split, `console.warn` on
+  guard, API validation, all four `FormData.append` fields, click
+  listener, `showError` in catch, `isAnalyzing` reset in `finally` — all
+  present.
+- Server contract unchanged (client FormData fields all consumed by
+  `req.body.*` and `req.file`).
+
+### File touchpoints
+
+| File | Touch |
+|---|---|
+| `src/app.js` | `runAnalysis` rewritten: split guard + console logging + response validation (+43 / −4 lines) |
+
+### Mood / risk flag
+
+> Low-risk, single-file bugfix. No contract changes. No new dependencies.
+> All existing tests should pass (the slice-3.4 grep test still matches
+> `runAnalysis` and the `fd.append('llmModel', state.llmModel)` line).
+> The fix improves observability of the entire analyze flow and prevents
+> two silent-failure modes (guard drift, malformed response).

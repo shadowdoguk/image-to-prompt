@@ -10054,6 +10054,94 @@ test('UI-R7 static: Models view wired into nav, shell, and app.js dropdown sourc
   assertTrue(app.includes('__i2pEnabledModelsByProvider'), 'app.js must read the enabled-models global');
 });
 
+// ─── Bugfix CR-16: Analyze Image button silent failure (2026-09-04) ───
+// Regression suite for the silent early-return guard fix in
+// src/app.js runAnalysis(). Verifies:
+//   1. The combined guard `(!state.currentFile || !state.selectedPresetId)`
+//      is GONE (would silently bail with zero feedback).
+//   2. Each guard branch surfaces a specific, user-visible error.
+//   3. Each guard branch logs to console.warn with diagnostics.
+//   4. The handler emits a console.log on entry with file + preset context.
+//   5. The handler validates the API response shape before dereferencing
+//      data.analysis — prevents silent crash inside renderAnalysisEditor.
+//   6. All FormData fields still forwarded to /api/analyze.
+//   7. Click listener still wired to runAnalysis.
+test('CR-16: runAnalysis combined silent guard is removed (as a statement)', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  // Strip // line comments so the test isn't fooled by the explanatory
+  // comment block that documents the fix.
+  const codeOnly = appText.split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
+  // The old buggy line was exactly this — must be gone as executable code.
+  assertTrue(
+    !/if \(!state\.currentFile \|\| !state\.selectedPresetId\) return;/m.test(codeOnly),
+    'combined silent guard `if (!state.currentFile || !state.selectedPresetId) return;` must not exist as an executable statement'
+  );
+});
+
+test('CR-16: runAnalysis guards emit specific user-visible errors', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/No image uploaded\. Upload an image first\./.test(appText),
+    'missing-file guard message must be present');
+  assertTrue(/No preset selected\. Choose a preset first\./.test(appText),
+    'missing-preset guard message must be present');
+});
+
+test('CR-16: runAnalysis guards emit console.warn with diagnostics', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  // At least two console.warn calls inside runAnalysis (one per guard).
+  // Anchor them with the 'guard fired' marker so future refactors can't
+  // silently drop the diagnostic logging.
+  const guardWarnMatches = appText.match(/console\.warn\([^)]*\[analyze\][^)]*guard fired/g) || [];
+  assertTrue(guardWarnMatches.length >= 2,
+    `expected >=2 console.warn calls with [analyze] guard fired marker, found ${guardWarnMatches.length}`);
+});
+
+test('CR-16: runAnalysis emits console.log on entry with file + preset context', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/console\.log\([^)]*\[analyze\][^)]*starting[^)]*presetId/.test(appText),
+    'entry console.log must include [analyze] starting + presetId');
+  assertTrue(/console\.log\([^)]*\[analyze\][^)]*starting[^)]*fileName/.test(appText),
+    'entry console.log must include [analyze] starting + fileName');
+});
+
+test('CR-16: runAnalysis validates API response shape before deref', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/Server returned no analysis data\./.test(appText),
+    'response-shape guard message must be present');
+  // Must appear AFTER the apiCall('/api/analyze', ...) call, not before.
+  const apiCallIdx = appText.indexOf("apiCall('/api/analyze'");
+  const guardIdx = appText.indexOf("Server returned no analysis data.");
+  assertTrue(apiCallIdx > 0 && guardIdx > apiCallIdx,
+    'response-shape guard must appear after the apiCall to /api/analyze');
+});
+
+test('CR-16: runAnalysis FormData fields preserved (image/presetId/llmModel/provider)', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/fd\.append\('image', state\.currentFile\)/.test(appText), 'image field must be appended');
+  assertTrue(/fd\.append\('presetId', state\.selectedPresetId\)/.test(appText), 'presetId field must be appended');
+  assertTrue(/fd\.append\('llmModel', state\.llmModel\)/.test(appText), 'llmModel field must be appended');
+  assertTrue(/fd\.append\('provider', state\.provider\)/.test(appText), 'provider field must be appended');
+});
+
+test('CR-16: analyze-btn click listener still wired to runAnalysis', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/analyzeBtn\.addEventListener\('click', runAnalysis\)/.test(appText),
+    'analyze-btn click listener must still call runAnalysis');
+});
+
+test('CR-16: runAnalysis catch block logs to console.error', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/console\.error\([^)]*\[analyze\][^)]*failed/.test(appText),
+    'catch block must log to console.error with [analyze] failed marker');
+});
+
+test('CR-16: runAnalysis finally block resets state + button', () => {
+  const appText = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/state\.isAnalyzing = false/.test(appText), 'finally must reset isAnalyzing');
+  assertTrue(/setButtonLoading\(dom\.analyzeBtn, false, 'Analyze image'\)/.test(appText),
+    'finally must reset button loading label');
+});
+
 (async () => {
   for (const { name, fn } of QUEUED) {
     try {

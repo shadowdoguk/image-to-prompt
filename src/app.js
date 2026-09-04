@@ -1163,10 +1163,40 @@
   };
 
   const runAnalysis = async () => {
-    if (!state.currentFile || !state.selectedPresetId) return;
+    // Bug fix: the previous implementation had a single combined guard
+    // `if (!state.currentFile || !state.selectedPresetId) return;` that
+    // silently bailed out with no feedback. If the button was enabled
+    // (via updateButtons()) but state drifted — e.g. user cleared the
+    // image between the last updateButtons() call and the click — the
+    // click would do nothing visible. Split into two specific checks
+    // that surface a clear error and log the state for diagnostics.
+    if (!state.currentFile) {
+      console.warn('[analyze] guard fired: no image uploaded', {
+        currentFile: state.currentFile,
+        selectedPresetId: state.selectedPresetId
+      });
+      showError('No image uploaded. Upload an image first.');
+      return;
+    }
+    if (!state.selectedPresetId) {
+      console.warn('[analyze] guard fired: no preset selected', {
+        currentFile: state.currentFile ? state.currentFile.name : null,
+        selectedPresetId: state.selectedPresetId
+      });
+      showError('No preset selected. Choose a preset first.');
+      return;
+    }
     state.isAnalyzing = true;
     setButtonLoading(dom.analyzeBtn, true, 'Analyzing…');
     updateButtons();
+    console.log('[analyze] starting', {
+      presetId: state.selectedPresetId,
+      fileName: state.currentFile.name,
+      fileSize: state.currentFile.size,
+      fileType: state.currentFile.type,
+      provider: state.provider,
+      llmModel: state.llmModel
+    });
 
     const fd = new FormData();
     fd.append('image', state.currentFile);
@@ -1183,6 +1213,18 @@
 
     try {
       const data = await apiCall('/api/analyze', { method: 'POST', body: fd });
+      // Bug fix: validate the response shape before dereferencing
+      // data.analysis. A 200 with `success: true` but a missing
+      // `analysis` object would previously throw inside
+      // renderAnalysisEditor with no actionable context. Treat it as
+      // a normal error so the user sees a useful message.
+      if (!data || typeof data !== 'object' || !data.analysis) {
+        throw new Error('Server returned no analysis data.');
+      }
+      console.log('[analyze] success', {
+        runId: data.run_id,
+        fields: Object.keys(data.analysis)
+      });
       state.currentAnalysis = data.analysis;
       state.currentRunId = data.run_id || null;
       const preset = state.presets.find((p) => p.id === state.selectedPresetId);
@@ -1198,6 +1240,7 @@
       updateSavePaletteButton();
       hideError();
     } catch (e) {
+      console.error('[analyze] failed', e);
       showError(`Analysis failed: ${e.message}`);
     } finally {
       state.isAnalyzing = false;
