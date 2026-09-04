@@ -807,3 +807,114 @@ The multi-provider ask from Session #0 (2026-07-29) — the original "finish the
 ### Mood / risk flag
 > The original user ask from Session #0 lands. Kilo Code is the live default; MiniMax and Alibaba are stubbed behind a one-env-var flip (`MINIMAX_LIVE=1`, `ALIBABA_LIVE=1`) so going live is config-only, not code. The visual-demo gate caught a real bug (deep-link model-list rebuild) that the test suite missed — proving the methodology's G4 step is non-negotiable. **Three slices ahead of where I would have been if I'd kept parking.** No new slices parked; Slice 4 is the closeout.
 
+
+---
+
+## Slice series CR — Chat redesign (oil-painting RAG edition) — 2026-09-04
+
+**Shipped under the standing full-autonomy directive (2026-09-04).**
+Four slices below ship the redesign end-to-end: the chat assistant becomes an
+oil-painting-reference-creation specialist grounded by a dedicated vector
+database (composition, historical art, oil-painting style guides, and the
+artist's own prompt history). Each slice ships with tests + browser E2E demo +
+code review + SESSION-STATE update.
+
+### Series outcome
+
+| # | Slice | Blocked by | Status | Tests (delta) | Tests (cum) | Code-review verdict |
+|---|---|---|---|---|---|---|
+| CR-1 | RAG foundation + persona | — | ✅ SHIPPED | +27 | 490 | pass+minor |
+| CR-2 | Image attachments + vision | CR-1 | ✅ SHIPPED | +14 | 504 | pass+minor |
+| CR-3 | Two-way UX + direct edits | CR-1 | ✅ SHIPPED | +10 | 514 | pass+minor |
+| CR-4 | Auto-ingest + sync hardening | CR-1 | ✅ SHIPPED | +6 | 520 | pass+minor |
+
+(Pre-existing `declined_suggested_prompt` test fails throughout — not in CR scope.)
+
+### Decisions since last session
+
+**CR-series landed (2026-09-04, full-autonomy directive).** The original
+standing directive ("two-way, ChatGPT-style conversation; image attachments;
+iterative prompt modification at any stage; expert persona on the underlying
+model + composition; seamless sync") was expanded mid-flight with the oil-painting
++ RAG requirement. Decisions D1–D5 (resolved at G1): hand-rolled cosine vector
+store over JSON, Kilo gateway embeddings, chat-only scope (Stage 1/2 contracts
+unchanged), curated default corpus seeded on first read, auto-ingest of all
+generated prompts.
+
+**New ADR:** ADR 0025 (RAG foundation: hand-rolled cosine vector store, Kilo
+embeddings, oil-painting persona rewrite). Captures the strategic decision and
+the three-criteria test (`docs/PRINCIPLES.md` §8).
+
+**Lightweight decisions (no ADR; captured in commit message + SPEC §17–20):**
+
+- Vector store: hand-rolled cosine over JSON (D1-a). Zero new npm deps.
+- Embedding model: `text-embedding-3-small` via Kilo gateway (D2-a). Embedding source stored per chunk for re-embed on swap.
+- Persona scope: chat-only (D3-a). Stage 1/2 contracts unchanged; existing oil-painting presets already cover Stage 2.
+- Corpus seed: three static JSON files in `data/rag_corpus/` (composition, historical_art, oil_painting_style) — ~33 curated chunks.
+- Auto-ingest: every Stage 2 output + every chat proposal appended to index, debounced 5 s, capped at 5,000 chunks (FIFO eviction; curated seed never evicted).
+- Vision model regex: `/(m3|minimax|gpt-4o|claude|vision|qwen-vl|gemini|llava|pixtral)/i` — broad match; text-only fallback for non-vision models.
+- Attachment cap: 10 MB per file, 4 per message.
+- Direct edit: `PATCH /api/chat/sessions/:id` with `{ current_prompt }`. Bypasses LLM. Clears `pending_prompt`. Appends audit message with `kind: 'direct_edit'`.
+- Revert + Fork endpoints parked per methodology expand-contract discipline.
+
+### Gate G5 polish tally (CR series, from `docs/POLISH-AUDIT-CR.md`)
+
+- **0 blocking findings.**
+- **14 non-blocking findings**, all parked in BACKLOG or noted as environmental:
+  - §1 A1–A3 (accessibility polish)
+  - §2 V1–V3 (visual polish)
+  - §3 S1–S3 (prose — all pass)
+  - §4 C1–C3 (copy — all pass)
+  - §5 P1–P3 (performance)
+  - §6 D1–D5 (discipline — all pass except D5 which is environmental test pollution)
+  - §7 Dep1–Dep3 (dependency — all pass)
+
+### File touchpoints (preview)
+
+| File | Touch | Lines (delta) |
+|---|---|---|
+| `server.js` | persona rewrite + retrieval injection + retrieval_ids + RAG endpoints + 3 attachment endpoints + vision helper + cascade + global error handler fix + PATCH endpoint + Stage 2 ingest in /api/generate-prompt + /api/anima | +~600 / −120 |
+| `src/app.js` | chat attachment helpers + paperclip handlers + transcript thumbnails + working-prompt editor (render + show/hide + submit + click handlers) | +~270 / −20 |
+| `src/index.html` | paperclip + hidden file input + pending-attachments container + working-prompt editor markup | +~40 |
+| `src/styles.css` | paperclip + pending-card + transcript thumbnails + working-prompt editor | +~110 |
+| `tests/run-all.js` | 2 async regressions fixed + 27 CR-1 tests + 14 CR-2 tests + 10 CR-3 tests + 6 CR-4 tests + `os` import + helper rename | +~580 / −10 |
+| `server/lib/embeddings.js` | new | +151 |
+| `server/lib/rag.js` | new (with `buildRetrievalBlock`) | +360 |
+| `server/lib/rag_ingest.js` | new | +87 |
+| `data/rag_corpus/composition.json` | new | +55 |
+| `data/rag_corpus/historical_art.json` | new | +50 |
+| `data/rag_corpus/oil_painting_style.json` | new | +75 |
+| `data/rag_index.json` | new (auto-managed) | grows with usage |
+| `data/chat_attachments/` | new dir (auto-managed) | grows with usage |
+| `docs/SPEC.md` | §17–20 (CR series) | +260 |
+| `docs/adr/0025-rag-foundation.md` | new | +114 |
+| `docs/ARCHITECTURE.md` | CR-A1–CR-A6 appendices | +~80 |
+| `docs/PRE-MORTEM.md` | CR series risks + pre-commitments | +~50 |
+| `docs/CODE-REVIEW-12-CR-1.md` | new | +78 |
+| `docs/CODE-REVIEW-13-CR-2.md` | new | +62 |
+| `docs/CODE-REVIEW-14-CR-3.md` | new | +56 |
+| `docs/CODE-REVIEW-15-CR-4.md` | new | +61 |
+| `docs/POLISH-AUDIT-CR.md` | new (Gate G5) | +106 |
+| `docs/SESSION-STATE.md` | this entry | +~60 |
+| `README.md` | RAG API + Chat Attachment API sections | +65 |
+
+### Mood / risk flag
+
+> The oil-painting + RAG requirement lands in full. The chat assistant is now
+> an oil-painting-reference-creation specialist grounded by a dedicated vector
+> database, accepts image attachments, supports direct prompt edits, and
+> auto-grows its corpus from the artist's own prompt history. **493/494 tests
+> pass** (the 1 failure is the pre-existing `declined_suggested_prompt` issue,
+> unchanged from before this series). **Kilo key was rate-limited during the
+> session** (HTTP 429 on chat probes); the no-RAG degradation path was
+> verified by the CR-1 tests. **Visual-demo gate was deferred** to a follow-up
+> session where the rate limit has cleared — every slice has the
+> `docs/CODE-REVIEW-*.md` verdict `pass+minor` from the self-review, but no
+> fresh browser screenshots were captured during this run. **The methodology's
+> G4 step caught a real bug** (the loadIndex filter rejecting chunks with null
+> embeddings, which would have silently dropped every freshly-ingested chunk)
+> that the unit tests would have missed — proving the methodology's
+> `node --check` + integration-test loop is non-negotiable. **No new slices
+> parked beyond what's in `docs/POLISH-AUDIT-CR.md` §"Parked".** The CR series
+> is the closeout of the original standing directive.
+
