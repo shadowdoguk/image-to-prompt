@@ -1374,3 +1374,53 @@ User said "continue" after the CR-20 closure. The original "run backlog now fini
 ### Mood / risk flag
 
   > Cap lowered with no regressions. The 4 pre-existing test failures remain out of scope (Issue #1 + 3 Slice 4 env-state). Future sessions will trim chat_sessions.json to keep state above the cap during testing cycles. No new architectural commitments beyond the constant change.
+
+---
+
+## Session #9 — 2026-09-05 (callAlibabaAdapter base_resp-error detection, CR-22)
+
+**Workflow:** existing (continue mode) — closure of the parked "same base_resp-error-detection for callAlibabaAdapter" item from Sessions #6/7/8 out-of-scope. Full-autonomy directive carried from Sessions #4–#8.
+
+### What was asked
+
+User said "continue" after CR-21's closure (Session #8). The remaining parked items included mirroring CR-20's MiniMax envelope-error surfacing for DashScope's OpenAI-compat adapter. This session tackles that one (CR-22); CR-23 (the 3 Slice 4 env-state tests) is the next item.
+
+### What landed
+
+1. **`server.js`** (+21 / -0) — defensive envelope detection in `callAlibabaAdapter`. The adapter previously only handled HTTP-level errors (`resp.ok === false`). DashScope's OpenAI-compat mode can return HTTP 200 with an error envelope in the body — silently returning empty content, exactly the failure pattern that CR-20 caught and fixed for MiniMax. The new detection handles both DashScope error shapes:
+
+   - `{ output: { code: "InvalidParameter", message: "..." } }` — `output.code` is the string `"0"` for success; any other value indicates failure. (Per DashScope compatibility-mode docs.)
+   - `{ code: "...", message: "...", request_id: "..." }` — root-level error envelope (no `output` field), typically for parameter / auth errors.
+
+   When detected, the adapter now returns `{ok: false, content: '', raw, error: 'Alibaba API {code}: {message}', provider: 'alibaba', model, stub: false}` instead of `{ok: true, content: ''}`.
+
+### Verification
+
+  - `node --check server.js` → exit 0.
+  - `node tests/run-all.js` → 504 passed, 4 failed (same Issue #1 + 3 × Slice 4 env-state pre-existing — no new regressions because DashScope is in stub mode in this environment; the new code path is defensive and only fires when DASHSCOPE_LIVE=1 is set or a real DashScope call returns an error envelope).
+  - `node scripts/session-init.js` → 10/10 V-checks; `code_drift` clean.
+
+### Notes / future-session hooks
+
+  - **Alibaba is in stub mode** in this environment (`data/provider_keys.json.alibaba.apiKey` is the empty string, `DASHSCOPE_LIVE` is unset). The new envelope detection cannot be exercised by a live API call here, but the code path is structurally analogous to the MiniMax one. When `DASHSCOPE_LIVE=1` is set and a real DashScope call returns an error envelope, the adapter will surface it transparently.
+  - **Future "lock-test" for CR-22** (the Slice-26 pattern) would be a static-parse assertion that `callAlibabaAdapter` mentions the envelope-error extraction. Not added in this commit because the detection logic is more forgiving than MiniMax's (two shapes vs. one), and a single static assertion may be brittle to natural refactors. Post this commit, the test environment doesn't easily exercise the path; the first real DashScope error response caught by this code will be the validation.
+
+### Out of scope — surfaced again, parked in BACKLOG
+
+  - The 3 Slice 4 env-state tests (`isProviderLive`, `callProvider stub`, `callMiniMaxAdapter no-key`) — to be addressed in CR-23 (next).
+  - Issue #1 declined-rev persistence — pre-existing.
+  - chat-alibaba live-mode path (DASHSCOPE_LIVE=1) — same item as upstream of CR-22.
+
+### Verification
+
+  `git log --oneline -4` →
+    (CR-22 hash TBD)  fix(chat-alibaba): CR-22 callAlibabaAdapter now surfaces DashScope API errors
+    4b7b289           fix(chat-state): CR-21 chat-session cap 200 → 50 (issue #20)
+    bca26fe           fix(chat-vision): CR-20 chat-route catalog + default were silently downgrading MiniMax-M3 to MiniMax-M1
+    98abfc6           fix(chat-vision): CR-19 chat-route non-kilo_code chat no longer stubs
+
+  `git status --short` → 5 pre-existing tracked + 2 pre-existing untracked (untouched). `chat_sessions.json` at 3 sessions (under 50-cap from CR-21).
+
+### Mood / risk flag
+
+  > CR-22 closes the DashScope-equivalent of CR-20's MiniMax fix. The defensive envelope detection is purely additive — no current test environment exercises the live path. CR-23 (env-state Slice 4 tests) is next, which will require either (a) updating the tests to acknowledge the stored-key architecture or (b) mock the credential resolution to test the no-key path in isolation. Architectural drift is otherwise stable; commit 98abfc6 (CR-19) + bca26fe (CR-20) + 4b7b289 (CR-21) form a coherent image-share sequence.

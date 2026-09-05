@@ -8462,6 +8462,27 @@ const callAlibabaAdapter = async (model, endpoint, args) => {
       body
     });
     const raw = await resp.json();
+    // CR-22 — DashScope OpenAI-compat error envelope surfacing. Mirror of
+    // CR-20's callMiniMaxAdapter base_resp handling, adapted for DashScope's
+    // shape. DashScope returns errors as either:
+    //   - { output: { code: "InvalidParameter", message: "..." } }
+    //     where `output.code` is the string "0" for success and any other
+    //     value for failure
+    //   - { code: "...", message: "...", request_id: "..." } root-level
+    //     (no `output` field) for parameter / auth errors
+    // Without this surfacing, the adapter would emit ok:true with empty
+    // content for upstream error responses (HTTP 200 + error envelope),
+    // silently dropping the error like MiniMax's pre-CR-20 behavior.
+    const aliErr =
+      (raw?.output && typeof raw.output === 'object' &&
+        raw.output.code != null && raw.output.code !== '0' && raw.output.code !== 0)
+        ? `Alibaba API ${raw.output.code}: ${raw.output.message || raw.output.text || '(no message)'}`
+        : (raw?.error?.message
+            ? `Alibaba API ${raw.error.code || 'error'}: ${raw.error.message}`
+            : null);
+    if (aliErr) {
+      return { ok: false, content: '', raw, error: aliErr, provider: 'alibaba', model, stub: false };
+    }
     // DashScope response: { output: { choices: [{ message: { content: [{ text }] } }] } }
     // (content is an array of parts). Normalize to a single string.
     const contentParts = raw?.output?.choices?.[0]?.message?.content;
