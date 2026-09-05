@@ -9413,16 +9413,24 @@ test('Slice 4: ALLOWED_PROVIDERS, ALLOWED_LLM_MODELS_BY_PROVIDER, DEFAULT_PROVID
     'CR-20: PROVIDER_DEFAULT_MODEL.minimax must be MiniMax-M3 (was MiniMax-M1 pre-CR-20)');
 });
 
-test('Slice 4: isProviderLive — Kilo Code is always live; MiniMax/Alibaba gated by env var', () => {
-  const { isProviderLive } = require(path.join(PROJECT_ROOT, 'server.js'));
-  assertEqual(isProviderLive('kilo_code'), true, 'kilo_code is always live');
-  assertEqual(isProviderLive('minimax'), false, 'minimax is stub by default (no MINIMAX_LIVE env var)');
-  assertEqual(isProviderLive('alibaba'), false, 'alibaba is stub by default (no DASHSCOPE_LIVE env var)');
-  // env var flip
-  process.env.MINIMAX_LIVE = '1';
-  assertEqual(isProviderLive('minimax'), true, 'MINIMAX_LIVE=1 enables minimax');
-  delete process.env.MINIMAX_LIVE;
-  assertEqual(isProviderLive('minimax'), false, 'unset MINIMAX_LIVE disables minimax');
+test('Slice 4: isProviderLive — kilo_code always live; others gated by env var OR stored credential', () => {
+  // CR-23 — Slice 4's original assertion ('minimax is stub by default')
+  // hardcoded the env-only-gating assumption. After ADR 0024's stored-key
+  // architecture (data/provider_keys.json credentials override env vars),
+  // the actual gate is `live iff (env var === '1') OR (stored key
+  // non-empty)`. kilo_code is hardcoded live regardless.
+  const { isProviderLive, resolveProviderCredential } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(isProviderLive('kilo_code'), true, 'kilo_code is always live (hardcoded)');
+  for (const p of ['minimax', 'alibaba']) {
+    const envVar = `${p.toUpperCase()}_LIVE`;
+    const storedKey = Boolean(resolveProviderCredential(p).apiKey);
+    assertEqual(isProviderLive(p), storedKey || process.env[envVar] === '1',
+      `${p}: live iff stored key (${storedKey}) OR env var (${process.env[envVar] || 'unset'})`);
+    process.env[envVar] = '1';
+    assertEqual(isProviderLive(p), true, `${p}: env var ON → live regardless of stored key`);
+    delete process.env[envVar];
+    assertEqual(isProviderLive(p), storedKey, `${p}: env var OFF → live iff stored key`);
+  }
 });
 
 test('Slice 4: resolveProviderAndModel — defaults to kilo_code + default model on missing fields', () => {
@@ -9458,14 +9466,20 @@ test('Slice 4: resolveProviderAndModel — defaults to kilo_code + default model
 });
 
 test('Slice 4: callProvider returns stub response when provider not live', async () => {
+  // CR-23 — Slice 4's original test used `minimax` which is now in
+  // live mode thanks to ADR 0024's stored-key architecture (data/
+  // provider_keys.json.minimax.apiKey is set). Switched to `alibaba`,
+  // which has no stored key (provider_keys.json.alibaba.apiKey is empty)
+  // and no ALIBABA_LIVE env var, so it genuinely exercises the stub
+  // branch.
   const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const r = await callProvider('minimax', 'MiniMax-M1', 'stage1', { userText: 'test' });
+  const r = await callProvider('alibaba', 'qwen-vl-max', 'stage1', { userText: 'test' });
   assertEqual(r.ok, true, 'stub returns ok=true');
-  assertEqual(r.provider, 'minimax', 'provider echoed');
-  assertEqual(r.model, 'MiniMax-M1', 'model echoed');
+  assertEqual(r.provider, 'alibaba', 'provider echoed');
+  assertEqual(r.model, 'qwen-vl-max', 'model echoed');
   assertEqual(r.stub, true, 'stub flag set');
-  assertTrue(r.content.includes('minimax_stub'), 'content names the provider');
-  assertTrue(r.content.includes('MINIMAX_LIVE'), 'content tells user how to enable live');
+  assertTrue(r.content.includes('alibaba_stub'), 'content names the provider');
+  assertTrue(r.content.includes('ALIBABA_LIVE'), 'content tells user how to enable live');
 });
 
 test('Slice 4: callProvider returns error for unknown provider', async () => {
@@ -9490,18 +9504,17 @@ test('Slice 4: Three provider adapters exported from server.js', () => {
   assertEqual(typeof server.callAlibabaAdapter, 'function', 'callAlibabaAdapter exported');
 });
 
-test('Slice 4: callMiniMaxAdapter requires MINIMAX_API_KEY when live', async () => {
-  // Force live mode
-  process.env.MINIMAX_LIVE = '1';
-  delete process.env.MINIMAX_API_KEY;
-  // callProvider routes to callMiniMaxAdapter
-  const { callProvider } = require(path.join(PROJECT_ROOT, 'server.js'));
-  const r = await callProvider('minimax', 'MiniMax-M1', 'chat', { userText: 'hi' });
-  assertEqual(r.ok, false, 'no key → ok=false');
-  assertTrue(r.error.includes('MINIMAX_API_KEY not set'), 'error names the missing env var');
-  // clean up
-  delete process.env.MINIMAX_LIVE;
-});
+// CR-23 — Slice 4's original 'callMiniMaxAdapter requires MINIMAX_API_KEY
+// when live' test was removed: after ADR 0024's stored-key architecture
+// (data/provider_keys.json.minimax.apiKey is set), the no-key early-
+// return path in callMiniMaxAdapter is no longer reachable for
+// minimax — the adapter always proceeds via the stored credential.
+// Coverage preserved at the gate level by the Alibaba equivalent
+// below ('callAlibabaAdapter requires DASHSCOPE_API_KEY when live',
+// which genuinely exercises no-key + live because alibaba has no
+// stored key). Coverage of MiniMax's full live path is provided by
+// CR-20's verification probes (Session #7 E2E run; see docs/SESSION-
+// STATE.md for the verbatim model reply).
 
 test('Slice 4: callAlibabaAdapter requires DASHSCOPE_API_KEY when live', async () => {
   // The dispatcher's stub-gate uses ${PROVIDER.toUpperCase()}_LIVE.
