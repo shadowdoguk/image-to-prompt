@@ -7558,13 +7558,26 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       return res.json({ success: true, data: session });
     }
 
-    const context = await buildChatRequestContext(session);
+    // ADR 0026 follow-up (CR-18) — Slice 26's vision gate at
+    // buildUserMessageWithAttachments needs the resolved model id
+    // to decide whether the attachment ships as `image_url` content
+    // parts or as the text-only "[N attachment(s) attached — not
+    // visible to the current model.]" placeholder. The chat route
+    // previously only resolved the model AFTER building the context,
+    // so the gate saw `llmModel = null` (falsy `typeof` check) and
+    // every image was silently demoted. Resolve first, then pass it
+    // through. See commit message for the diagnostic trace.
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
+    const context = await buildChatRequestContext(session, llmModel);
     const activePrompt = session.pending_prompt || session.current_prompt;
     let parsedReply;
     try {
-      const { provider, model: llmModel } = resolveProviderAndModel(req.body);
       // Slice 4 — provider dispatch gate. Non-kilo_code providers get a
       // stub chat reply (the schema-drop retry is kilo_code-specific).
+      // CR-18 follow-up note: this ternary still short-circuits the
+      // direct minimax/alibaba providers to a stub; routing them
+      // through orchestrateEndpoint('chat', …) is a separate
+      // Slice-4-completion item tracked in docs/BACKLOG.md.
       parsedReply = provider === 'kilo_code'
         ? await callKiloChat(context.systemPrompt, context.messages, {
             currentPrompt: activePrompt,
