@@ -9391,9 +9391,26 @@ test('Slice 4: ALLOWED_PROVIDERS, ALLOWED_LLM_MODELS_BY_PROVIDER, DEFAULT_PROVID
   assertEqual(server.DEFAULT_PROVIDER, 'kilo_code', 'default provider is kilo_code');
   assertTrue(typeof server.ALLOWED_LLM_MODELS_BY_PROVIDER === 'object', 'models-by-provider object exported');
   assertEqual(server.ALLOWED_LLM_MODELS_BY_PROVIDER.kilo_code.length, 6, 'kilo_code has Slice 3 6-model list');
-  assertEqual(server.ALLOWED_LLM_MODELS_BY_PROVIDER.minimax[0], 'MiniMax-M1', 'minimax exposes MiniMax-M1');
+  // (CR-20 — the previous assertion
+  //   `assertEqual(... .minimax[0], 'MiniMax-M1', 'minimax exposes MiniMax-M1');`
+  //  was bug-locked to the OLD wrong default. Replaced with the corrected
+  //  assertion below — MiniMax-M3 is the canonical name.)
   assertTrue(server.ALLOWED_LLM_MODELS_BY_PROVIDER.alibaba.includes('qwen-vl-max'), 'alibaba exposes qwen-vl-max');
   assertTrue(server.ALLOWED_LLM_MODELS_BY_PROVIDER.alibaba.includes('qwen-vl-plus'), 'alibaba exposes qwen-vl-plus');
+  // CR-20 — Slice 4 catalog/default corrected so MiniMax-M3 (not M1)
+  // is the canonical MiniMax model name. Catalog retains M1 as a
+  // forward-compat alias for callers who explicitly request it, but
+  // data/model_config.json.minimax.enabled has only MiniMax-M3 and
+  // the default is MiniMax-M3. See docs/SESSION-STATE.md Session #7.
+  assertTrue(server.ALLOWED_LLM_MODELS_BY_PROVIDER.minimax.includes('MiniMax-M3'),
+    'CR-20: minimax catalog must include MiniMax-M3 (was silently downgraded to M1 pre-CR-20)');
+  assertTrue(server.ALLOWED_LLM_MODELS_BY_PROVIDER.minimax.includes('MiniMax-M1'),
+    'CR-20: minimax catalog must keep MiniMax-M1 as a forward-compat alias');
+  assertTrue(Array.isArray(server.PROVIDER_DEFAULT_MODEL) === false &&
+              typeof server.PROVIDER_DEFAULT_MODEL === 'object',
+    'PROVIDER_DEFAULT_MODEL is an object map');
+  assertEqual(server.PROVIDER_DEFAULT_MODEL.minimax, 'MiniMax-M3',
+    'CR-20: PROVIDER_DEFAULT_MODEL.minimax must be MiniMax-M3 (was MiniMax-M1 pre-CR-20)');
 });
 
 test('Slice 4: isProviderLive — Kilo Code is always live; MiniMax/Alibaba gated by env var', () => {
@@ -9419,10 +9436,16 @@ test('Slice 4: resolveProviderAndModel — defaults to kilo_code + default model
   assertEqual(r2.provider, 'kilo_code', 'legacy llmModel defaults to kilo_code');
   assertEqual(r2.model, 'openai/gpt-5.6-luna', 'legacy llmModel preserved');
 
-  // New { provider, model } shape
-  const r3 = resolveProviderAndModel({ provider: 'minimax', model: 'MiniMax-M1' });
+  // New { provider, model } shape — CR-20 corrected the catalog/default so
+  // MiniMax-M3 is the canonical minimax model. M1 remains a forward-
+  // compat alias in ALLOWED_LLM_MODELS_BY_PROVIDER but is not in
+  // data/model_config.json.minimax.enabled; passing it here would fall
+  // back to the provider default (MiniMax-M3), which is a *correct*
+  // behavior but doesn't test the "user's request is honoured" path.
+  // Use MiniMax-M3 here so this test exercises the honoured-request path.
+  const r3 = resolveProviderAndModel({ provider: 'minimax', model: 'MiniMax-M3' });
   assertEqual(r3.provider, 'minimax', 'provider honoured');
-  assertEqual(r3.model, 'MiniMax-M1', 'model honoured for provider');
+  assertEqual(r3.model, 'MiniMax-M3', 'model honoured for provider');
 
   // Invalid provider → fallback to default
   const r4 = resolveProviderAndModel({ provider: 'unknown', model: 'whatever' });

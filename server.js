@@ -212,14 +212,24 @@ const resolveModel = (body) => {
 // raw, error }. Route handlers consume the normalized shape only.
 const ALLOWED_PROVIDERS = ['kilo_code', 'minimax', 'alibaba'];
 const DEFAULT_PROVIDER = 'kilo_code';
+// CR-20 — Slice 4-completion fix that corrects an old catalog default
+// ('MiniMax-M1' was the catalog/default since Slice 3, even though
+// `data/model_config.json.minimax.enabled` had user-selected
+// MiniMax-M3). The M1 default + catalog mismatch made MiniMax-M3
+// silently downgrade to MiniMax-M1 in `resolveProviderAndModel` —
+// which broke MiniMax-M3 image-sharing end-to-end (MiniMax's API
+// rejects M1 + image with `2013 invalid params, MiniMax-M1 not
+// support img`). MiniMax-M1 is retained as a forward-compat alias
+// for users who explicitly request it; MiniMax-M3 is the canonical
+// default per the project intent and SPEC.md §15.7.
 const ALLOWED_LLM_MODELS_BY_PROVIDER = {
   kilo_code: ALLOWED_LLM_MODELS, // Slice 3's 6-model list
-  minimax: ['MiniMax-M1'],
+  minimax: ['MiniMax-M3', 'MiniMax-M1'],
   alibaba: ['qwen-vl-max', 'qwen-vl-plus']
 };
 const PROVIDER_DEFAULT_MODEL = {
   kilo_code: DEFAULT_LLM_MODEL,
-  minimax: 'MiniMax-M1',
+  minimax: 'MiniMax-M3',
   alibaba: 'qwen-vl-max'
 };
 

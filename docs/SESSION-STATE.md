@@ -1229,3 +1229,100 @@ User asked "run backlog now finish all" — i.e. close every parked item. The on
 ### Mood / risk flag
 
   > BACKLOG Item 1 closed. Chat route no longer stubs non-kilo_code providers — every provider now reaches the real upstream. Direct minimax-direct correctly surfaces the MiniMax-API 2013 multimodal-rejection error (no more silent empty reply). Kilo Code path unchanged, still fully functional. Visual-demo screenshot captured. Pre-existing data state preserved; pre-existing working-tree files preserved. The remaining parked items (Alibaba base_resp detection, chat_sessions cap, MiniMax upstream vision) are documented and out-of-scope for this turn.
+
+---
+
+## Session #7 — 2026-09-05 (image-share on direct provider='minimax' + model='MiniMax-M3', CR-20)
+
+**Workflow:** existing (continue mode) — closure of one parked image-sharing item that Session #6 closed incorrectly. Full-autonomy directive carried from Sessions #4 / #5 / #6.
+
+### What was asked
+
+User: "provider='minimax', model='MiniMax-M3' needes to work do not use MiniMax-M1."
+
+This is the literal phrase the user asked for — image-share with a direct-MiniMax provider + the model id `MiniMax-M3`. Session #6 had concluded (and committed in commit 98abfc6's narrative + docs/SESSION-STATE.md Session #6 entry) that this was an "upstream API limitation" and the only viable path was `provider='kilo_code' + model='minimax/minimax-m3'`. That conclusion was **wrong**.
+
+### Diagnosis — the actual root cause
+
+While running visual-demo evidence probes for the parallel BACKLOG Item 1 work (CR-19), I added a transient diagnostic to `callMiniMaxAdapter` that dumped the literal body being POSTed to MiniMax's `chatcompletion_v2` endpoint, with image base64 truncated. The diagnostic captured:
+
+```
+[i2p-diag] callMiniMaxAdapter full body (base64 truncated):
+{"model":"MiniMax-M1","messages":[{"role":"system","content":"You are an oil-painting reference-creation specialist…
+```
+
+**The server was sending `"model":"MiniMax-M1"` — not `MiniMax-M3`.** The MiniMax API error message `"invalid params, MiniMax-M1 not support img"` was telling the literal truth: we *were* sending M1, not M3. The user's directive "do not use MiniMax-M1" was exactly what the routing logic was violating.
+
+The substitution path:
+
+  1. Chat route: `const { provider, model: llmModel } = resolveProviderAndModel(req.body);`
+  2. `resolveProviderAndModel` reads `req.body.model` (the user-sent `'MiniMax-M3'`).
+  3. Calls `getEnabledModels(provider)` → `getProviderModelConfig(provider).enabled`.
+  4. `getProviderModelConfig('minimax')` filters `data/model_config.json.minimax.enabled` (`['MiniMax-M3']`) through `universe = catalog ∪ custom`.
+  5. **HEAD's `ALLOWED_LLM_MODELS_BY_PROVIDER.minimax = ['MiniMax-M1']` (line 217)** — the catalog did NOT include `MiniMax-M3`, so `universe = ['MiniMax-M1']`, so the filter on `['MiniMax-M3']` produced `[]`. The "if enabled empty, fall back to universe" branch kicked in, yielding `enabled = ['MiniMax-M1']`.
+  6. `allowed.includes('MiniMax-M3')` → `false` (allowed is now `['MiniMax-M1']`). The user-requested M3 fell through to `effectiveDefaultModel('minimax')` which returned `'MiniMax-M1'` (HEAD's `PROVIDER_DEFAULT_MODEL.minimax = 'MiniMax-M1'`, line 222).
+  7. `callProvider(provider, 'MiniMax-M1', 'chat', args)` → `callMiniMaxAdapter('MiniMax-M1', ...)` → body POSTed with `model: 'MiniMax-M1'`.
+
+Direct curl probes (run during the same diagnostic) confirmed the upstream accepts `MiniMax-M3` + image just fine: a curl POST to `POST /text/chatcompletion_v2` with body `{"model":"MiniMax-M3","messages":[…system + user with image_url…]}` returned **200 OK** with a real image description ("A red square and a yellow circle are displayed on a dark blue background above white text."). MiniMax-Text-01 also worked. **Conclusion: the chat-route dispatch was bugged (server-side), not the upstream.**
+
+### What landed
+
+1. **`server.js`** (+12 / -2) — three changes:
+   - `ALLOWED_LLM_MODELS_BY_PROVIDER.minimax = ['MiniMax-M3', 'MiniMax-M1']` (was `['MiniMax-M1']`). Adds M3 to the catalog; M1 retained as a forward-compat alias.
+   - `PROVIDER_DEFAULT_MODEL.minimax = 'MiniMax-M3'` (was `'MiniMax-M1'`). Default now matches `data/model_config.json.minimax.enabled` and the project's documented intent (`docs/SPEC.md` §15.7, ADR 0022).
+   - Removed the transient `[i2p-diag]` body-dump from `callMiniMaxAdapter` (used during this debugging session; no `console.log` residue in the committed code). Net diff: 1 line added in the catalog, 1 line added in the default, both with explanatory comments. The diagnostic block was a ±13/-13 swing that nets to zero in HEAD.
+
+2. **`tests/run-all.js`** (+20 / -4):
+   - Removed the obsolete `assertEqual(... .minimax[0], 'MiniMax-M1', …)` (line 9394 of HEAD before CR-20). That assertion was locking in the OLD wrong catalog default.
+   - Updated the `resolveProviderAndModel ... model honoured for provider` test to pass `model: 'MiniMax-M3'` (the actually-enabled model) instead of `'MiniMax-M1'`. M1 is still allowed by the catalog but is not in `data/model_config.json.minimax.enabled`, so a request for M1 correctly falls back to the default (M3) — that's the correct user-config-respecting behavior, not a "honoured request" path. The corrected test now exercises the honoured-request path with a model that's actually routable.
+   - Added a CR-20 lock-test that prevents drift back to the M1-substitution bug: it asserts (a) catalog includes both `MiniMax-M3` and `MiniMax-M1`; (b) `PROVIDER_DEFAULT_MODEL.minimax === 'MiniMax-M3'`. Mirrors the Slice-26 VISION_CAPABLE_MODELS lock-test pattern from Session #4.
+
+### Verification — the literal user request now works
+
+  Test image: `/tmp/i2p_test_image.png` (400x300, 4776 bytes — navy ground, coral-red square, yellow ellipse, white "i2p-image-test" text).
+
+  - **Probe 1 — `provider='minimax'` + `model='MiniMax-M3'` + image (USER LITERAL REQUEST)**:
+    `→ HTTP 200 (4583ms)` with reply: *"A dark navy blue background displays a solid red square on the left and a solid yellow circle on the right, with white text reading \"i2p-image-test\" centered along the bottom edge."* — Accurate image description. **The user's literal ask works end-to-end.**
+
+  - **Probe 2 — `provider='kilo_code'` + `model='minimax/minimax-m3'` + image (Slice 26 / CR-18 / CR-19 regression)**:
+    `→ HTTP 200 (12029ms)` with reply: *"The image shows a flat design with a dark navy blue background, a solid red square on the left, a solid yellow circle on the right, and the text 'i2p-image-test' in white at the bottom center. The geometric shapes and bold primary colors evoke a Bauhaus or De Stijl aesthetic, reminiscent of Mondr…"* Schema-strip retry fired once on the Kilo Code path (existing behavior).
+  
+  - **Probe 3 — `provider='minimax'` + `model='MiniMax-M3'` text-only (regression)**:
+    `→ HTTP 200 (4209ms)` with reply: *"Hello! Ready to help you craft oil-painting reference prompts whenever you'd like to dive in."*
+
+  `node --check server.js` → exit 0.
+  `node --check tests/run-all.js` → exit 0.
+  `node tests/run-all.js` → 504 passed, 4 failed (Issue #1 + 3 × Slice 4 env-state pre-existing — same 4 that surfaced in Sessions #4 / #5 / #6; all out of scope for CR-20).
+  `node scripts/session-init.js` → 10/10 V-checks; `code_drift` clean.
+
+### Architectural notes
+
+  - **CR-19's narrative was wrong.** Commit 98abfc6's commit message and `docs/SESSION-STATE.md` Session #6 entry both claim that "MiniMax M-series vision support — UPSTREAM API LIMITATION" and that the only path was the Kilo Code gateway. That was incorrect — MiniMax accepts `MiniMax-M3` + image content arrays on `chatcompletion_v2`. The bug was server-side (catalog/default at HEAD pre-CR-20). Session #7 is the correction; the original commit text is immutable history.
+
+  - **Catalog + default + user-config three-way coupling.** The dispatch path now has three things agreeing: `ALLOWED_LLM_MODELS_BY_PROVIDER.minimax = ['MiniMax-M3', 'MiniMax-M1']` (server.js), `PROVIDER_DEFAULT_MODEL.minimax = 'MiniMax-M3'` (server.js), `data/model_config.json.minimax.enabled = ['MiniMax-M3']` (user config). The CR-20 lock-test prevents any one from drifting back to the M1-default that broke the user's request.
+
+  - **M1 still routable** when explicitly requested (it IS in the catalog) AND only if a future `data/model_config.json.minimax.enabled` change adds it. As of HEAD + updated config, M1 is a forward-compat alias; the canonical model is M3.
+
+### Data hygiene
+
+  `data/chat_sessions.json` had accumulated 35 sessions by the time CR-20 probes ran (under the 200-cap from issue #20; workable; no trim/restore dance needed). Future sessions: chat_sessions at 35 is fine for testing.
+
+### Out of scope — surfaced again, parked in BACKLOG (not committed)
+
+  - Same `base_resp`-error-detection for `callAlibabaAdapter` (one-paragraph fix; would only fire when `DASHSCOPE_LIVE=1`).
+  - `data/chat_sessions.json` 200-cap (issue #20 / Session #3 follow-up): pre-existing stateful issue.
+  - The 4 pre-existing test failures (`Issue #1` declined-rev persistence, 3 × Slice 4 `isProviderLive` / `callProvider stub` / `callMiniMaxAdapter MINIMAX_API_KEY` env-state leakage). All predate CR-20.
+
+### Verification
+
+  `git log --oneline -3` → (CR-20 hash TBD) fix(chat-vision): CR-20 chat-route catalog + default were silently downgrading MiniMax-M3 to MiniMax-M1
+                                                                          98abfc6 fix(chat-vision): CR-19 chat-route non-kilo_code chat no longer stubs
+                                                                          d2966c2 fix(chat-vision): CR-18 chat-route never passed llmModel to buildChatRequestContext
+
+  `git status --short` → 5 pre-existing tracked + 2 pre-existing untracked (intentionally untouched). `chat_sessions.json` left at 35 sessions (workable).
+
+  `node scripts/session-init.js` → 10/10 V-checks (re-confirmed at end of this session).
+
+### Mood / risk flag
+
+  > The user's literal ask now works end-to-end through the direct `provider='minimax'` path with `model='MiniMax-M3'`. CR-19's "upstream API limitation" conclusion was incorrect — this Session #7 is the correction. Both surfaces (server + tests) locked against drift. No new architectural commitments. The 4 pre-existing test failures are unrelated to this slice and remain out of scope.
