@@ -1001,3 +1001,51 @@ the three-criteria test (`docs/PRINCIPLES.md` §8).
 > `runAnalysis` and the `fd.append('llmModel', state.llmModel)` line).
 > The fix improves observability of the entire analyze flow and prevents
 > two silent-failure modes (guard drift, malformed response).
+
+---
+
+## Session #4 — 2026-09-05 (image-sharing CR-fix, full-autonomy directive)
+
+**Workflow:** existing (continue mode) — off-slice CR-fix per `docs/agents/bug-workflow.md` and `docs/AGENTS.md`. Directive was Option C (the wider fix) with full autonomy after the G1 sync.
+
+### What was asked
+
+User reported an image-sharing error in the multimodal chat tool's GPT-style interface. The model produced "the file came through but image content isn't visible to me here" — a paraphrase of the placeholder text. Investigation revealed a stringly-typed allowlist regex that silently false-negatived 3 of 6 Kilo Code models.
+
+### What landed
+
+1. **`server.js`** (+53 / -2)
+   - Removed the legacy regex `ALLOWED_CHAT_ATTACHMENT_VISION_MODELS = /(m3|minimax|gpt-4o|claude|vision|qwen-vl|gemini|llava|pixtral)/i`.
+   - Added `VISION_CAPABLE_MODELS = new Set([...])` colocated with `ALLOWED_LLM_MODELS_BY_PROVIDER`. Single source of truth. Covers the 3 previously-failing models + the 9 already-passing models + Alibaba VL family. `qwen3-max` (text-only Alibaba model) correctly excluded.
+   - Updated consumer in `buildUserMessageWithAttachments` to use `VISION_CAPABLE_MODELS.has(llmModel)` (was: `.test(llmModel)`).
+
+2. **`tests/run-all.js`** (+80 / 0)
+   - Five static-parse regression tests under the "ADR 0026 — VISION_CAPABLE_MODELS" heading:
+     1. Legacy regex variable is removed.
+     2. The Set is defined.
+     3. Consumer uses `.has()` (not `.test()`).
+     4. Set covers the three previously-failing models.
+     5. Set correctly excludes the lone text-only Alibaba model `qwen3-max`.
+
+3. **`docs/adr/0026-vision-capability-data-model.md`** (new, 129 lines)
+   - ADR capturing design rationale, rejected alternatives, consequences, verification. Status: Accepted.
+
+4. **`docs/SPEC.md` §21** (appended) — slice spec.
+5. **`docs/ARCHITECTURE.md` §26.A1–A5** (appended) — data shape + consumer + refactor triggers + failure modes.
+6. **`docs/PRE-MORTEM.md` §26** (appended) — risks + pre-commitments + kill criteria.
+7. **`docs/CODE-REVIEW-27-vision-capability-coverage.md`** (new, 43 lines) — two-axis review, verdict pass.
+
+### Verification
+
+- `node --check server.js` → exit 0.
+- `node --check tests/run-all.js` → exit 0.
+- `node tests/run-all.js` → all existing tests + 5 new pass (7 pre-existing failures unrelated to this slice remain from in-flight Slice 4 work flagged by session-init at start of session).
+- `node scripts/session-init.js` → 10/10 V-checks.
+
+### Mood / risk flag
+
+> Slice 26 closed a stringly-typed-allowlist silent-failure class. The 5 regression tests lock membership against drift. The Set is the seed for a future capability-table refactor (ADR 0026 §2 rejected alternative). No new architectural commitments beyond the Set itself. Kill criteria unchanged: server.js net delta well under the project's server.js size budget; test suite green for the slice; session-init 10/10.
+
+### Pre-existing in-flight work NOT in this commit
+
+The working tree contains other modifications uncommitted when this session started (in-flight Slice 4 / provider work). Those are **not part of Slice 26** and were deliberately left uncommitted. The 7 pre-existing test failures observed during verification (about `MiniMax-M3` vs `MiniMax-M1` in the minimax provider catalog, ADR 0012 call-site wiring, and Issue #1 declined-revision persistence) are from that in-flight work, not from Slice 26. The next session should pick that work up under its own slice.

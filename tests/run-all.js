@@ -10167,3 +10167,83 @@ test('CR-16: runAnalysis finally block resets state + button', () => {
     process.exit(1);
   }
 })();
+
+// ──────────────────────────────────────────────────────────────────
+// ADR 0026 — VISION_CAPABLE_MODELS Set replaces the legacy substring
+// regex at the chat-attachment gate (server.js). Bug class: silent
+// false-negative failure mode that downgraded image attachments to
+// the "[N attachment(s) attached — not visible to the current model.]"
+// text placeholder for 3 of 6 Kilo Code models. See docs/adr/0026-…
+// for the design rationale and rejected alternatives.
+// ──────────────────────────────────────────────────────────────────
+
+const extractVisionCapableModelsFromSource = (serverText) => {
+  // Pull the Set out of the source file by static parse. We avoid
+  // `require()`-ing server.js because it has top-level side effects.
+  const headerMatch = serverText.match(/const\s+VISION_CAPABLE_MODELS\s*=\s*new\s+Set\(\[([\s\S]*?)\]\)/);
+  if (!headerMatch) return null;
+  return headerMatch[1]
+    .split('\n')
+    .map((l) => {
+      const m = l.match(/^\s*'([^']+)'/);
+      return m ? m[1] : null;
+    })
+    .filter(Boolean);
+};
+
+test('ADR 0026: legacy ALLOWED_CHAT_ATTACHMENT_VISION_MODELS regex is removed', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(
+    !/const\s+ALLOWED_CHAT_ATTACHMENT_VISION_MODELS\s*=/.test(serverText),
+    'Legacy substring regex must be removed; VISION_CAPABLE_MODELS Set is the single source of truth'
+  );
+});
+
+test('ADR 0026: VISION_CAPABLE_MODELS Set is defined as the single source of truth', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(
+    /const\s+VISION_CAPABLE_MODELS\s*=\s*new\s+Set\(/.test(serverText),
+    'VISION_CAPABLE_MODELS Set must be defined near ALLOWED_LLM_MODELS_BY_PROVIDER'
+  );
+});
+
+test('ADR 0026: buildUserMessageWithAttachments uses VISION_CAPABLE_MODELS.has() (not .test())', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const fnStart = serverText.indexOf('const buildUserMessageWithAttachments');
+  assertTrue(fnStart > 0, 'buildUserMessageWithAttachments must exist in server.js');
+  const fnEnd = serverText.indexOf('\n};\n', fnStart);
+  const body = serverText.slice(fnStart, fnEnd > 0 ? fnEnd : fnStart + 4000);
+  assertTrue(
+    /VISION_CAPABLE_MODELS\.has\(/.test(body),
+    'buildUserMessageWithAttachments must use VISION_CAPABLE_MODELS.has() to test vision capability'
+  );
+  assertTrue(
+    !/ALLOWED_CHAT_ATTACHMENT_VISION_MODELS/.test(body),
+    'buildUserMessageWithAttachments must not reference the legacy regex variable'
+  );
+});
+
+test('ADR 0026: VISION_CAPABLE_MODELS covers the three previously-failing Kilo Code models', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const list = extractVisionCapableModelsFromSource(serverText);
+  assertTrue(list !== null, 'VISION_CAPABLE_MODELS Set must parse from server.js');
+  // The three Kilo Code models the legacy regex silently false-negatived
+  const previouslyFailing = [
+    'openai/gpt-5.6-luna',
+    'nvidia/nemotron-3-ultra-550b-a55b',
+    'x-ai/grok-4.3'
+  ];
+  for (const id of previouslyFailing) {
+    assertTrue(list.includes(id), `VISION_CAPABLE_MODELS must include previously-failing model ${id}`);
+  }
+});
+
+test('ADR 0026: VISION_CAPABLE_MODELS excludes the lone text-only Alibaba model qwen3-max', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const list = extractVisionCapableModelsFromSource(serverText);
+  assertTrue(list !== null, 'VISION_CAPABLE_MODELS Set must parse from server.js');
+  assertTrue(
+    !list.includes('qwen3-max'),
+    'qwen3-max is the lone text-only Alibaba model in ALLOWED_LLM_MODELS_BY_PROVIDER; must be excluded from VISION_CAPABLE_MODELS'
+  );
+});

@@ -720,3 +720,39 @@ ANIMA_CHAT_CONSTRAINTS_BLOCK        ← if Anima preset
 
 ---
 
+
+---
+
+## Slice 26 — Vision-capability-data-model appendix
+
+**Appended 2026-09-05.** Source: SPEC §21, ADR 0026.
+
+### §26.A1 — Files touched
+
+| Path | Status | Purpose |
+|---|---|---|
+| `server.js` | modified | removed regex; added Set near model registry; consumer uses `.has()` |
+| `tests/run-all.js` | modified | 5 new static-parse regression tests |
+| `docs/adr/0026-vision-capability-data-model.md` | new | design rationale |
+| `docs/SPEC.md` §21 | appended | slice spec |
+| `docs/PRE-MORTEM.md` §26 | appended | risks + pre-commitments |
+| `docs/CODE-REVIEW-27-vision-capability-coverage.md` | new | two-axis review, verdict pass |
+
+### §26.A2 — Data shape
+
+`VISION_CAPABLE_MODELS = new Set([modelId, ...])` — flat list of vision-capable model ids. Colocated with `ALLOWED_LLM_MODELS_BY_PROVIDER`. Update rule: every id in the catalog is either in the Set (vision-capable) or explicitly noted as text-only with a negative-case test. The 5 regression tests fail if the two lists diverge.
+
+### §26.A3 — Consumer
+
+`buildUserMessageWithAttachments(sessionId, messageContent, attachmentIds, llmModel)` — boolean check via `VISION_CAPABLE_MODELS.has(llmModel)`. Truthy → render image_url content parts from the manifest. Falsy → inject `[N attachment(s) attached — not visible to the current model.]` text placeholder.
+
+### §26.A4 — Refactor-trigger criteria
+
+- A model with vision + reasoning + context-length + pricing capabilities needs surfacing in the UI → replace the Set with a per-provider metadata table (ADR 0026 §2 rejected alternative, parked). That refactor wraps the Set without reshaping the consumer.
+- A user adds a custom model via UI-R7 → it is NOT in the Set by default. Chat degrades to text-only for it. Surfacing this in the UI is out of CR-26 scope.
+
+### §26.A5 — Failure modes
+
+- User on a model not in the Set and not in the catalog (corrupted `data/model_config.json`) → chat still works, attachment demoted to text-only. Logged as a `WARN` (existing pattern).
+- Set and `ALLOWED_LLM_MODELS_BY_PROVIDER` diverge → regression tests fail at `node tests/run-all.js`. Smoke flow blocked.
+- Set literal accidentally emptied → all attachments demoted to text-only. Caught by the "Set is defined" regression test.

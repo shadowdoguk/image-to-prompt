@@ -983,3 +983,48 @@ explicitly tested; G5 audit hasn't run.
 - Per-attachment alt-text auto-generation.
 - RAG re-ranking via cross-encoder (overkill for the corpus size).
 - Live OCR of attached concept images.
+
+## §21 — Chat-attachment vision-capability data model (Slice 26)
+
+**Class:** CR-fix per `docs/agents/bug-workflow.md`. Wide enough to warrant an ADR (ADR 0026) but not wide enough to be a feature slice.
+
+### Reframe
+
+The chat image-sharing feature works end-to-end for the default model (`minimax/minimax-m3`) but silently demotes image attachments to a text-only placeholder for 3 of 6 Kilo Code models: `openai/gpt-5.6-luna`, `x-ai/grok-4.3`, `nvidia/nemotron-3-ultra-550b-a55b`. The model paraphrases the placeholder text into "the file came through but image content isn't visible to me here". Bug class: silent false-negative in a stringly-typed allowlist regex.
+
+### Scope
+
+Replace the substring regex `ALLOWED_CHAT_ATTACHMENT_VISION_MODELS` (was at `server.js:1143`) with an explicit `Set<VisionCapableModelId>` colocated with `ALLOWED_LLM_MODELS_BY_PROVIDER`. Lock membership with five static-parse regression tests in `tests/run-all.js`.
+
+### Out of scope
+
+- UI capability badges in the model dropdown (SPEC §15.7 "Model capability metadata"). Parked in BACKLOG; the Set is the seed for that future slice.
+- Per-provider metadata table keyed by `{provider, model} → {vision, reasoning, ...}`. ADR 0026 §2 rejected for now; replaces the Set only when reasoning / context-length / pricing badges land.
+
+### User stories
+
+- As a chat user on `openai/gpt-5.6-luna`, I want to attach an image and have the model describe it, so I can iterate prompts off the image.
+
+### Implementation decisions
+
+- `VISION_CAPABLE_MODELS = new Set([...])` — single source of truth, colocated with `ALLOWED_LLM_MODELS_BY_PROVIDER`.
+- Consumer in `buildUserMessageWithAttachments`: `VISION_CAPABLE_MODELS.has(llmModel)`.
+- Update rule: every `ALLOWED_LLM_MODELS_BY_PROVIDER` model must be added to the Set or to a negative-case list. The five regression tests fail if the two lists diverge.
+
+### Glossary
+
+- **Vision-capable** — a model whose upstream API accepts the OpenAI-compat `image_url` content part. Distinct from "image-output-capable" (text-to-image models).
+
+### References
+
+- ADR 0026 — design rationale + rejected alternatives
+- ARCHITECTURE §26.A1–A5 (data shape, consumer, refactor triggers, failure modes)
+- PRE-MORTEM §26 (top risks + pre-commitments + kill criteria)
+- docs/CODE-REVIEW-27-vision-capability-coverage.md (verdict pass)
+
+### DoD
+
+- [x] `server.js`: regex removed; Set colocated with `ALLOWED_LLM_MODELS_BY_PROVIDER`; consumer uses `.has()`.
+- [x] `tests/run-all.js`: 5 static-parse regression tests added.
+- [x] `docs/adr/0026-…`: ADR written.
+- [x] Code-review verdict `pass`.

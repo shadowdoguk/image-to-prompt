@@ -407,3 +407,26 @@ Kill the sub-slice if:
 - Attachment upload leaves files on disk after a session delete (fs leak).
 - Auto-ingest produces an unparseable index (re-load fails; chat breaks).
 
+
+### CR-26 — Chat-attachment vision-capability data model (Slice 26)
+
+**CR-fix track (per `docs/agents/bug-workflow.md`), 2026-09-05.** Source: ADR 0026, SPEC §21, ARCHITECTURE §26.A1–A5.
+
+#### Top risks
+
+1. **R-1 (LOW) — Set literal drifts from `ALLOWED_LLM_MODELS_BY_PROVIDER`.** The 5 regression tests catch this; the cost is one `node tests/run-all.js` run per PR. **Mitigation:** the static-parse test fails if a catalog id is missing from the Set, and the negative-case test fails if a catalog id is incorrectly added.
+2. **R-2 (LOW) — User-added custom model (UI-R7) silently vision-capable without being added.** The Set is module-local; the chat route can't tell whether a custom model supports vision. **Mitigation:** false negatives are the existing behavior (text-only fallback); users see a banner.
+3. **R-3 (LOW) — Future capability-table refactor (ADR 0026 §2) reshapes the consumer.** **Mitigation:** the consumer's Boolean return is stable; reshape to `metadata.has(provider, model, 'vision')` is mechanical and contained to `buildUserMessageWithAttachments`.
+
+#### Pre-commitments
+
+1. `node --check server.js && node --check tests/run-all.js` → exit 0.
+2. `node tests/run-all.js` → all existing tests + 5 new tests pass.
+3. `node scripts/session-init.js` → 10/10 V-checks.
+4. Code-review doc `docs/CODE-REVIEW-27-vision-capability-coverage.md` → verdict `pass`.
+
+#### Kill criteria
+
+- The 5 regression tests do not lock membership (i.e. they pass with an empty Set) → kill the fix; the lock is the entire point.
+- The Set is moved away from `ALLOWED_LLM_MODELS_BY_PROVIDER` without a regression test to bridge them → kill the fix; the colocation is part of the design.
+- The change crosses into the orchestrator / provider adapters → kill; that's a wider slice, not a CR-fix.

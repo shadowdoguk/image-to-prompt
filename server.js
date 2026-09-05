@@ -224,6 +224,61 @@ const PROVIDER_DEFAULT_MODEL = {
 };
 
 /**
+ * ADR 0026 — explicit per-model vision-capable list. Single source
+ * of truth for which chat-attached images get forwarded to the LLM
+ * as `image_url` content parts (vs. fall through to the text-only
+ * "[N attachment(s) attached — not visible to the current model.]"
+ * placeholder inside buildUserMessageWithAttachments).
+ *
+ * History: this used to be a substring regex at the top of the
+ * chat-attachment section
+ *   `/(m3|minimax|gpt-4o|claude|vision|qwen-vl|gemini|llava|pixtral)/i`
+ * which silently went stale as the Kilo Code catalog expanded from
+ * 4 to 6 models in Slice 3 — three of those models
+ * (`openai/gpt-5.6-luna`, `x-ai/grok-4.3`,
+ * `nvidia/nemotron-3-ultra-550b-a55b`) were NOT matched by the regex
+ * but ARE vision-capable per `docs/SPEC.md` §15.6 ("Strong vision +
+ * prompt engineering" / "Large context, strong vision"). The bug
+ * surfaced as the model paraphrasing the placeholder text — "the
+ * file came through but image content isn't visible to me here" —
+ * whenever a chat session used any of those three models.
+ *
+ * Update rule: every model in `ALLOWED_LLM_MODELS_BY_PROVIDER` (and
+ * every user-added custom model with confirmed vision support) must
+ * be added here explicitly. The five "ADR 0026 — VISION_CAPABLE_MODELS"
+ * tests in `tests/run-all.js` lock membership against drift; those
+ * tests fail if a model id is in the catalog but not addressed here,
+ * which is the desired break-glass. User-added custom models via
+ * UI-R7 are NOT in this Set (vision support is opt-in per provider
+ * choice); the chat falls back gracefully to text-only for them.
+ *
+ * The Alibaba catalog is currently {qwen-vl-max, qwen-vl-plus} in HEAD.
+ * The dated refresh `qwen-vl-plus-2025-04-18` is also vision-capable
+ * (qwen-vl-* naming family) and is included forward-compatibly; the
+ * text-only `qwen3-max` is intentionally excluded. The MiniMax-M3
+ * alias is included forward-compatibly for the in-flight Slice 4
+ * catalog expansion that names M3 as the new default.
+ */
+const VISION_CAPABLE_MODELS = new Set([
+  // Slice 3 Kilo Code catalog (SPEC §15.6 — every one is vision-capable)
+  'minimax/minimax-m3',                       // Slice 3 default; user-familiar baseline
+  'openai/gpt-5.6-luna',                      // was a silent false-negative pre-ADR-0026
+  'google/gemini-3.1-pro-preview',
+  'google/gemini-3.5-flash',
+  'nvidia/nemotron-3-ultra-550b-a55b',        // was a silent false-negative pre-ADR-0026
+  'x-ai/grok-4.3',                            // was a silent false-negative pre-ADR-0026
+  // MiniMax direct (M1 = current HEAD default; M3 = forward-compat alias)
+  'MiniMax-M3',
+  'MiniMax-M1',
+  // Alibaba DashScope VL family (qwen-vl-* are vision-language). The
+  // text-only `qwen3-max` is intentionally excluded — see the
+  // negative-case regression test.
+  'qwen-vl-max',
+  'qwen-vl-plus',
+  'qwen-vl-plus-2025-04-18'
+]);
+
+/**
  * UI-R7 — effective model configuration for a provider.
  * Catalog = built-in allowlist; custom = user-added IDs; enabled = the
  * active subset (defaults to the full catalog when nothing is stored).
@@ -773,8 +828,6 @@ const chatAttachmentUpload = multer({
 });
 
 const generateChatAttachmentId = () => `att_${crypto.randomBytes(8).toString('hex')}`;
-
-const ALLOWED_CHAT_ATTACHMENT_VISION_MODELS = /(m3|minimax|gpt-4o|claude|vision|qwen-vl|gemini|llava|pixtral)/i;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Data files
@@ -7848,7 +7901,13 @@ const buildUserMessageWithAttachments = async (sessionId, messageContent, attach
   if (!Array.isArray(attachmentIds) || attachmentIds.length === 0) {
     return { role: 'user', content: messageContent };
   }
-  const visionCapable = typeof llmModel === 'string' && ALLOWED_CHAT_ATTACHMENT_VISION_MODELS.test(llmModel);
+  // ADR 0026 — explicit per-model vision-capable gate (was: a
+  // substring regex matching on the model id, silently stale against
+  // the Slice 3 Kilo Code catalog expansion). The Set is the single
+  // source of truth; see the test "ADR 0026 — VISION_CAPABLE_MODELS
+  // covers the three previously-failing Kilo Code models" in
+  // tests/run-all.js for the membership lock.
+  const visionCapable = typeof llmModel === 'string' && VISION_CAPABLE_MODELS.has(llmModel);
   if (!visionCapable) {
     // Text-only fallback — attachments are still stored on the message,
     // but the LLM does not see them. Logged + surfaced via a banner.
