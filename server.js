@@ -7572,18 +7572,49 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     const activePrompt = session.pending_prompt || session.current_prompt;
     let parsedReply;
     try {
-      // Slice 4 — provider dispatch gate. Non-kilo_code providers get a
-      // stub chat reply (the schema-drop retry is kilo_code-specific).
-      // CR-18 follow-up note: this ternary still short-circuits the
-      // direct minimax/alibaba providers to a stub; routing them
-      // through orchestrateEndpoint('chat', …) is a separate
-      // Slice-4-completion item tracked in docs/BACKLOG.md.
-      parsedReply = provider === 'kilo_code'
-        ? await callKiloChat(context.systemPrompt, context.messages, {
-            currentPrompt: activePrompt,
-            lastUserRequest: userMessage.content
-          }, llmModel)
-        : buildProviderStub(provider, llmModel, 'chat');
+      // Slice 4 completion (CR-19) — unified chat dispatch:
+      //   - kilo_code → callKiloChat (preserves the schema-drop retry
+      //     + anchor-preservation gate; callKiloAdapter is a passthrough
+      //     and defers to these helpers per its own comment)
+      //   - minimax / alibaba → callProvider('chat', …), which routes
+      //     to callMiniMaxAdapter / callAlibabaAdapter. callProvider
+      //     returns a normalized {ok, content, raw, error, stub} shape
+      //     and handles live + stub branches uniformly (the alibaba
+      //     case with no key returns a stub content via callProvider's
+      //     !isProviderLive branch — no separate buildProviderStub
+      //     needed here).
+      // We prepend the system message to messages to mirror what the
+      // uncommitted Slice-4-completion orchestrator's
+      // buildEndpointMessages('chat', …) would do. Both branches
+      // return `{reply, suggested_prompt}` shape — callKiloChat
+      // preserves the JSON-schema-extracted proposed_prompt; the
+      // non-kilo_code branch emits `''` since the raw upstream text
+      // has no structured `suggested_prompt` field (the chat route's
+      // pending_prompt gate handles the empty string as "no proposal",
+      // which is the existing kilo_code-only behavior anyway).
+      // Closes the Slice-4-completion item previously tracked in
+      // docs/SESSION-STATE.md Session #5.
+      if (provider === 'kilo_code') {
+        parsedReply = await callKiloChat(context.systemPrompt, context.messages, {
+          currentPrompt: activePrompt,
+          lastUserRequest: userMessage.content,
+        }, llmModel);
+      } else {
+        const providerResult = await callProvider(provider, llmModel, 'chat', {
+          messages: [
+            { role: 'system', content: context.systemPrompt },
+            ...context.messages,
+          ],
+        });
+        if (!providerResult.ok) {
+          throw new Error(providerResult.error || `${provider} adapter call failed`);
+        }
+        parsedReply = {
+          reply: providerResult.content,
+          suggested_prompt: '',
+          fallback_reason: providerResult.stub ? 'provider_stub' : null,
+        };
+      }
     } catch (err) {
       // Roll back the user message so the failed attempt doesn't leave
       // a "ghost" turn in the history.
@@ -8361,9 +8392,21 @@ const callMiniMaxAdapter = async (model, endpoint, args) => {
       body
     });
     const raw = await resp.json();
-    // MiniMax response: { choices: [{ message: { content } }] } (OpenAI-compat).
-    // Some endpoints return { reply } directly — normalize to content.
+    // MiniMax's chatcompletion_v2 envelope: `{ choices, usage, base_resp }`.
+    // base_resp.status_code=0 is success; non-zero is an error like
+    // `{status_code: 2013, status_msg: "invalid params, MiniMax-M1
+    // not support img"}` (observed 2026-09-05: M-series models reject
+    // multimodal inputs — server returns HTTP 200 with the error in
+    // the body). Surface that error to the chat route instead of
+    // silently emitting empty content.
+    const baseErr = raw?.base_resp && typeof raw.base_resp === 'object'
+      && raw.base_resp.status_code != null && raw.base_resp.status_code !== 0
+        ? `MiniMax API ${raw.base_resp.status_code}: ${raw.base_resp.status_msg || '(no message)'}`
+        : null;
     const content = raw?.choices?.[0]?.message?.content || raw?.reply || '';
+    if (baseErr) {
+      return { ok: false, content: '', raw, error: baseErr, provider: 'minimax', model, stub: false };
+    }
     return { ok: resp.ok, content, raw, error: resp.ok ? null : `MiniMax ${resp.status}`, provider: 'minimax', model, stub: false };
   } catch (e) {
     return { ok: false, content: '', raw: {}, error: `MiniMax fetch error: ${e.message}`, provider: 'minimax', model, stub: false };
