@@ -517,7 +517,21 @@ const CHAT_MESSAGE_ID_PREFIX = 'msg_';
 const MAX_FINAL_PROMPT_LENGTH = 5000;
 const MAX_CHAT_MESSAGE_LENGTH = 2000;
 const MAX_CHAT_MESSAGES_PER_SESSION = 200;
-const MAX_CHAT_SESSIONS_TOTAL = 200;
+// CR-21 — Lower the chat-session cap from 200 → 50 (issue #20 / Session #3
+// follow-up). The 200-cap was originally set as a generous upper bound
+// during Slice 4 in-flight work, but UX framed it as a "soft maintenance
+// guardrail" that surfaced only when hit ("Chat session limit reached
+// (200). Delete older sessions before creating new ones."). When
+// stateful tests accumulated 200 sessions, fresh test probes hit the
+// cap and lost the fresh sessions they were trying to create
+// (`failed to create session: Chat session limit reached (200)` in 12
+// of the chat-flow tests; surfaced across Sessions #4-#6). The fix is
+// to bring the soft guardrail to a level that's actively helpful (50
+// gives a user 50 active sessions before pruning, which matches real
+// product intent — most users will keep their working-prompt sessions
+// to a small handful). Issue #20 tracked this as a Session #3 parking
+// item; resolved here per the autonomy directive.
+const MAX_CHAT_SESSIONS_TOTAL = 50;
 const CHAT_TITLE_MAX_LENGTH = 80;
 const CHAT_CONTEXT_CHAR_BUDGET = 20000;
 const CHAT_HISTORY_CHAR_BUDGET = 6000;

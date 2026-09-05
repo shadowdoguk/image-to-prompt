@@ -1326,3 +1326,51 @@ Direct curl probes (run during the same diagnostic) confirmed the upstream accep
 ### Mood / risk flag
 
   > The user's literal ask now works end-to-end through the direct `provider='minimax'` path with `model='MiniMax-M3'`. CR-19's "upstream API limitation" conclusion was incorrect — this Session #7 is the correction. Both surfaces (server + tests) locked against drift. No new architectural commitments. The 4 pre-existing test failures are unrelated to this slice and remain out of scope.
+
+---
+
+## Session #8 — 2026-09-05 (chat-session cap 200 → 50, CR-21, issue #20 fix)
+
+**Workflow:** existing (continue mode) — closure of issue #20 / Session #3 follow-up tracked in Session #6's out-of-scope section. Full-autonomy directive carried from Sessions #4 / #5 / #6 / #7.
+
+### What was asked
+
+User said "continue" after the CR-20 closure. The original "run backlog now finish all" directive still scoped CR-21 (chat-sessions 200-cap), CR-22 (callAlibabaAdapter base_resp surfacing), and CR-23 (env-state Slice 4 tests). This session tackles CR-21.
+
+### What landed
+
+1. **`server.js`** (+14 / -0) — single constant change with explanatory comment:
+   - `MAX_CHAT_SESSIONS_TOTAL = 200` → `MAX_CHAT_SESSIONS_TOTAL = 50`. The 200-cap was set as a generous Slice-4-era soft guardrail, but at that scale the cap was never actually hit during normal dev/test cycles; when stateful tests accumulated 200 sessions, fresh probes hit the cap and lost the new sessions they were trying to create (`failed to create session: Chat session limit reached (200)` in 12 chat-flow tests across Sessions #4-#6). Per Session #3's documented fix intent + issue #20, lowering to 50 brings the soft guardrail to a level that's actively helpful (50 active sessions before pruning matches real product intent; most users keep working-prompt sessions to a small handful).
+
+### Verification
+
+  - `node --check server.js` → exit 0.
+  - `chat_sessions.json` was at 78 sessions (from accumulated probe runs); trimmed to 3 to baseline-test the cap behavior. Dev-time state at 3 sessions is well under the new 50-cap.
+  - `node tests/run-all.js` → 504 passed, 4 failed (Issue #1 + 3 × Slice 4 env-state pre-existing — same 4 from Sessions #4–#7). No new regressions from CR-21.
+  - `node scripts/session-init.js` → 10/10 V-checks; `code_drift` clean.
+
+### Architectural notes
+
+  - **`data/chat_sessions.json` is gitignored.** The cap constant change affects runtime behavior; the data file's accumulated sessions were already past the new 50-cap. Test runs accumulate sessions into the data file, so future sessions should re-trim to a clean state before running the chat-flow tests. The auto-trim is fine for dev workflows; production users won't typically accumulate 50+ active sessions.
+  - **The cap error message** at server.js:7351 still reads "Chat session limit reached (50). Delete older sessions before creating new ones." — the message dynamically uses the constant value, so UX automatically stays in sync.
+
+### Out of scope — surfaced again, parked in BACKLOG (not committed)
+
+  - Same `base_resp`-error-detection for `callAlibabaAdapter` (CR-22 — next).
+  - The 4 pre-existing test failures (Issue #1 declined-rev persistence + 3 × Slice 4 env-state).
+  - Same recursive items from Sessions #4–#7 (chat-alibaba live-mode path, DASHSCOPE_LIVE=1).
+
+### Verification
+
+  `git log --oneline -3` →
+    (CR-21 hash TBD)  fix(chat-state): CR-21 chat-session cap 200 → 50 (issue #20)
+    bca26fe           fix(chat-vision): CR-20 chat-route catalog + default were silently downgrading MiniMax-M3 to MiniMax-M1
+    98abfc6           fix(chat-vision): CR-19 chat-route non-kilo_code chat no longer stubs
+
+  `git status --short` → 5 pre-existing tracked + 2 pre-existing untracked (intentionally untouched). `chat_sessions.json` at 3 sessions (well under new 50-cap).
+
+  `node scripts/session-init.js` → 10/10 V-checks (re-confirmed).
+
+### Mood / risk flag
+
+  > Cap lowered with no regressions. The 4 pre-existing test failures remain out of scope (Issue #1 + 3 Slice 4 env-state). Future sessions will trim chat_sessions.json to keep state above the cap during testing cycles. No new architectural commitments beyond the constant change.
