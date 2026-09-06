@@ -1524,3 +1524,45 @@ User uploaded a 16×16 black PNG. The analyze flow returned 200 OK with a near-e
 ### Mood / risk flag
 
 > Slice is a small, single-seam-per-file fix. Threshold intentionally tight to avoid false positives on real photos with thin subject descriptions. Net test surface +8 slots. No production behavior change for the success path — the existing best-effort 200 path is preserved when the threshold does not fire. Commit chain: `1e8851b → d2966c2 → 98abfc6 → bca26fe → 4b7b289 → d404f0d → <CR-23> → <CR-28>`.
+## Session #12 — 2026-09-06 (out-of-scope cleanup: parked Issues #1 + #23 retired)
+
+**Workflow:** existing (continue mode) — out-of-scope cleanup per user's "FIX ANYTHING OUT OF SCOPE" directive after CR-28 shipped. Two pre-existing parked failures closed in one go. No new architecture; docs + regression-armor-only changes.
+
+### What was asked
+
+User said: "FIX ANYTHING OUT OF SCOPE". The pre-existing failing test flagged by Session #10's `node tests/run-all.js → 506 / 1 failed` (Issue #1) and the Anima coverage gap parked since Session #8 (Issue #23) are both single-seam cleanup candidates.
+
+### What landed
+
+1. **`tests/run-all.js`** (+37 / -2 net) —
+   - **Issue #1 (chat persistence)**: test window for `Issue #1: route handler persists declined_suggested_prompt + declined_missing_terms on assistant message` extended from `idx + 1400` to `idx + 1900` chars. The route handler at server.js:7720+ was already persisting the fields; the test window was just tight. New boundary covers observed offsets from `const assistantMessage = {`: declined_suggested_prompt at +1433, declined_missing_terms at +1661, `session.messages.push(assistantMessage)` at +1792.
+   - **Issue #23 (Anima coverage categories)**: new in-process test `Issue #23: DEFAULT_ANIMA_PROMPT has COVERAGE CATEGORIES section enumerating all six families` with 12 assertions mirroring `scripts/smoke/anima-coverage-categories.js`. Anchored on the `DEFAULT_ANIMA_PROMPT` export from server.js + regex checks against the section header + canonical tag vocabulary for camera/mood/lighting/posture/composition/era + the Issue #23 traceability marker.
+
+2. **`docs/BACKLOG.md`** — appended `- **Shipped:** 2026-09-06 (Session #12)` bullet to the existing Anima coverage gap parked-item entry, documenting the code+smoke+ADR pre-existence + the in-process test addition.
+
+3. **`docs/SESSION-STATE.md`** — this entry.
+
+### Verification
+
+- `node tests/run-all.js` → **510 passed, 0 failed** (was: 509 after Issue #1 fix alone; +1 test block from Issue #23).
+- `node scripts/smoke/anima-coverage-categories.js` → **7 passed, 0 failed** (independent sanity check — the in-process test mirrors this smoke).
+- `node scripts/session-init.js` → re-run for final 10/10 V-check (added to "Verification" below).
+
+### Notes / architectural notes
+
+- **Issue #1 was a TEST boundary bug, not a code bug.** The chat route handler at server.js:7720+ had been persisting `declined_suggested_prompt` + `declined_missing_terms` on the assistant message since the ADR 0012 / anchor-preservation slice. The test's `serverText.slice(idx, idx + 1400)` was 33 chars too short to see the `declined_suggested_prompt` token (43 chars past the boundary at the time the test was authored). No production code change required.
+- **Issue #23 was an integration-test gap, not a code gap.** The full `# COVERAGE CATEGORIES` section (six families: camera/mood/lighting/posture/composition/era; manual-derived vocabulary; traceability to issue #23) lives in `DEFAULT_ANIMA_PROMPT` at server.js:3569+ and has since the Slice 2 closeout. The smoke at `scripts/smoke/anima-coverage-categories.js` is 7 passing assertions. ADR 0021's "Consequences (2026-08-04) — coverage categories sharpening in `DEFAULT_ANIMA_PROMPT`" appendix documents the fix. The only thing missing was an in-process test mirroring the smoke, so a future regression would surface in the canonical `node tests/run-all.js` run. Session #12 closes that gap.
+- **Both retroactively-fixed items share a pattern.** Session #10 / #11 observed them as parked / out-of-scope at snapshot time. Snapshot drift had already resolved them before Session #12 started. The cleanest possible fix was to make the regression armor in-process (the code was already correct).
+
+### Out of scope — parked
+
+- **Chat-alibaba live-mode path (DASHSCOPE_LIVE=1 + stored alibaba key)** — Session #10 / #11 parked: "To un-park...store an Alibaba key in data/provider_keys.json and exercise /api/chat/sessions/:id/messages with provider=alibaba." Still requires a user-supplied Alibaba key. No code-side action possible autonomously; document only.
+- **`Stage 1 attempt 2 still has N length violation(s)` runtime log** (session-init medium-severity finding) — This is the preserved-best-effort-path warning per ADR-0001 §"Known limitations" #1. CR-28's `IMAGE_TOO_MINIMAL` gate fires when the threshold is met; the warning still emits when only thin-but-valid responses come back (which is the correct ADR-0001 §3 behavior). The persistent single occurrence is benign. If a user-visible regression is reported, a "sparse-image preflight" check at upload time is the natural next step. Not in this slice.
+
+### Verification
+
+`git log --oneline -1` → commit hash TBD (after `git commit`).
+
+### Mood / risk flag
+
+> Both parked items were already shipped by prior uncommitted session work. Session #12 added only test-side / docs-side work. **Zero production-behavior change.** The risk is bounded to "did the in-process test correctly mirror the smoke" — both pass independently (510/0 in-process, 7/0 smoke), so the regression armor is doubled for the Anima-coverage-categories path. Commit chain: `6e50c33 → <Session #12>`.

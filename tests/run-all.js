@@ -7541,8 +7541,11 @@ test('Issue #1: route handler persists declined_suggested_prompt + declined_miss
   assertTrue(idx !== -1, 'assistantMessage construction present');
   // Pull a window that covers the construction + the post-construction
   // "if (parsedReply.declined_suggested_prompt ...) ..." block that
-  // attaches the new fields.
-  const block = serverText.slice(idx, idx + 1400);
+  // attaches the new fields, plus the `session.messages.push(...)` line.
+  // Observed offsets in v3.x: declined_suggested_prompt at +1433,
+  // declined_missing_terms at +1661, session.messages.push at +1792;
+  // window of 1900 covers all three with a small buffer.
+  const block = serverText.slice(idx, idx + 1900);
   assertTrue(/declined_suggested_prompt/.test(block),
     'route handler writes declined_suggested_prompt to disk');
   assertTrue(/declined_missing_terms/.test(block),
@@ -7576,6 +7579,49 @@ test('Issue #1: CSS has declined-preview styles', () => {
   assertTrue(/\.chat-message__declined-terms/.test(css),
     '.chat-message__declined-terms rule defined');
 });
+// Issue #23 — DEFAULT_ANIMA_PROMPT enumerates COVERAGE CATEGORIES.
+// Mirrors scripts/smoke/anima-coverage-categories.js as an in-process
+// test so regressions surface in `node tests/run-all.js` rather than
+// only via a separate smoke invocation. Bug: Anima prompt generation
+// omitted camera/mood/lighting/posture tags on the `positive` output.
+// Fix: COVERAGE CATEGORIES section (six families) added to
+// DEFAULT_ANIMA_PROMPT — tag vocabulary mirrored from
+// docs/ANIMA-PROMPTING-MANUAL.md §7 worked examples. ADR 0021 documents
+// the fix in its "Consequences (2026-08-04)" appendix.
+test('Issue #23: DEFAULT_ANIMA_PROMPT has COVERAGE CATEGORIES section enumerating all six families', () => {
+  const { DEFAULT_ANIMA_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof DEFAULT_ANIMA_PROMPT === 'string', 'DEFAULT_ANIMA_PROMPT exported as string');
+
+  // Section header present (matches the constant's intentional naming)
+  assertTrue(/# COVERAGE CATEGORIES/.test(DEFAULT_ANIMA_PROMPT), 'has COVERAGE CATEGORIES section header');
+
+  // Six families: camera angle, mood/expression, lighting, posture/action,
+  // composition/framing, era/time-of-day. Each must be enumerated with at
+  // least one canonical tag from the manual's worked-example vocabulary
+  // (so the LLM is nudged to mirror the Z-Image Turbo 14-field analysis
+  // coverage rather than emit subject-only tag lists).
+  assertTrue(/CAMERA ANGLE/.test(DEFAULT_ANIMA_PROMPT), 'enumerates CAMERA ANGLE category');
+  assertTrue(/looking at viewer/.test(DEFAULT_ANIMA_PROMPT), 'camera: canonical tag "looking at viewer" present');
+
+  assertTrue(/MOOD[\s\S]*EXPRESSION/.test(DEFAULT_ANIMA_PROMPT), 'enumerates MOOD/EXPRESSION category');
+  assertTrue(/gentle smile/.test(DEFAULT_ANIMA_PROMPT), 'mood: canonical tag "gentle smile" present');
+
+  assertTrue(/LIGHTING/.test(DEFAULT_ANIMA_PROMPT), 'enumerates LIGHTING category');
+  assertTrue(/soft lighting/.test(DEFAULT_ANIMA_PROMPT), 'lighting: canonical tag "soft lighting" present');
+
+  assertTrue(/POSTURE[\s\S]*ACTION/.test(DEFAULT_ANIMA_PROMPT), 'enumerates POSTURE/ACTION category');
+  assertTrue(/standing/.test(DEFAULT_ANIMA_PROMPT), 'posture: canonical tag "standing" present');
+
+  assertTrue(/COMPOSITION[\s\S]*FRAMING/.test(DEFAULT_ANIMA_PROMPT), 'enumerates COMPOSITION/FRAMING category');
+  assertTrue(/solo|outdoors|indoors|detailed background/.test(DEFAULT_ANIMA_PROMPT), 'composition: canonical tag vocabulary present');
+
+  assertTrue(/ERA[\s\S]*TIME OF DAY/.test(DEFAULT_ANIMA_PROMPT), 'enumerates ERA/TIME-OF-DAY category');
+  assertTrue(/year 2025|year 2024|night|sunset|golden hour/.test(DEFAULT_ANIMA_PROMPT), 'era: canonical tag vocabulary present');
+
+  // Traceability: a future regression-trace marker that names the issue.
+  assertTrue(/Issue #23|Issue\s+#23/i.test(DEFAULT_ANIMA_PROMPT), 'traceability reference mentions Issue #23');
+});
+
 
 // ─── ADR 0016 — Z-Image Turbo palette strength + accent placement ─────
 
