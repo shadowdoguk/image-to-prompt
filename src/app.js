@@ -317,7 +317,13 @@
     const res = await fetch(url, options);
     const data = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` }));
     if (!res.ok || !data.success) {
-      throw new Error(data.error || `HTTP ${res.status}`);
+      // sparse-image-fix slice: surface the server-issued error code
+      // (e.g. IMAGE_TOO_MINIMAL) so callers can branch on a typed signal
+      // instead of regex-matching the human-readable error string.
+      const err = new Error(data.error || `HTTP ${res.status}`);
+      if (data && data.code) err.code = data.code;
+      if (data && Array.isArray(data.violations)) err.violations = data.violations;
+      throw err;
     }
     return data.data;
   };
@@ -1241,7 +1247,15 @@
       hideError();
     } catch (e) {
       console.error('[analyze] failed', e);
-      showError(`Analysis failed: ${e.message}`);
+      // sparse-image-fix slice: when the server returns IMAGE_TOO_MINIMAL
+      // (422), surface a friendlier actionable banner instead of the raw
+      // server message. Falls through to the generic error path for any
+      // other failure mode.
+      if (e && e.code === 'IMAGE_TOO_MINIMAL') {
+        showError("This image doesn't have enough content for analysis. The model couldn't extract a usable description — try a more detailed photo with subjects, colors, and a recognizable scene.", { severity: 'warning' });
+      } else {
+        showError(`Analysis failed: ${e.message}`);
+      }
     } finally {
       state.isAnalyzing = false;
       setButtonLoading(dom.analyzeBtn, false, 'Analyze image');
@@ -1955,7 +1969,7 @@
     if (dom.animaResultMetaInfo) {
       const meta = [
         `Variant: ${data.variant || state.animaVariant}`,
-        `Model: ${data.model || 'MiniMax-Text-01'}`,
+        `Model: ${data.model || 'MiniMax-M3'}`,
         `Positive: ${(data.positive || '').length} chars`,
         `Negative: ${(data.negative || '').length} chars`
       ];
@@ -2057,7 +2071,7 @@
   const ALLOWED_PROVIDERS = ['kilo_code', 'minimax', 'alibaba'];
   const ALLOWED_LLM_MODELS_BY_PROVIDER = {
     kilo_code: ['minimax/minimax-m3', 'openai/gpt-5.6-luna', 'google/gemini-3.1-pro-preview', 'google/gemini-3.5-flash', 'nvidia/nemotron-3-ultra-550b-a55b', 'x-ai/grok-4.3'],
-    minimax: ['MiniMax-M1'],
+    minimax: ['MiniMax-M3', 'MiniMax-M1'],
     alibaba: ['qwen-vl-max', 'qwen-vl-plus']
   };
   const PROVIDER_STORAGE_KEY = 'i2p.state.provider';

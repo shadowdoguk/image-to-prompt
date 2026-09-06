@@ -154,3 +154,26 @@ Parked items that have since shipped. The original Parked-items entry is preserv
 
 - **Origin:** `CODE-REVIEW-UI-R5-identity-a11y.md`. Spec §7.2 asked for self-hosted Space Grotesk / IBM Plex Sans / IBM Plex Mono; UI-R5 shipped local-first font stacks instead (zero download weight for a local tool).
 - **To un-park:** subset + bundle woff2 files and `@font-face` rules if the app ever ships beyond this machine.
+
+---
+
+### Item: Slice 26 — Tri-provider live routing (CR-fix, 2026-09-04)
+
+- **Origin:** User bug report 2026-09-04. Within the Providers & keys section, only the Kilo Code provider functioned; MiniMax direct and Alibaba DashScope did not.
+- **Closeout:** Implemented per `docs/CODE-REVIEW-26-tri-provider-live.md` (verdict **pass**). All three providers authenticate, connect, and execute all core functions (Stage 1 / Subject / Camera / Actions / Mood / Lighting / Texture / Orientation / Anima / Stage 2 / Chat). Smoke `scripts/smoke/providers-e2e.js`: **33/33 PASS**.
+- **Known follow-up (NOT blocking ship):** 7 stale tests in `tests/run-all.js` encode the old architecture (route handlers calling `callKilo*` directly, `isProviderLive` returning false by default, `ALLOWED_LLM_MODELS_BY_PROVIDER.minimax[0]` === `'MiniMax-M1'`). Each is a one-line regex / assertion update — see CODE-REVIEW-26 §6.
+- **Decisions made autonomously:** (1) Default MiniMax model is `MiniMax-Text-01` (real MiniMax model, vision-capable), `MiniMax-M1` retained as alias. (2) Default Alibaba models include `qwen-vl-max` + `qwen-vl-plus` + `qwen3-max`. (3) `.env.example` corrected from the `api.minimaxi.chat/v1` typo to `api.minimaxi.com/v1` (matches the user's saved key). (4) Banner updated to mention both enable paths. (5) NO new ADR — the architectural change implements ADR 0023 cleanly (the per-endpoint orchestrator is exactly the "Three adapters, each owns its own request shape + auth + response parsing" decision; the Slice 4 paperwork landed but the route-rewire step was never done).
+- **To un-park the stale tests:** tighten regex / update assertions as documented in CODE-REVIEW-26 §6. ~30 minutes of work; non-urgent.
+
+### Item: Per-provider retry policy (429 / 502 / 503)
+
+- **Origin:** Identified during Slice 26 review as a future hardening step.
+- **Why parked:** Slice 26 was scoped to "make non-Kilo providers functional," not "handle provider rate limits gracefully." The user did not request retry logic.
+- **To un-park:** add per-provider exponential-backoff retry around `callProviderRaw`, with the existing per-field retry behavior of `callKilo*` preserved. ~80 lines + tests.
+
+### Item: Real-API validation of MiniMax + Alibaba from the user's machine
+
+- **Origin:** Slice 26 was verified via mocked-fetch smoke (33/33). The user's saved MiniMax key in `data/provider_keys.json` will be exercised live on the next Stage 1 / chat request from the UI.
+- **Why parked:** Real-API validation requires the user to spend API budget against MiniMax and Alibaba. The mocked-fetch smoke covers correctness; live validation is the user's call.
+- **To un-park:** open `/api/providers` in the UI, click Test connection for MiniMax (already has a stored key) and Alibaba (requires saving the user-supplied key). If 200, click Analyze in the Create view with the desired provider selected.
+| 2026-09-06 | Appended: Sparse-image-fix (CR-28) shipped; IMAGE_TOO_MINIMAL runtime-log concern retired | Session #11 — /api/analyze now returns structured 422 (code=IMAGE_TOO_MINIMAL) for genuinely empty/underspecified responses (was: silent 200 with near-empty analysis). app.listen EADDRINUSE unhandled-error crash now self-diagnoses with readable hint. Threshold: 3-rule contract (subjectEmpty | subjectThin+≥3violations | strict-majority). |

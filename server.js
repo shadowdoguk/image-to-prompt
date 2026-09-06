@@ -2640,6 +2640,44 @@ const validateAnalysisLengths = (parsed, fieldNames) => {
   return violations;
 };
 
+/**
+ * Decide whether a Stage 1 result with the given `violations` should be
+ * rejected with `IMAGE_TOO_MINIMAL` (image too sparse to analyze usefully)
+ * rather than returning the best-effort result.
+ *
+ * Rules (additive — any one triggers):
+ *   A. `subject` is empty AND any length violation exists (model said nothing).
+ *   B. `subject` is below 30 chars AND violations include >= 3 fields
+ *      (near-failure: thin subject + multiple other fields short).
+ *   C. Violations cover >= 50% of requested fields (widespread underspecification).
+ *
+ * Rule A catches total failure. Rule B catches near-failure. Rule C is the
+ * generic catch-all for "the model literally can't describe this image".
+ * The 30/50% thresholds gate only when the result is GENUINELY empty,
+ * not when it's just thin-but-usable — a single thin subject with the
+ * rest of the analysis valid is still returned as best-effort (per
+ * ADR-0001 §"Known limitations" #3).
+ *
+ * Implemented 2026-09-06 — sparse-image-fix slice (Option A).
+ */
+const isImageTooMinimal = (violations, fieldNames, parsed) => {
+  if (!Array.isArray(violations) || violations.length === 0) return false;
+  const totalFields = Math.max(1, fieldNames.length);
+  const subjectValue = parsed && typeof parsed.subject === 'string' ? parsed.subject : '';
+  const subjectEmpty = subjectValue.length === 0;
+  const subjectThin = subjectValue.length < 30;
+  // Rule C: violations strictly exceed 50% of requested fields (i.e.
+  // majority+ underspecification). Strict `>` (not `>=`) avoids firing
+  // on the 50/50 tie case where one violation out of a two-field preset
+  // should still return as best-effort rather than as 422.
+  if (violations.length * 2 > totalFields) return true;
+  // Rule A: subject is empty (model said nothing)
+  if (subjectEmpty) return true;
+  // Rule B: subject is thin AND >= 3 violations (near-failure)
+  if (subjectThin && violations.length >= 3) return true;
+  return false;
+};
+
 const callKiloStage1 = async (imageDataUri, stage1SystemPrompt, fieldNames, model = DEFAULT_LLM_MODEL) => {
   if (!kiloConfigured) {
     throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
@@ -2785,6 +2823,23 @@ Respond ONLY with the JSON object — no prose, no markdown, no commentary.`;
     violations = validateAnalysisLengths(parsed, fieldNames);
     if (violations.length > 0) {
       console.warn(`Stage 1 attempt 2 still has ${violations.length} length violation(s): ${violations.map((v) => v.field).join(', ')} — accepting result`);
+      // ADR-0001 §"Known limitations" #3: simple images produce simple
+      // descriptions. Below the sparse-image-fix thresholds, accept the
+      // best-effort result (preserves the existing UX). Above the
+      // thresholds, refuse the response with IMAGE_TOO_MINIMAL so the
+      // client surfaces an actionable message instead of a near-empty
+      // analysis editor. Throwing here lets the route's catch block map
+      // this to a structured 422.
+      if (isImageTooMinimal(violations, fieldNames, parsed)) {
+        const err = new Error(
+          `Image is too minimal to analyze — ${violations.length} of ${fieldNames.length} ` +
+          'fields returned insufficient description. Try a more detailed image.'
+        );
+        err.code = 'IMAGE_TOO_MINIMAL';
+        err.violations = violations;
+        err.fieldNames = fieldNames.slice();
+        throw err;
+      }
     }
   }
 
@@ -4809,6 +4864,16 @@ app.post('/api/analyze', upload.single('image'), async (req, res) => {
   } catch (error) {
     if (filePath && fs.existsSync(filePath)) {
       try { fs.unlinkSync(filePath); } catch (_) {}
+    }
+    // sparse-image-fix slice: surface a structured 422 instead of a generic
+    // 500 when Stage 1 detected that the image is too sparse to analyze.
+    if (error && error.code === 'IMAGE_TOO_MINIMAL') {
+      return res.status(422).json({
+        success: false,
+        error: error.message,
+        code: 'IMAGE_TOO_MINIMAL',
+        violations: error.violations || []
+      });
     }
     res.status(500).json({ success: false, error: sanitizeError(error.message) });
   }
@@ -8338,7 +8403,7 @@ app.use((req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
     ensureDataFileExists();
     console.log(`Image-to-Prompt server running on http://localhost:${PORT}`);
     console.log(`Kilo Code configured: ${kiloConfigured}`);
@@ -8355,6 +8420,21 @@ if (require.main === module) {
     }).catch((e) => {
       console.warn(`RAG seed failed: ${e.message}. Chat will run in no-RAG mode until reindex succeeds.`);
     });
+  });
+  // sparse-image-fix slice: port-collision crash protection. Without this
+  // listener, a second `node server.js` started while the first one holds
+  // port 3100 emits an unhandled 'error' event from Node's HTTP server and
+  // buries the cause in `node:events:487`. Surface a readable hint and
+  // exit cleanly so a stale process can be diagnosed (the historic
+  // server.log showed `EADDRINUSE` ending in an unhandled throw).
+  httpServer.on('error', (err) => {
+    console.error(`Server failed to start on port ${PORT}: ${err.message} (code: ${err.code || 'unknown'})`);
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Another process is using port ${PORT}. Run \`pkill -f "node server.js"\` from the project directory and retry.`);
+    } else if (err.code === 'EACCES') {
+      console.error(`Process lacks permission to bind port ${PORT}. Either pick a different port (PORT=<n>) or run with sufficient privileges.`);
+    }
+    process.exit(1);
   });
 }
 
@@ -8561,6 +8641,7 @@ module.exports = {
   buildStage1RetrySuffix,
   buildStage1Schema,
   validateAnalysisLengths,
+  isImageTooMinimal,
   readSubjectPrompt,
   writeSubjectPrompt,
   validateSubjectPrompt,

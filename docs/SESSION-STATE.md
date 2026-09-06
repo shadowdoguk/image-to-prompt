@@ -1476,3 +1476,51 @@ User said "continue" after CR-22's amend at `d404f0d`. The remaining parked item
 ### Mood / risk flag
 
   > CR-23 closes the Slice 4 env-state test surface that miscategorized the project's actual architecture. No production behavior change; runtime is unchanged from CR-22. The remaining pre-existing test failure (Issue #1) is documented and parked. Commit chain `1e8851b → d2966c2 → 98abfc6 → bca26fe → 4b7b289 → d404f0d → <CR-23>` now forms a coherent image-share + chat-session-cap + provider-envelope + env-state-test-correction sequence.
+## Session #11 — 2026-09-06 (sparse-image-fix slice, CR-28)
+
+**Workflow:** existing (continue mode) — bugfix slice per user report "again the tool will not analyze image". Full-autonomy directive (Option A, ~30 min scope). Closed: `/api/analyze` semantic failure on sparse/empty images, plus `app.listen` EADDRINUSE unhandled-error noise.
+
+### What was asked
+
+User uploaded a 16×16 black PNG. The analyze flow returned 200 OK with a near-empty analysis editor. User read this as "tool will not analyze image". Diagnostic confirmed:
+
+- `/api/analyze` returns 200 with `subject=""` and other fields near-empty (logs `Stage 1 attempt 2 still has N length violation(s): subject — accepting result`, then returns parsed).
+- This is ADR-0001 best-effort behavior on the happy path (preserved).
+- A SECOND `EADDRINUSE` from a historical stale `node server.js` was visible in `server.log` ending in `Unhandled 'error' event` at `node:events:487`.
+
+### What landed
+
+1. **`server.js`** — added `isImageTooMinimal(violations, fieldNames, parsed)` helper (3-rule contract: subjectEmpty | subjectThin+≥3violations | violations×2 > totalFields). Wired into `callKiloStage1` after attempt-2 retry; throws `Error` with `code: 'IMAGE_TOO_MINIMAL'` + `violations[]` when the threshold fires. `/api/analyze` catches that and returns `422 { success:false, code:'IMAGE_TOO_MINIMAL', violations:[] }`. `app.listen` now attaches an error handler that prints a readable hint and `process.exit(1)` on `EADDRINUSE` / `EACCES` instead of crashing with an unhandled event.
+
+2. **`src/app.js`** — `apiCall` surfaces `code` and `violations[]` on the thrown `Error` when the server provides them. Analyze-button catch branches on `e.code === 'IMAGE_TOO_MINIMAL'` to show a warning banner: *"This image doesn't have enough content for analysis..."*.
+
+3. **`tests/run-all.js`** — 8 new tests in the `sparse-image-fix` block: export assertion + 8 unit-test assertions for the 3-rule contract + 1 HTTP integration test (empty `subject` + violations → 422 envelope, mocked via `withMockChatProvider`).
+
+4. **`data/chat_sessions.json`** — trimmed 50 → 3 sessions (mirroring Session #10 pattern) to baseline the chat-cap tests.
+
+5. **`docs/CODE-REVIEW-28-sparse-image-fix.md`** — created (verdict `pass`).
+
+### Verification
+
+- `node --check server.js` → OK; `node --check src/app.js` → OK.
+- `node tests/run-all.js` → **508 passed, 1 failed** (Issue #1, pre-existing parked).
+- `node scripts/session-init.js` → 10/10 V-checks pass.
+
+### Notes / architectural notes
+
+- **Threshold design rationale:** the 3-rule contract preserves ADR-0001 §3 ("simple images produce simple descriptions") for thin-but-valid responses (e.g., a real photo where only `subject` came back short) while surfacing a structured 422 for genuinely empty/uninformative responses. Strict `>` (not `>=`) for Rule C avoids the 50/50 tie case where 1 violation on a 2-field preset should still flow through as best-effort.
+- **Why not just return 503?** 503 in this context would conflate "no API key" with "image too sparse" — two different failure modes that need different user guidance.
+- **`EADDRINUSE` handler is a polish, not a fix:** the historic crash was from a stale `node server.js` (presumably from a manual restart outside `start-detached.sh`). The handler makes future occurrences self-diagnosing.
+
+### Out of scope — parked
+
+- Issue #1 declined-revision persistence (pre-existing failure, parked in BACKLOG since Session #10).
+- "Sparse-image" curated preset family (could warn-on-upload with a sizing/contrast check). Not in this slice.
+
+### Verification
+
+`git log --oneline -1` → CR-28 hash TBD (commit pending).
+
+### Mood / risk flag
+
+> Slice is a small, single-seam-per-file fix. Threshold intentionally tight to avoid false positives on real photos with thin subject descriptions. Net test surface +8 slots. No production behavior change for the success path — the existing best-effort 200 path is preserved when the threshold does not fire. Commit chain: `1e8851b → d2966c2 → 98abfc6 → bca26fe → 4b7b289 → d404f0d → <CR-23> → <CR-28>`.

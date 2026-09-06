@@ -774,6 +774,42 @@ test('HTTP integration: POST /api/analyze with valid paletteId reaches the LLM c
   }
 });
 
+// sparse-image-fix slice — HTTP integration: when Stage 1 throws
+// IMAGE_TOO_MINIMAL (empty subject + length violations), the /api/analyze
+// route surfaces a structured 422 envelope carrying {code, violations[]}
+// instead of returning a near-empty analysis. Skips when KILO_API_KEY is
+// unset (test env with no key returns 503 before the LLM call — same
+// gate as the existing palette tests above).
+test('sparse-image-fix: /api/analyze returns 422 IMAGE_TOO_MINIMAL when Stage 1 throws it', async () => {
+  if (!process.env.KILO_API_KEY) return; // skip when no API key (matches existing test env assumption)
+  const srv = await startTestServer();
+  try {
+    // Both Stage 1 attempts return a JSON where subject is empty.
+    // validateAnalysisLengths flags subject (actual:0, required:100) on
+    // each attempt. After attempt 2, isImageTooMinimal fires Rule A
+    // (subjectEmpty) → callKiloStage1 throws IMAGE_TOO_MINIMAL. The
+    // route's catch block maps that to the 422 envelope below.
+    const responses = [{ subject: '' }, { subject: '' }];
+    let result;
+    await withMockChatProvider(responses, async () => {
+      const fd = new FormData();
+      fd.append('image', new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }), 'tiny.jpg');
+      fd.append('presetId', 'preset_alla_prima_oil');
+      result = await fetchJson(`${srv.base}/api/analyze`, { method: 'POST', body: fd });
+    });
+    assertEqual(result.status, 422, 'sparse-image-fix: empty subject → 422');
+    assertTrue(result.body && result.body.success === false, 'response body wraps {success:false}');
+    assertTrue(result.body && result.body.code === 'IMAGE_TOO_MINIMAL', 'response body carries code=IMAGE_TOO_MINIMAL');
+    assertTrue(Array.isArray(result.body && result.body.violations), 'response body carries violations[]');
+    assertTrue(
+      (result.body.violations || []).some((v) => v.field === 'subject'),
+      'violations[] includes the subject field that fired Rule A'
+    );
+  } finally {
+    await srv.close();
+  }
+});
+
 // ─── ADR 0013 — palette editing + custom-create + version tracking ──
 
 test('ADR 0013: parseColorInput accepts hex / rgb / hsl with permissive whitespace + case', () => {
@@ -9242,6 +9278,11 @@ test('Slice 3.1: KILO_API_KEY and KILO_BASE_URL are referenced in server.js', ()
 test('Slice 3.1: callKilo helpers are exported from server.js', () => {
   const server = require(path.join(PROJECT_ROOT, 'server.js'));
   assertTrue(typeof server.callKiloStage1 === 'function', 'callKiloStage1 must be exported');
+  // sparse-image-fix slice: helper that decides whether Stage 1's
+  // best-effort result is too thin to be useful (gateway to the
+  // 422 IMAGE_TOO_MINIMAL path). Tests below exercise the helper
+  // contract directly.
+  assertTrue(typeof server.isImageTooMinimal === 'function', 'isImageTooMinimal must be exported');
   assertTrue(typeof server.callKiloSubjectAnalysis === 'function', 'callKiloSubjectAnalysis must be exported');
   assertTrue(typeof server.callKiloCameraAngleAnalysis === 'function', 'callKiloCameraAngleAnalysis must be exported');
   assertTrue(typeof server.callKiloActionsAnalysis === 'function', 'callKiloActionsAnalysis must be exported');
@@ -9250,6 +9291,96 @@ test('Slice 3.1: callKilo helpers are exported from server.js', () => {
   assertTrue(typeof server.callKiloTextureAnalysis === 'function', 'callKiloTextureAnalysis must be exported');
   assertTrue(typeof server.callKiloAnimaAnalysis === 'function', 'callKiloAnimaAnalysis must be exported');
   assertTrue(typeof server.callKiloStage2 === 'function', 'callKiloStage2 must be exported');
+});
+
+// sparse-image-fix slice — unit tests for the threshold helper. The
+// helper is the gate between "best-effort result is fine" (ADR-0001 §3)
+// and "422 IMAGE_TOO_MINIMAL, refuse the response". Three rules, any one
+// of which fires the 422 path.
+test('sparse-image-fix: isImageTooMinimal follows 3-rule contract', () => {
+  const { isImageTooMinimal } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof isImageTooMinimal === 'function', 'isImageTooMinimal helper is exported');
+
+  // Rule A — empty subject fires regardless of violation shape
+  assertEqual(
+    isImageTooMinimal([{ field: 'subject', actual: 0, required: 100 }], ['subject'], { subject: '' }),
+    true,
+    'Rule A: subject="" + violation → true'
+  );
+
+  // Rule B — subject<30 chars AND ≥3 violations fires
+  assertEqual(
+    isImageTooMinimal(
+      [
+        { field: 'subject', actual: 14, required: 100 },
+        { field: 'actions', actual: 5, required: 100 },
+        { field: 'mood', actual: 5, required: 100 }
+      ],
+      ['subject', 'actions', 'mood'],
+      { subject: 'a black surface' }
+    ),
+    true,
+    'Rule B: subject<30 + ≥3 violations → true'
+  );
+
+  // Rule C — violations cover ≥50% of fields, regardless of subject
+  assertEqual(
+    isImageTooMinimal(
+      [
+        { field: 'subject', actual: 200, required: 100 },
+        { field: 'actions', actual: 5, required: 100 },
+        { field: 'mood', actual: 5, required: 100 },
+        { field: 'composition', actual: 5, required: 100 },
+        { field: 'lighting', actual: 5, required: 100 }
+      ],
+      ['subject', 'actions', 'mood', 'composition', 'lighting', 'texture', 'era', 'style'],
+      { subject: 'a richly-detailed landscape with mountains' }
+    ),
+    true,
+    'Rule C: 5/8 fields (62.5%) violated → true even with rich subject'
+  );
+
+  // Negative cases — must NOT fire (preserves ADR-0001 best-effort):
+
+  // No violations → always false
+  assertEqual(
+    isImageTooMinimal([], ['subject'], { subject: 'something' }),
+    false,
+    'no violations → false'
+  );
+  // Rich subject + 1 violation → false
+  assertEqual(
+    isImageTooMinimal(
+      [{ field: 'subject', actual: 50, required: 100 }],
+      ['subject', 'actions'],
+      { subject: 'a richly-detailed landscape with mountains and valleys' }
+    ),
+    false,
+    'rich subject + 1 violation → false (preserves best-effort)'
+  );
+  // Thin subject + only 2 violations across a realistic preset → false.
+  // Note: real presets have 7-13 stage1_fields; this uses 4 to keep the
+  // arithmetic obvious (2/4 = 50%, Rule C requires strictly > 50%) and
+  // to verify that Rule B's >= 3 threshold excludes this case.
+  assertEqual(
+    isImageTooMinimal(
+      [
+        { field: 'subject', actual: 14, required: 100 },
+        { field: 'actions', actual: 5, required: 100 }
+      ],
+      ['subject', 'actions', 'mood', 'composition'],
+      { subject: 'a black surface' }
+    ),
+    false,
+    'thin subject + 2/4 violations → false (under Rule B threshold of 3; Rule C needs > 50%)'
+  );
+
+  // Defensive — null/undefined violations
+  assertEqual(
+    isImageTooMinimal(null, ['subject'], { subject: 'anything' }),
+    false,
+    'null violations array → false (defensive)'
+  );
 });
 
 test('Slice 3.1: DEFAULT_LLM_MODEL and ALLOWED_LLM_MODELS are defined in server.js', () => {
