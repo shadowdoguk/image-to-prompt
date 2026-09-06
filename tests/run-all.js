@@ -5971,6 +5971,26 @@ test('ADR 0011: app.js wires up the chat console', () => {
   assertTrue(/\.chat-message--assistant\b/.test(css), 'CSS assistant message modifier exists');
   assertTrue(/\.chat-message__apply\b/.test(css), 'CSS apply button rule exists');
   assertTrue(/\.chat-form\b/.test(css), 'CSS chat-form rule exists');
+
+  // Regression: step-chat must start hidden in HTML so the panel
+  // doesn't render with empty working-prompt + empty messages when
+  // the user opens the chat view without having generated a prompt.
+  // The JS unhides it via selectChatSession / activateChatForResult.
+  assertTrue(/id="step-chat"[^>]*\bhidden\b/.test(html), 'index.html #step-chat must start hidden');
+});
+
+test('ADR 0011: stepChat visibility is managed by JS (hidden until session active)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  // resetChatConsole hides it (called on image clear / preset switch / delete)
+  assertTrue(/resetChatConsole[\s\S]{0,400}dom\.stepChat\.hidden\s*=\s*true/.test(js),
+    'resetChatConsole must set dom.stepChat.hidden = true');
+  // The JS must contain at least one place that sets stepChat.hidden = false
+  // (any of selectChatSession / activateChatForResult / activateChatForAnimaResult).
+  // The previous bug was that no one unhid it, but the HTML default also
+  // needs to start hidden — see the prior regression test.
+  const unhideCount = (js.match(/dom\.stepChat\.hidden\s*=\s*false/g) || []).length;
+  assertTrue(unhideCount >= 1,
+    `app.js must set dom.stepChat.hidden = false somewhere (found ${unhideCount})`);
 });
 
 test('ADR 0011: apply advances current_prompt atomically (route logic)', () => {

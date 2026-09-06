@@ -1809,3 +1809,50 @@ The chat fluid two-way series was implemented in three slices (Slices II / III /
 - **Hunk-level `aria-label`.** SPEC §22 diff hunks use a group-level `aria-label` rather than per-hunk. Future polish.
 - **Annotation dismissal persistence.** SPEC §23 dismissal is client-side only. Future: localStorage.
 - **Pre-existing uncommitted changes** (`.env.example`, `data/model_config.json`, `src/index.html` provider labels) — out of scope for chat-fluid; cleanup slice (Session #12 precedent) handles parked drift separately.
+
+---
+
+## Session #17 — step-chat hidden-by-default regression fix
+
+**Date:** 2026-09-06
+**Type:** Bug fix (no SPEC delta)
+**Triggered by:** User report — "The chat panel rendered empty / no controls visible" after the chat-fluid implementation landed.
+
+### Root cause
+
+Commit `8e3e095` (UI-R0 five-view shell rewrite, ahead of Session #15) rewrapped `<section class="step" id="step-chat" hidden>` into `<section class="panel" id="step-chat">` and dropped the `hidden` attribute. The JS that originally showed `step-chat` (via `activateChatForResult` / `selectChatSession`) survived intact, but the HTML default flipped to "always visible until resetChatConsole fires" — and `resetChatConsole` never fires on a cold page load. The result: opening the chat view with no active session rendered the full panel but with empty working-prompt + empty messages + disabled Send, which the user reasonably read as "broken".
+
+### Fix
+
+One-line HTML change in `src/index.html`:
+
+```diff
+-      <section class="panel" id="step-chat" aria-label="Refine via chat">
++      <section class="panel" id="step-chat" aria-label="Refine via chat" hidden>
+```
+
+Restores the original semantics: panel hidden until a session is active.
+
+### Tests added
+
+- `tests/run-all.js` — extended "app.js wires up the chat console" to assert `hidden` attribute on `#step-chat`.
+- `tests/run-all.js` — new test "stepChat visibility is managed by JS (hidden until session active)" verifying both halves of the invariant (reset hides, activate/select shows).
+
+### Verification
+
+- `node tests/run-all.js` → **554 passed, 0 failed** (was 553; +1 for the new visibility-management test).
+- `node --check src/app.js && node --check server.js` → clean.
+- End-to-end browser verification via Chrome DevTools Protocol on `http://127.0.0.1:3103/#/chat`:
+  - Cold load (no session): `#step-chat` is hidden, panel not rendered. ✓
+  - After selecting a saved session: `#step-chat` visible, working-prompt + messages + form all populate. ✓
+  - Zero console errors / warnings. ✓
+
+### Files touched
+
+- `src/index.html` — 1 line (add `hidden` attribute)
+- `tests/run-all.js` — +13 lines (regression tests)
+- `docs/CODE-REVIEW-32-step-chat-default-hidden.md` — 96 lines (single-axis review, verdict pass)
+
+### Out of scope (not done in this fix)
+
+- **Cold-visit resume UX.** Users with saved sessions can't access them from a cold chat-view visit (the dropdown is inside `step-chat`, which is now hidden). This is a pre-existing UX gap, not introduced by the chat-fluid slices. If wanted, should be a separate slice — add a "Resume conversation" picker above `step-chat` and park in `docs/BACKLOG.md`.
