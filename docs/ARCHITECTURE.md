@@ -840,3 +840,138 @@ The Apply button label cycles through three states based on `acceptedHunks`:
 4. On decline: set `declined_suggested_prompt = partialPrompt` (not `suggestedPrompt`), persist `declined_missing_terms`, append a declined-audit message. The "Try as rewrite" affordance still works because it re-sends the user's original text framed as wholesale.
 
 When `partial_prompt` is absent, behaviour is unchanged (full apply of `suggested_prompt`).
+
+---
+
+## §28 — Patch + annotate protocol (CR-A8 / SPEC §23 / ADR 0027)
+
+### A1 — Envelope extension
+
+The chat assistant message envelope grows from `{ reply, suggested_prompt }` to:
+
+```ts
+{
+  reply: string,                      // existing — conversational text
+  suggested_prompt: string | null,    // existing — full prompt candidate
+  patches?: Array<{                   // NEW — typed mutators
+    find: string,
+    replace: string,
+    all_occurrences?: boolean         // default false
+  }>,
+  annotations?: Array<{               // NEW — non-mutating flags
+    field: string,
+    note: string
+  }>,
+  applied_patches?: Array<PatchResult>,   // server-stamped on success
+  no_op_patches?: Array<PatchResult>,     // server-stamped on no-op
+  rejected_patches?: Array<PatchResult>   // server-stamped on rejection
+}
+
+type PatchResult = {
+  patch: { find, replace, all_occurrences? },
+  reason: 'find_not_found' | 'ambiguous_match' | 'oversized' | 'empty_replace',
+  position?: number  // for successful patches, byte offset in the merged result
+}
+```
+
+The envelope is additive. The `apiCall` client (CR-1) and the existing UI (`buildChatMessageNode`) read only `reply` and `suggested_prompt`; the new fields are ignored until the Slice III UI is shipped. Server-side parsing is permissive — absent `patches` or `annotations` keys mean "model did not emit any".
+
+### A2 — Merge pipeline
+
+```js
+function applyPatches(currentPrompt, patches) {
+  let working = currentPrompt;
+  const applied = [];
+  const noOp = [];
+  const rejected = [];
+
+  for (const patch of patches) {
+    // 1. Validate shape
+    if (typeof patch.find !== 'string' || typeof patch.replace !== 'string') {
+      rejected.push({ patch, reason: 'oversized' });
+      continue;
+    }
+    if (patch.find.length === 0) {
+      rejected.push({ patch, reason: 'empty_replace' });
+      continue;
+    }
+    if (patch.find.length > MAX_FIND_LENGTH || patch.replace.length > MAX_REPLACE_LENGTH) {
+      rejected.push({ patch, reason: 'oversized' });
+      continue;
+    }
+
+    // 2. Find occurrences
+    const occurrences = countOccurrences(working, patch.find);
+    const allOccurrences = patch.all_occurrences === true;
+
+    if (occurrences === 0) {
+      noOp.push({ patch, reason: 'find_not_found' });
+      continue;
+    }
+    if (occurrences > 1 && !allOccurrences) {
+      rejected.push({ patch, reason: 'ambiguous_match' });
+      continue;
+    }
+
+    // 3. Apply
+    const position = working.indexOf(patch.find);
+    working = allOccurrences
+      ? working.split(patch.find).join(patch.replace)
+      : working.slice(0, position) + patch.replace + working.slice(position + patch.find.length);
+    applied.push({ patch, position });
+  }
+
+  return { merged: working, applied, noOp, rejected };
+}
+```
+
+Constants:
+- `MAX_FIND_LENGTH = 500` — bound per-find scan time.
+- `MAX_REPLACE_LENGTH = 5000` — matches `MAX_FINAL_PROMPT_LENGTH`.
+
+The merged string is the validator candidate. `countOccurrences` is a single-pass O(n) scan; the entire pipeline is O(patches × prompt_length) which is bounded for sane patch counts (≤ 50 patches × 5000 chars = 250K ops worst case; in practice ≤ 5 patches × 1000 chars = 5K ops).
+
+### A3 — System prompt paragraph
+
+`DEFAULT_CHAT_SYSTEM_PROMPT` (server.js:6345) gains a new paragraph under "REFINEMENT RULES":
+
+> **Localised edits.** When the artist's request maps to a specific token, phrase, or field of the working prompt, prefer `patches[]` over a full `suggested_prompt` rewrite. Patches are deterministic, auditable, and let the user accept or reject individual changes. Reserve `suggested_prompt` for genuine restructurings (reordering, tag-style conversion, scene relocation) where patches would be ambiguous. When you're uncertain which way to go, emit an `annotation[]` instead of guessing — annotations surface your hesitation to the artist without committing to a change. **Patch hygiene:** keep `find` strings short and unambiguous (≤ ~50 characters when possible), use `all_occurrences: true` only when every instance truly should change.
+
+### A4 — UI affordances
+
+`buildChatMessageNode` (src/app.js) gains two new sections, rendered before the SPEC §22 diff:
+
+1. **Annotations panel.** Renders one `.chat-annotation-pill` per annotation. Each pill shows `field` in a bold monospace prefix and `note` as the body, with a small "Dismiss" × button. Dismiss is client-side only (toggles a `chat-annotation-pill--dismissed` class); the annotation stays on the message on disk.
+
+2. **Patches panel.** Renders one `.chat-patch-chip` per patch. Each chip shows `find → replace` in a small diff (uses SPEC §22's `computeWordDiff` on the two strings), with an Accept/Reject checkbox. Default state: Accept (matches the SPEC §22 "Apply all" default). Toggling a chip updates a local `acceptedPatches` set; the SPEC §22 `reassembleFromHunks` infrastructure is reused to compute the merged preview in real time.
+
+3. **Apply button** — identical to SPEC §22. Cycles through Apply all / Apply selected / Nothing to apply. When the user clicks Apply selected, the UI sends `{ partial_prompt: <merged>, accepted_hunk_count: <count>, patch_indices: <indices> }` in the body. The server merges `partial_prompt` against `current_prompt` exactly as today (no need to know which path produced the partial).
+
+### A5 — Audit shape
+
+Each assistant message gains three optional arrays (server-stamped):
+
+```ts
+applied_patches: [
+  { patch: { find, replace, all_occurrences? }, position: number }
+],
+no_op_patches: [
+  { patch: { find, replace, all_occurrences? }, reason: 'find_not_found' }
+],
+rejected_patches: [
+  { patch: { find, replace, all_occurrences? }, reason: 'ambiguous_match' | 'oversized' | 'empty_replace' }
+]
+```
+
+These arrays persist on the message on disk. The UI uses them to render "applied 2 of 3 patches; 1 was a no-op" status text. The audit message appended on Apply gains an extra field:
+
+```ts
+audit: {
+  kind: 'patch_apply' | 'partial_apply' | 'apply',
+  accepted_patch_count: number,
+  total_patch_count: number,
+  applied_patch_indices?: number[]   // for SPEC §22 partial-apply path
+}
+```
+
+The audit trail is end-to-end inspectable from `data/chat_sessions.json` without re-running the merge logic.

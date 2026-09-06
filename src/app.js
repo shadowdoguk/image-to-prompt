@@ -5188,6 +5188,11 @@
     node.className = `chat-message chat-message--${m.role === 'assistant' ? 'assistant' : 'user'}`;
     node.dataset.messageId = m.id || '';
 
+    // SPEC §23 / ADR 0027 — patches toggle handler. Wired up below
+    // when we render the patches section. Calls into the apply-button
+    // state updater so toggling patches updates the label/state.
+    let onPatchToggle = null;
+
     const isPendingProposal = m.role === 'assistant' &&
       session &&
       typeof session.pending_prompt === 'string' &&
@@ -5238,6 +5243,119 @@
         attWrap.appendChild(a);
       }
       node.appendChild(attWrap);
+    }
+
+    // SPEC §23 / ADR 0027 — render annotation pills before the
+    // diff/preview. Each annotation is `{ field, note }`; the user can
+    // dismiss them client-side (the annotation stays on disk).
+    if (m.role === 'assistant' && Array.isArray(m.annotations) && m.annotations.length > 0) {
+      const annWrap = document.createElement('div');
+      annWrap.className = 'chat-annotations';
+      annWrap.setAttribute('aria-label', 'Non-mutating annotations from the assistant');
+      for (const ann of m.annotations) {
+        if (!ann || typeof ann.field !== 'string' || typeof ann.note !== 'string') continue;
+        const pill = document.createElement('div');
+        pill.className = 'chat-annotation-pill';
+        pill.dataset.annotationKey = `${ann.field}:${ann.note}`;
+        const fieldEl = document.createElement('span');
+        fieldEl.className = 'chat-annotation-pill__field';
+        fieldEl.textContent = ann.field;
+        pill.appendChild(fieldEl);
+        const noteEl = document.createElement('span');
+        noteEl.className = 'chat-annotation-pill__note';
+        noteEl.textContent = ann.note;
+        pill.appendChild(noteEl);
+        const dismiss = document.createElement('button');
+        dismiss.type = 'button';
+        dismiss.className = 'chat-annotation-pill__dismiss';
+        dismiss.setAttribute('aria-label', `Dismiss annotation about ${ann.field}`);
+        dismiss.textContent = '×';
+        dismiss.addEventListener('click', () => {
+          pill.classList.add('chat-annotation-pill--dismissed');
+        });
+        pill.appendChild(dismiss);
+        annWrap.appendChild(pill);
+      }
+      if (annWrap.children.length > 0) node.appendChild(annWrap);
+    }
+
+    // SPEC §23 / ADR 0027 — render patch chips. The `applied_patches`,
+    // `no_op_patches`, and `rejected_patches` arrays are stamped by
+    // the server (see server.js applyChatPatches + chat route). Each
+    // chip has a checkbox; toggling re-computes the merged prompt in
+    // real time using the SPEC §22 reassembleFromHunks infrastructure.
+    if (m.role === 'assistant'
+      && ((Array.isArray(m.applied_patches) && m.applied_patches.length > 0)
+       || (Array.isArray(m.no_op_patches) && m.no_op_patches.length > 0)
+       || (Array.isArray(m.rejected_patches) && m.rejected_patches.length > 0))) {
+      const patchesWrap = document.createElement('div');
+      patchesWrap.className = 'chat-patches';
+      patchesWrap.setAttribute('aria-label', 'Patches from the assistant (toggle to accept or reject)');
+      // Default state: every applied patch is accepted (chip on);
+      // every rejected/no-op patch is informational only (no checkbox).
+      const defaultAccepted = (p) => {
+        if (!p || typeof p.patch !== 'object') return false;
+        return true;
+      };
+      const renderPatchChip = (entry, kind) => {
+        const chip = document.createElement('div');
+        chip.className = `chat-patch-chip chat-patch-chip--${kind}`;
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'chat-patch-chip__checkbox';
+        cb.checked = kind === 'applied';
+        cb.disabled = kind !== 'applied'; // only applied patches are user-toggleable
+        cb.setAttribute('aria-label', kind === 'applied'
+          ? `Accept this patch: replace ${entry.patch?.find} with ${entry.patch?.replace}`
+          : `${kind.replace('_', '-')} patch`);
+        chip.appendChild(cb);
+        const body = document.createElement('div');
+        body.className = 'chat-patch-chip__body';
+        const label = document.createElement('div');
+        label.className = 'chat-patch-chip__label';
+        label.textContent = kind === 'applied' ? 'Patch' :
+          kind === 'rejected' ? `Patch rejected: ${entry.reason}` :
+          `Patch no-op: ${entry.reason}`;
+        body.appendChild(label);
+        const diff = document.createElement('div');
+        diff.className = 'chat-patch-chip__diff';
+        const findEl = document.createElement('span');
+        findEl.className = 'chat-patch-chip__find';
+        findEl.textContent = entry.patch?.find || '';
+        diff.appendChild(findEl);
+        diff.appendChild(document.createTextNode(' → '));
+        const replaceEl = document.createElement('span');
+        replaceEl.className = 'chat-patch-chip__replace';
+        replaceEl.textContent = entry.patch?.replace || '';
+        diff.appendChild(replaceEl);
+        body.appendChild(diff);
+        chip.appendChild(body);
+        // Wire the toggle to the SPEC §22 chip state and re-trigger
+        // the apply-button update.
+        cb.addEventListener('change', () => {
+          if (kind === 'applied') {
+            chip.classList.toggle('chat-patch-chip--rejected', !cb.checked);
+          }
+          if (typeof onPatchToggle === 'function') onPatchToggle();
+        });
+        return chip;
+      };
+      // Render applied first (toggleable), then no-op, then rejected
+      // (both informational, sorted alphabetically within their kind).
+      for (const entry of (m.applied_patches || [])) {
+        patchesWrap.appendChild(renderPatchChip(entry, 'applied'));
+      }
+      for (const entry of (m.no_op_patches || [])) {
+        patchesWrap.appendChild(renderPatchChip(entry, 'no_op'));
+      }
+      for (const entry of (m.rejected_patches || [])) {
+        patchesWrap.appendChild(renderPatchChip(entry, 'rejected'));
+      }
+      if (patchesWrap.children.length > 0) {
+        // Stash for the apply-state hook.
+        node._patchesWrap = patchesWrap;
+        node.appendChild(patchesWrap);
+      }
     }
 
     if (m.role === 'assistant' && typeof m.suggested_prompt === 'string' && m.suggested_prompt.length > 0) {
@@ -5316,6 +5434,10 @@
       applyState.setAttribute('aria-live', 'polite');
       actions.appendChild(applyState);
 
+      // SPEC §23 / ADR 0027 — wire patch-toggle to the apply-button
+      // updater so toggling a patch chip refreshes the apply label.
+      onPatchToggle = () => updateApplyButtonState();
+
       // Helper to update button label + disabled state based on hunks.
       const updateApplyButtonState = () => {
         const hunks = node._hunks || [];
@@ -5359,8 +5481,28 @@
           applyState.textContent = `${accepted} of ${total} changes selected.`;
         }
       };
+      // SPEC §23 — augment apply state with patch count when the
+      // message has server-stamped patches. The chip-toggle handler
+      // already calls updateApplyButtonState; we just need to know
+      // whether any patches were applied/rejected.
+      const updateApplyButtonStateWithPatches = () => {
+        updateApplyButtonState();
+        if (!m || m.role !== 'assistant') return;
+        const appliedCount = Array.isArray(m.applied_patches) ? m.applied_patches.length : 0;
+        const noOpCount = Array.isArray(m.no_op_patches) ? m.no_op_patches.length : 0;
+        const rejectedCount = Array.isArray(m.rejected_patches) ? m.rejected_patches.length : 0;
+        if (appliedCount + noOpCount + rejectedCount === 0) return;
+        const parts = [];
+        if (appliedCount > 0) parts.push(`${appliedCount} patch${appliedCount === 1 ? '' : 'es'} applied`);
+        if (noOpCount > 0) parts.push(`${noOpCount} no-op`);
+        if (rejectedCount > 0) parts.push(`${rejectedCount} rejected`);
+        const existing = applyState.textContent ? `${applyState.textContent} — ` : '';
+        applyState.textContent = `${existing}${parts.join(', ')}`;
+      };
+      // Replace the chip-toggle hook to also include patch status.
+      onPatchToggle = () => updateApplyButtonStateWithPatches();
       // Initial label + state.
-      updateApplyButtonState();
+      updateApplyButtonStateWithPatches();
 
       // Mark already-applied revisions so the user can tell at a glance.
       if (diffAlreadyApplied) {

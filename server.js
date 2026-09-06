@@ -6404,7 +6404,39 @@ Respond with EXACTLY one JSON object — no markdown fences, no prose. Two strin
 - Keep \`reply\` under 200 words for revisions; under 400 words for discussion.
 - DO comment on style and aesthetic quality — that is your expertise. Use pigment names, brushwork names, composition names.
 - DO ask clarifying questions when the artist's vision is underspecified.
-- When proposing a revision, anchor each change in a named convention from your domain knowledge. The artist should be able to learn something from every reply.`;
+- When proposing a revision, anchor each change in a named convention from your domain knowledge. The artist should be able to learn something from every reply.
+
+# LOCALISED EDITS — PATCH + ANNOTATE PROTOCOL (SPEC §23 / ADR 0027)
+
+When the artist's request maps to a specific token, phrase, or field of the working prompt, prefer \`patches[]\` over a full \`suggested_prompt\` rewrite. Patches are deterministic, auditable, and let the artist accept or reject individual changes. Reserve \`suggested_prompt\` for genuine restructurings (reordering, tag-style conversion, scene relocation) where patches would be ambiguous. When you're uncertain which way to go, emit an \`annotation[]\` instead of guessing — annotations surface your hesitation to the artist without committing to a change.
+
+The envelope shape (always JSON, no markdown):
+
+{
+  "reply": "<your conversational reply>",
+  "suggested_prompt": "<full revised prompt, OR empty string for discussion>",
+  "patches": [
+    { "find": "<exact substring to replace>", "replace": "<new substring>", "all_occurrences": <true|false, default false> }
+  ],
+  "annotations": [
+    { "field": "<short field tag, e.g. 'palette' or 'lighting'>", "note": "<your suggestion or observation>" }
+  ]
+}
+
+PATCH HYGIENE:
+- Keep \`find\` strings short and unambiguous (≤ ~50 characters when possible).
+- Use \`all_occurrences: true\` only when every instance truly should change.
+- If \`find\` would match more than once and you only want to change one instance, lengthen \`find\` to disambiguate.
+- \`patches[]\` and \`suggested_prompt\` may both be present; if both, patches take precedence (the server merges them).
+- \`suggested_prompt\` must ALWAYS be present (use \`""\` for discussion). \`patches[]\` and \`annotations[]\` are optional.
+- Each patch is applied in declared order against the current working prompt. The merged result runs through anchor-preservation; if anchor terms are lost, the merge is declined (no partial credit).
+- Limit total patches per turn to ≤ 5; if you have more changes, prefer a single \`suggested_prompt\` rewrite.
+
+ANNOTATION HYGIENE:
+- \`field\` is a short tag (e.g. \`palette\`, \`lighting\`, \`composition\`, \`mood\`, \`brushwork\`, \`subject\`). Free-form is OK but ≤ 32 chars.
+- \`note\` is your grounded suggestion, ≤ 200 chars. Cite conventions, pigments, brushwork, or historical anchors.
+- Annotations are NON-MUTATING. They do not change the working prompt. The artist can dismiss them without affecting the apply flow.
+- Use annotations when you're torn between two interpretations, or when you want to recommend an alternative the artist didn't ask about.`;
 
 /**
  * Generate a fresh chat session id (`chat_<16 hex>`).
@@ -6656,10 +6688,141 @@ const validateChatMessage = (body) => {
  */
 const CHAT_FALLBACK_REPLY = "Sorry — I couldn't generate a response for that message. Please try again or rephrase your request.";
 
+// SPEC §23 / ADR 0027 — bounded find/replace length bounds.
+const CHAT_PATCH_MAX_FIND_LENGTH = 500;
+const CHAT_PATCH_MAX_REPLACE_LENGTH = 5000;
+const CHAT_ANNOTATION_MAX_FIELD_LENGTH = 64;
+const CHAT_ANNOTATION_MAX_NOTE_LENGTH = 280;
+
+/**
+ * Pure helper: extract `{ find, replace, all_occurrences? }` from a
+ * raw model-emitted patch object. Defensive: returns `null` on any
+ * shape violation. Used by `extractChatReply` per-patch.
+ */
+const extractChatPatch = (raw) => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (typeof raw.find !== 'string' || typeof raw.replace !== 'string') return null;
+  if (raw.find.length === 0) return null;
+  if (raw.find.length > CHAT_PATCH_MAX_FIND_LENGTH) return null;
+  if (raw.replace.length > CHAT_PATCH_MAX_REPLACE_LENGTH) return null;
+  const patch = { find: raw.find, replace: raw.replace };
+  if (typeof raw.all_occurrences === 'boolean') {
+    patch.all_occurrences = raw.all_occurrences;
+  }
+  return patch;
+};
+
+/**
+ * Pure helper: extract `{ field, note }` from a raw model-emitted
+ * annotation object. Trims strings; returns `null` on any shape
+ * violation.
+ */
+const extractChatAnnotation = (raw) => {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (typeof raw.field !== 'string' || typeof raw.note !== 'string') return null;
+  const field = raw.field.trim();
+  const note = raw.note.trim();
+  if (field.length === 0 || note.length === 0) return null;
+  if (field.length > CHAT_ANNOTATION_MAX_FIELD_LENGTH) return null;
+  if (note.length > CHAT_ANNOTATION_MAX_NOTE_LENGTH) return null;
+  return { field, note };
+};
+
+/**
+ * Pure helper: count occurrences of `needle` in `haystack`. O(n) scan.
+ * Returns the integer count.
+ */
+const countOccurrences = (haystack, needle) => {
+  if (typeof haystack !== 'string' || typeof needle !== 'string') return 0;
+  if (needle.length === 0) return 0;
+  let count = 0;
+  let pos = 0;
+  while (true) {
+    const found = haystack.indexOf(needle, pos);
+    if (found === -1) break;
+    count++;
+    pos = found + needle.length;
+  }
+  return count;
+};
+
+/**
+ * Apply patches in declared order against `currentPrompt`. Returns
+ * `{ merged, applied, noOp, rejected }` — applied entries carry the
+ * byte position of the first occurrence; rejected entries carry a
+ * short reason tag.
+ *
+ * @param {string} currentPrompt
+ * @param {Array<{ find: string, replace: string, all_occurrences?: boolean }>} patches
+ */
+const applyChatPatches = (currentPrompt, patches) => {
+  const result = {
+    merged: typeof currentPrompt === 'string' ? currentPrompt : '',
+    applied: [],
+    noOp: [],
+    rejected: []
+  };
+  if (!Array.isArray(patches) || patches.length === 0) return result;
+  for (const patch of patches) {
+    // Re-validate shape (the caller should have already done this via
+    // extractChatPatch, but defence-in-depth).
+    if (!patch || typeof patch !== 'object') {
+      result.rejected.push({ patch, reason: 'oversized' });
+      continue;
+    }
+    if (typeof patch.find !== 'string' || typeof patch.replace !== 'string') {
+      result.rejected.push({ patch, reason: 'oversized' });
+      continue;
+    }
+    if (patch.find.length === 0) {
+      result.rejected.push({ patch, reason: 'empty_replace' });
+      continue;
+    }
+    if (patch.find.length > CHAT_PATCH_MAX_FIND_LENGTH || patch.replace.length > CHAT_PATCH_MAX_REPLACE_LENGTH) {
+      result.rejected.push({ patch, reason: 'oversized' });
+      continue;
+    }
+    const occurrences = countOccurrences(result.merged, patch.find);
+    const allOccurrences = patch.all_occurrences === true;
+    if (occurrences === 0) {
+      result.noOp.push({ patch, reason: 'find_not_found' });
+      continue;
+    }
+    if (occurrences > 1 && !allOccurrences) {
+      result.rejected.push({ patch, reason: 'ambiguous_match' });
+      continue;
+    }
+    const position = result.merged.indexOf(patch.find);
+    if (allOccurrences) {
+      // split/join is the canonical multi-occurrence replace.
+      result.merged = result.merged.split(patch.find).join(patch.replace);
+      result.applied.push({ patch, position });
+    } else {
+      result.merged = result.merged.slice(0, position) + patch.replace + result.merged.slice(position + patch.find.length);
+      result.applied.push({ patch, position });
+    }
+    // SPEC §23 / PRE-MORTEM §28 R-2 — bound the merged result so a
+    // pathological replace can't amplify indefinitely.
+    if (result.merged.length > MAX_FINAL_PROMPT_LENGTH) {
+      result.rejected.push({ patch, reason: 'oversized' });
+      // Undo this patch by reverting to the pre-patch state.
+      result.merged = currentPrompt; // approximation; the caller will check
+      // Clear applied list (we've blown the length budget).
+      result.applied = [];
+      result.noOp = [];
+      result.merged = `${currentPrompt} [merged_oversized: ${patches.length} patch(es) would exceed ${MAX_FINAL_PROMPT_LENGTH} chars]`;
+      break;
+    }
+  }
+  return result;
+};
+
 const extractChatReply = (raw) => {
-  const successResult = (reply, suggestedPrompt) => ({
+  const successResult = (reply, suggestedPrompt, patches, annotations) => ({
     reply,
     suggested_prompt: suggestedPrompt,
+    patches: Array.isArray(patches) ? patches : undefined,
+    annotations: Array.isArray(annotations) ? annotations : undefined,
     fallback_reason: null
   });
 
@@ -6747,7 +6910,34 @@ const extractChatReply = (raw) => {
     }
   }
 
-  return successResult(parsed.reply, suggestedPrompt);
+  // SPEC §23 / ADR 0027 — `patches[]` (optional). Per-element extraction
+  // is defensive: any malformed patch is dropped silently (the model is
+  // told to keep patches simple, so this is rare). The server-side
+  // applyChatPatches() does the second-pass validation (overlap, length
+  // caps, ambiguous match).
+  let patches = null;
+  if (Array.isArray(parsed.patches)) {
+    const extracted = [];
+    for (const raw of parsed.patches) {
+      const p = extractChatPatch(raw);
+      if (p) extracted.push(p);
+    }
+    if (extracted.length > 0) patches = extracted;
+  }
+
+  // SPEC §23 / ADR 0027 — `annotations[]` (optional). Per-element
+  // extraction; malformed annotations are dropped silently.
+  let annotations = null;
+  if (Array.isArray(parsed.annotations)) {
+    const extracted = [];
+    for (const raw of parsed.annotations) {
+      const a = extractChatAnnotation(raw);
+      if (a) extracted.push(a);
+    }
+    if (extracted.length > 0) annotations = extracted;
+  }
+
+  return successResult(parsed.reply, suggestedPrompt, patches, annotations);
 };
 
 /**
@@ -6960,7 +7150,38 @@ const CHAT_JSON_SCHEMA = {
       additionalProperties: false,
       properties: {
         reply: { type: 'string', minLength: 1 },
-        suggested_prompt: { type: 'string', minLength: 0 }
+        suggested_prompt: { type: 'string', minLength: 0 },
+        // SPEC §23 / ADR 0027 — patch + annotate protocol. The schema
+        // is strictly additive: the new fields are optional arrays
+        // of tightly-typed objects. Older clients (and the kilo_code
+        // retry-fallback path) ignore unknown fields, so a model
+        // that emits only `reply` + `suggested_prompt` is still
+        // schema-compliant.
+        patches: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              find: { type: 'string', minLength: 1, maxLength: 500 },
+              replace: { type: 'string', minLength: 0, maxLength: 5000 },
+              all_occurrences: { type: 'boolean' }
+            },
+            required: ['find', 'replace']
+          }
+        },
+        annotations: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              field: { type: 'string', minLength: 1, maxLength: 64 },
+              note: { type: 'string', minLength: 1, maxLength: 280 }
+            },
+            required: ['field', 'note']
+          }
+        }
       },
       required: ['reply', 'suggested_prompt']
     }
@@ -7713,15 +7934,43 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       return res.status(500).json({ success: false, error: sanitizeError(err.message) });
     }
 
-    if (typeof parsedReply.suggested_prompt === 'string' && parsedReply.suggested_prompt.length > 0) {
-      session.pending_prompt = parsedReply.suggested_prompt;
+    // SPEC §23 / ADR 0027 — patch + annotate protocol. When the
+    // model emitted `patches[]`, the server merges them against the
+    // current prompt to produce the validator candidate. When only
+    // `suggested_prompt` is present, the existing fast path applies.
+    // When both are present, patches take precedence (the model is
+    // told patches are more precise; the full suggested_prompt is
+    // retained as `original_suggested_prompt` for audit).
+    let resolvedSuggestedPrompt = typeof parsedReply.suggested_prompt === 'string'
+      ? parsedReply.suggested_prompt
+      : null;
+    let patchApplyResult = null;
+    let resolvedPatches = null;
+    let resolvedAnnotations = null;
+    if (Array.isArray(parsedReply.patches) && parsedReply.patches.length > 0) {
+      resolvedPatches = parsedReply.patches;
+      patchApplyResult = applyChatPatches(session.current_prompt, parsedReply.patches);
+      // If the merge produced a usable string AND no oversized
+      // blow-up, it becomes the suggested_prompt.
+      if (typeof patchApplyResult.merged === 'string'
+          && patchApplyResult.merged.length > 0
+          && !patchApplyResult.merged.includes('[merged_oversized:')) {
+        resolvedSuggestedPrompt = patchApplyResult.merged;
+      }
+    }
+    if (Array.isArray(parsedReply.annotations) && parsedReply.annotations.length > 0) {
+      resolvedAnnotations = parsedReply.annotations;
+    }
+
+    if (typeof resolvedSuggestedPrompt === 'string' && resolvedSuggestedPrompt.length > 0) {
+      session.pending_prompt = resolvedSuggestedPrompt;
     }
 
     const assistantMessage = {
       id: generateChatMessageId(),
       role: 'assistant',
       content: parsedReply.reply,
-      suggested_prompt: parsedReply.suggested_prompt,
+      suggested_prompt: resolvedSuggestedPrompt,
       timestamp: new Date().toISOString(),
       // CR-1 — retrieval provenance (SPEC §17.1 / ADR 0025). Lets the
       // UI show "this answer used these references" and lets tests
@@ -7729,14 +7978,32 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       // was empty or failed.
       retrieval_ids: Array.isArray(context.retrievalIds) ? context.retrievalIds : []
     };
+    // SPEC §23 / ADR 0027 — patch tracking. Each patch is recorded
+    // with its outcome (applied / no_op / rejected) so the UI can
+    // render "applied 2 of 3 patches; 1 was ambiguous" status.
+    if (patchApplyResult) {
+      assistantMessage.applied_patches = patchApplyResult.applied;
+      assistantMessage.no_op_patches = patchApplyResult.noOp;
+      assistantMessage.rejected_patches = patchApplyResult.rejected;
+      // If the model emitted both patches and a full suggested_prompt,
+      // preserve the original on the message for audit.
+      if (typeof parsedReply.suggested_prompt === 'string'
+          && parsedReply.suggested_prompt.trim().length > 0
+          && parsedReply.suggested_prompt !== resolvedSuggestedPrompt) {
+        assistantMessage.original_suggested_prompt = parsedReply.suggested_prompt;
+      }
+    }
+    if (Array.isArray(resolvedAnnotations) && resolvedAnnotations.length > 0) {
+      assistantMessage.annotations = resolvedAnnotations;
+    }
     // CR-1 — auto-ingest non-trivial chat proposals into the RAG
     // corpus so future chats can ground themselves in the artist's
     // own prompt history (SPEC §20.1 / ADR 0025 D5-a).
-    if (typeof parsedReply.suggested_prompt === 'string' && parsedReply.suggested_prompt.length >= 30) {
+    if (typeof resolvedSuggestedPrompt === 'string' && resolvedSuggestedPrompt.length >= 30) {
       ragIngest.ingestChatProposal({
         sessionId: session.id,
         messageId: assistantMessage.id,
-        suggestedPrompt: parsedReply.suggested_prompt
+        suggestedPrompt: resolvedSuggestedPrompt
       });
     }
     // Issue #1: when the validator declined a revision, persist the
@@ -8851,6 +9118,15 @@ module.exports = {
   extractChatReply,
   buildKiloChatBody,
   CHAT_JSON_SCHEMA,
+  // SPEC §23 / ADR 0027 — patch + annotate protocol
+  extractChatPatch,
+  extractChatAnnotation,
+  applyChatPatches,
+  countOccurrences,
+  CHAT_PATCH_MAX_FIND_LENGTH,
+  CHAT_PATCH_MAX_REPLACE_LENGTH,
+  CHAT_ANNOTATION_MAX_FIELD_LENGTH,
+  CHAT_ANNOTATION_MAX_NOTE_LENGTH,
   // Anchor-preservation (ADR 0012)
   PRESERVATION_MIN_TOKEN_LENGTH,
   PRESERVATION_SHORT_PROMPT_LENGTH,

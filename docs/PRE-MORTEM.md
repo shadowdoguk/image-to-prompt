@@ -453,3 +453,28 @@ Kill the sub-slice if:
 - **K-1:** If the round-trip test fails on more than one fixture prompt, revert the slice. The diff is too unreliable to ship.
 - **K-2:** If the partial-merge produces a prompt the validator rejects in >20% of test fixtures, the user-facing affordance creates more friction than it solves. Park the slice and reconsider.
 - **K-3:** If the diff DOM adds more than 50ms to message render time on a 14-field prompt, consider collapsing to character-level for the long-prompt case. (Not blocking; measured in §27 G5 polish.)
+
+---
+
+## §28 — Patch + annotate protocol (SPEC §23 / ADR 0027)
+
+### Top risks
+
+- **R-1 (HIGH):** The model emits malformed patches (wrong shape, oversized `find`, etc.). The validator pipeline must be defensive — every patch type-checks before reaching `String.prototype.replace`. *Mitigation:* the merge pipeline (§28.A2) validates every patch field before any mutation; malformed patches land in `rejected_patches[]` rather than crashing the request. A test exercises five malformed shapes (non-string `find`, empty `find`, oversized `find`/`replace`, non-boolean `all_occurrences`).
+- **R-2 (HIGH):** A patch creates an unbounded string (e.g. `find: 'a', replace: 'aa'` applied 100× via `all_occurrences: true` amplifies). *Mitigation:* the merged result is bounded by `MAX_FINAL_PROMPT_LENGTH`; if the merge produces a longer string, it is rejected at the validator input with reason `'merged_oversized'` and stamped on the assistant message as a no-op with the reason set.
+- **R-3 (MEDIUM):** The model learns to emit patches even when a full rewrite is cleaner (e.g. scene relocation), producing a series of patches that don't compose into a coherent result. *Mitigation:* the system prompt instructs the model to reserve `suggested_prompt` for restructurings; anchor-preservation catches incoherent merges (the validator measures the merged result against `current_prompt`, so incoherent patches still fail). The test suite exercises both "patches-only" and "patches + full rewrite" responses.
+- **R-4 (MEDIUM):** The UI re-renders the patch list every time the user toggles a chip; for a session with many patches (e.g. 10) this re-renders the entire message node. *Mitigation:* the chip toggle handler updates a local `acceptedPatches` set and re-runs only the diff preview, not the whole message node. Measured at <5ms per toggle in the test fixture.
+- **R-5 (LOW):** Annotation dismissal is client-side only, so a reload brings them back. *Mitigation:* dismissed state is stored in localStorage keyed by `chat_<session_id>_<message_id>`; cleared on session delete. Parked for a future slice if it becomes user-visible.
+
+### Pre-commitments
+
+- **P-1:** The server's chat route MUST validate every patch field (`find`, `replace`, `all_occurrences`) before applying any mutation. A single test exercises the "all 4 fields malformed" path.
+- **P-2:** The merge result MUST be bounded by `MAX_FINAL_PROMPT_LENGTH`; over-long merges are rejected, not truncated. A test exercises a patch that would produce a >5000 char result.
+- **P-3:** The system prompt paragraph MUST be present in `DEFAULT_CHAT_SYSTEM_PROMPT`. A static-source test asserts the paragraph's anchor phrases (`patches[]`, `annotations[]`, `Localised edits`).
+- **P-4:** Every decline path (SPEC §22 partial-decline + Slice III patch-decline) produces the same `declined_suggested_prompt` + `declined_missing_terms` shape so the UI decline rendering doesn't need to distinguish.
+
+### Kill criteria
+
+- **K-1:** If the round-trip property test fails on more than one fixture (merge with all patches accepted produces byte-identical result to expected), the merge pipeline is unreliable and the slice is reverted.
+- **K-2:** If the patch decline rate exceeds 30% on the test fixtures (most patches drop anchor terms), the model is misusing patches; the system prompt is too permissive. Tighten the persona prompt or back off to a smaller set of allowed patch shapes.
+- **K-3:** If a user-visible regression appears in the decline fallback rendering (e.g. "Try as rewrite" affordance missing on patch-merge decline), the safety rail is broken. Pause the slice until the regression is fixed.

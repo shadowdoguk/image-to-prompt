@@ -1626,3 +1626,75 @@ User said: "Analyze the chat feature, investigate ways to have a more fluid two-
 ### Mood / risk flag
 
 > Slice II is the lowest-risk of the three planned slices (no schema change, no protocol change, single optional body field, all additivity). The diff algorithm is hand-rolled + LCS-classic, so no library dependency risk. The two real risks are (1) word-level boundaries producing unintuitive hunks — mitigated by the round-trip test + structural property — and (2) the partial-apply path being too strict and declining too often — mitigated by the wholesale-rewrite escape hatch which is unchanged. **Net test surface +13 slots, all green.** Commit chain: `<Session #12> → <CR-29 / Session #13>`.
+
+## Session #14 — 2026-09-06 (Chat fluid-iteration Slice 2: Patch + annotate protocol)
+
+**Workflow:** existing (continue mode) — Slice III in the recommended order from Session #13 investigation. Wide enough to warrant an ADR (ADR 0027). Schema-extension slice: envelope grows from `{ reply, suggested_prompt }` to `{ reply, suggested_prompt, patches?, annotations? }`; fully additive; older clients ignore new fields.
+
+### What was asked
+
+User approved implementation of Slice III with full autonomy. Slice III is the headline ask from the original investigation ("give the AI more freedom to edit and manipulate the prompt").
+
+### What landed
+
+1. **`server.js`** (+~280 net) —
+   - New helpers: `extractChatPatch(raw)` (defensive `{ find, replace, all_occurrences? }` shape validation), `extractChatAnnotation(raw)` (`{ field, note }` trim + length bounds), `countOccurrences(haystack, needle)` (O(n) non-overlapping count), `applyChatPatches(currentPrompt, patches)` (declarative merge with `applied_patches` / `no_op_patches` / `rejected_patches` tracking + `MAX_FINAL_PROMPT_LENGTH` bound).
+   - `extractChatReply` extended to extract `patches[]` and `annotations[]` from the parsed JSON envelope. Per-element extraction is defensive — malformed entries are dropped silently.
+   - `CHAT_JSON_SCHEMA` extended with `patches[]` (per-item `find` 1-500 / `replace` 0-5000 / `all_occurrences` boolean) and `annotations[]` (per-item `field` 1-64 / `note` 1-280) arrays. `additionalProperties: false` retained; schema is strictly additive.
+   - `DEFAULT_CHAT_SYSTEM_PROMPT` gains a new paragraph under a new `# LOCALISED EDITS — PATCH + ANNOTATE PROTOCOL` heading. Includes envelope example, patch hygiene rules, annotation hygiene rules. Persona framing unchanged.
+   - Chat route (`POST /api/chat/sessions/:id/messages`) extended: when `patches[]` is present, merges against `current_prompt` to produce `resolvedSuggestedPrompt`; tracks outcomes on the assistant message; preserves original `suggested_prompt` as `original_suggested_prompt` when both are present.
+   - Module exports extended with the new helpers + constants.
+
+2. **`src/app.js`** (+~150 net) —
+   - `buildChatMessageNode` extended with two new render sections: annotations panel (`.chat-annotation-pill` with dismiss button) + patches panel (`.chat-patch-chip` with Accept/Reject checkboxes for applied patches; informational no-op/rejected variants).
+   - `updateApplyButtonStateWithPatches` augments SPEC §22's apply-state updater with patch count status ("applied 2 patches; 1 no-op; 0 rejected").
+   - Patch chip toggle handler wired to the apply-button state refresh.
+
+3. **`src/styles.css`** (+~120 net) — `.chat-annotations`, `.chat-annotation-pill`, `.chat-patches`, `.chat-patch-chip`, find/replace chip styles, dismissed state, rejected/no-op status styles.
+
+4. **`docs/adr/0027-patch-protocol.md`** — full ADR with Context + Decision (six sections covering envelope extension, patch semantics, annotation semantics, server-side merge + validation pipeline, UI affordances, system prompt rewrite) + Consequences + Alternatives (4 rejected: loosen threshold, free-form edits, two-message turns, structured-field direct access) + References.
+
+5. **`docs/SPEC.md`** — §23 (Reframe + Scope + Out-of-scope + User stories + Implementation decisions + Glossary + DoD).
+
+6. **`docs/ARCHITECTURE.md`** — §28.A1–A5 (envelope extension, merge pipeline, system prompt diff, UI affordances, audit shape).
+
+7. **`docs/PRE-MORTEM.md`** — §28 (top risks + pre-commitments + kill criteria).
+
+8. **`docs/CODE-REVIEW-30-patch-protocol.md`** — verdict **pass**.
+
+9. **`tests/run-all.js`** — 16 new tests:
+   - 5 unit (merge round-trip, ambiguous-match rejection, all_occurrences path, no_op tracking, oversized rejection, empty-find rejection).
+   - 2 helper validation (extractChatPatch, extractChatAnnotation with length/trim bounds).
+   - 1 countOccurrences correctness.
+   - 1 JSON-schema extension assertion.
+   - 1 system-prompt paragraph assertion.
+   - 2 HTML/CSS wiring assertions.
+   - 1 HTTP integration (patches + annotations persisted on assistant message).
+   - 1 chat file restore at end of slice.
+   - Issue #1 test window extended 1900 → 3000 chars to cover Slice III's expanded `assistantMessage` construction.
+
+10. **`scripts/smoke/`** — unchanged (slice is feature-only, no smoke).
+
+### Verification
+
+- `node --check server.js && node --check src/app.js` → exit 0.
+- `node tests/run-all.js` → **539 passed, 0 failed** (was: 523 after Slice II; +16 net).
+- `node scripts/session-init.js` → 10/10 V-check (preserved from prior sessions).
+
+### Architectural notes
+
+- **Schema additivity is strict.** `additionalProperties: false` is preserved on the JSON schema; only the two new array fields are added. Older clients (and the kilo_code retry-fallback path) ignore unknown fields, so a model emitting only `{ reply, suggested_prompt }` is still schema-compliant. This means we can roll out the new protocol incrementally — the model can start emitting patches without breaking any existing client.
+- **Patch merge vs wholesale rewrite.** When both `patches[]` and `suggested_prompt` are present, patches take precedence (the server merges them; `suggested_prompt` is preserved as `original_suggested_prompt` for audit). When only `patches[]` is present, the merge result becomes `suggested_prompt`. When only `suggested_prompt` is present, the existing fast path applies. This three-mode envelope is the cleanest way to bridge from "rewrite only" to "edit only" without forcing the model into one mode.
+- **Decline path unchanged.** The SPEC §22 / ADR 0012 decline path applies identically to patch-merge candidates. If the merged result drops anchor terms, the *entire* revision is declined with the standard `declined_suggested_prompt` + `declined_missing_terms` shape. The UI doesn't need to know whether the candidate came from `suggested_prompt` directly or from a patch merge.
+- **System prompt stability.** The new paragraph is appended at the END of `DEFAULT_CHAT_SYSTEM_PROMPT` so existing rule paragraphs are unchanged. Models that have already learned the persona pick up the new paragraph as an extension; models that haven't are unaffected by the new fields' absence.
+
+### Out of scope — parked (rollback candidates)
+
+- **Per-patch decline granularity.** A merge that drops one anchor declines the whole merge. Per-patch credit would be a future optimisation.
+- **Patch streaming.** Patches are part of the message envelope, not streamed. Future: Slice I (Streaming responses) can stream patches as they arrive.
+- **Annotation persistence on dismiss.** Client-side only. localStorage-based persistence parked.
+- **Patch dependency tracking.** The server applies patches in declared order without coordination. If two patches target overlapping text, the second operates on the result of the first — natural composition order. Patch-dependency graphs parked.
+
+### Mood / risk flag
+
+> Slice III is the headline ask but the schema change is purely additive, the merge algorithm is bounded by `MAX_FINAL_PROMPT_LENGTH`, and the decline path is unchanged. The two real risks are (1) the model learning to emit patches even when a full rewrite is cleaner (mitigated by the system-prompt instruction + RAG grounding + validator catching incoherent merges) and (2) the merged result exceeding the length bound (mitigated by the oversized-rejection path that replaces the merged string with a `[merged_oversized: ...]` placeholder so the validator sees the placeholder, not the unbounded string). **Net test surface +16 slots, all green.** Commit chain: `<Session #13 / Slice II> → <CR-30 / Session #14>`.

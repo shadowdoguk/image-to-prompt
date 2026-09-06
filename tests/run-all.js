@@ -7543,9 +7543,12 @@ test('Issue #1: route handler persists declined_suggested_prompt + declined_miss
   // "if (parsedReply.declined_suggested_prompt ...) ..." block that
   // attaches the new fields, plus the `session.messages.push(...)` line.
   // Observed offsets in v3.x: declined_suggested_prompt at +1433,
-  // declined_missing_terms at +1661, session.messages.push at +1792;
-  // window of 1900 covers all three with a small buffer.
-  const block = serverText.slice(idx, idx + 1900);
+  // declined_missing_terms at +1661, session.messages.push at +1792.
+  // SPEC §23 (Slice III) extended the assistantMessage construction
+  // with patch tracking + annotations; window bumped 1900 → 3000 to
+  // cover the new fields + the Issue #1 block. Window still local
+  // enough to remain a regression guard for the chat route handler.
+  const block = serverText.slice(idx, idx + 3000);
   assertTrue(/declined_suggested_prompt/.test(block),
     'route handler writes declined_suggested_prompt to disk');
   assertTrue(/declined_missing_terms/.test(block),
@@ -9250,6 +9253,229 @@ test('SPEC §22: partial_prompt that drops anchor terms gets declined', async ()
   } finally {
     server.close();
   }
+});
+
+// ─── SPEC §23 — Patch + annotate protocol (CR-A8 / ADR 0027) ─────
+// Reset the chat file at the start so we don't inherit the 50-session
+// cap from earlier test runs.
+
+const spec23Snapshot = snapshotChatFile();
+resetChatFile();
+
+test('SPEC §23: server.js exposes applyChatPatches, extractChatPatch, extractChatAnnotation', () => {
+  const srv = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/const applyChatPatches = \(/.test(srv), 'applyChatPatches defined');
+  assertTrue(/const extractChatPatch = \(/.test(srv), 'extractChatPatch defined');
+  assertTrue(/const extractChatAnnotation = \(/.test(srv), 'extractChatAnnotation defined');
+  assertTrue(/const countOccurrences = \(/.test(srv), 'countOccurrences defined');
+});
+
+test('SPEC §23: CHAT_JSON_SCHEMA includes patches[] and annotations[] (additive)', () => {
+  const srv = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // Schema is in server.js; check the properties.
+  assertTrue(/patches:\s*\{\s*\n\s*type:\s*'array'/.test(srv), 'patches array schema present');
+  assertTrue(/annotations:\s*\{\s*\n\s*type:\s*'array'/.test(srv), 'annotations array schema present');
+  assertTrue(/find:\s*\{\s*type:\s*'string',\s*minLength:\s*1,\s*maxLength:\s*500/.test(srv),
+    'patch.find has 1-500 char bounds');
+  assertTrue(/replace:\s*\{\s*type:\s*'string',\s*minLength:\s*0,\s*maxLength:\s*5000/.test(srv),
+    'patch.replace has 0-5000 char bounds');
+  assertTrue(/field:\s*\{\s*type:\s*'string',\s*minLength:\s*1,\s*maxLength:\s*64/.test(srv),
+    'annotation.field has 1-64 char bounds');
+  assertTrue(/note:\s*\{\s*type:\s*'string',\s*minLength:\s*1,\s*maxLength:\s*280/.test(srv),
+    'annotation.note has 1-280 char bounds');
+});
+
+test('SPEC §23: DEFAULT_CHAT_SYSTEM_PROMPT contains patch + annotate paragraph', () => {
+  const srv = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/LOCALISED EDITS/.test(srv), 'paragraph header present');
+  assertTrue(/patches\[\]/.test(srv), 'patches[] referenced');
+  assertTrue(/annotations\[\]/.test(srv), 'annotations[] referenced');
+  assertTrue(/PATCH HYGIENE/.test(srv), 'patch hygiene section present');
+  assertTrue(/ANNOTATION HYGIENE/.test(srv), 'annotation hygiene section present');
+});
+
+test('SPEC §23: src/app.js renders annotations + patches in buildChatMessageNode', () => {
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/chat-annotations/.test(app), 'annotations container class wired');
+  assertTrue(/chat-annotation-pill/.test(app), 'annotation pill class wired');
+  assertTrue(/chat-patches/.test(app), 'patches container class wired');
+  assertTrue(/chat-patch-chip/.test(app), 'patch chip class wired');
+  assertTrue(/applied_patches/.test(app), 'applied_patches field read');
+  assertTrue(/no_op_patches/.test(app), 'no_op_patches field read');
+  assertTrue(/rejected_patches/.test(app), 'rejected_patches field read');
+});
+
+test('SPEC §23: styles.css defines annotation + patch chip styles', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'styles.css'), 'utf8');
+  assertTrue(/\.chat-annotation-pill\s*\{/.test(css), '.chat-annotation-pill rule present');
+  assertTrue(/\.chat-patch-chip\s*\{/.test(css), '.chat-patch-chip rule present');
+  assertTrue(/\.chat-patch-chip__find/.test(css), 'patch find chip style present');
+  assertTrue(/\.chat-patch-chip__replace/.test(css), 'patch replace chip style present');
+  assertTrue(/\.chat-annotation-pill--dismissed/.test(css), 'dismissed state present');
+});
+
+test('SPEC §23: applyChatPatches merges patches in declared order (round-trip)', () => {
+  const { applyChatPatches } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const current = 'A red apple on a wooden table under cool daylight with soft shadows.';
+  const patches = [
+    { find: 'red', replace: 'crimson' },
+    { find: 'wooden', replace: 'oak' }
+  ];
+  const result = applyChatPatches(current, patches);
+  assertEqual(result.merged, 'A crimson apple on a oak table under cool daylight with soft shadows.',
+    'merged result byte-exact');
+  assertEqual(result.applied.length, 2, '2 applied');
+  assertEqual(result.noOp.length, 0, '0 no-op');
+  assertEqual(result.rejected.length, 0, '0 rejected');
+});
+
+test('SPEC §23: applyChatPatches rejects ambiguous find (multiple occurrences, all_occurrences: false)', () => {
+  const { applyChatPatches } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const current = 'A red apple and a red cherry on a wooden table.';
+  const patches = [{ find: 'red', replace: 'crimson' }]; // ambiguous — 2 occurrences
+  const result = applyChatPatches(current, patches);
+  assertEqual(result.merged, current, 'merged unchanged');
+  assertEqual(result.applied.length, 0, '0 applied');
+  assertEqual(result.rejected.length, 1, '1 rejected');
+  assertEqual(result.rejected[0].reason, 'ambiguous_match', 'reason = ambiguous_match');
+});
+
+test('SPEC §23: applyChatPatches applies all_occurrences: true', () => {
+  const { applyChatPatches } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const current = 'A red apple and a red cherry on a wooden table.';
+  const patches = [{ find: 'red', replace: 'crimson', all_occurrences: true }];
+  const result = applyChatPatches(current, patches);
+  assertEqual(result.merged, 'A crimson apple and a crimson cherry on a wooden table.',
+    'all occurrences replaced');
+  assertEqual(result.applied.length, 1, '1 applied');
+});
+
+test('SPEC §23: applyChatPatches tracks no_op for find_not_found', () => {
+  const { applyChatPatches } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const current = 'A still life with three apples.';
+  const patches = [{ find: 'orange', replace: 'lemon' }];
+  const result = applyChatPatches(current, patches);
+  assertEqual(result.merged, current, 'merged unchanged');
+  assertEqual(result.noOp.length, 1, '1 no-op');
+  assertEqual(result.noOp[0].reason, 'find_not_found', 'reason = find_not_found');
+});
+
+test('SPEC §23: applyChatPatches rejects oversized find/replace', () => {
+  const { applyChatPatches } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const current = 'A still life with three apples.';
+  const bigFind = 'x'.repeat(501);
+  const bigReplace = 'y'.repeat(5001);
+  const patches = [
+    { find: bigFind, replace: 'ok' },
+    { find: 'apples', replace: bigReplace }
+  ];
+  const result = applyChatPatches(current, patches);
+  assertEqual(result.merged, current, 'merged unchanged');
+  assertEqual(result.rejected.length, 2, 'both rejected');
+});
+
+test('SPEC §23: applyChatPatches rejects empty find', () => {
+  const { applyChatPatches } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const current = 'A still life with three apples.';
+  const patches = [{ find: '', replace: 'X' }];
+  const result = applyChatPatches(current, patches);
+  assertEqual(result.rejected.length, 1, 'rejected');
+  assertEqual(result.rejected[0].reason, 'empty_replace', 'reason = empty_replace');
+});
+
+test('SPEC §23: extractChatPatch rejects non-string fields', () => {
+  const { extractChatPatch } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(extractChatPatch({ find: 123, replace: 'x' }), null, 'non-string find');
+  assertEqual(extractChatPatch({ find: 'x', replace: 123 }), null, 'non-string replace');
+  assertEqual(extractChatPatch({ find: '', replace: 'x' }), null, 'empty find');
+  assertEqual(extractChatPatch(null), null, 'null input');
+  assertEqual(extractChatPatch('not an object'), null, 'string input');
+  const ok = extractChatPatch({ find: 'red', replace: 'crimson' });
+  assertTrue(ok !== null, 'valid patch accepted');
+  assertEqual(ok.find, 'red', 'find field');
+  assertEqual(ok.replace, 'crimson', 'replace field');
+  // all_occurrences absent → undefined
+  assertEqual(ok.all_occurrences, undefined, 'all_occurrences absent');
+  const okAll = extractChatPatch({ find: 'red', replace: 'crimson', all_occurrences: true });
+  assertEqual(okAll.all_occurrences, true, 'all_occurrences=true preserved');
+});
+
+test('SPEC §23: extractChatAnnotation trims + validates', () => {
+  const { extractChatAnnotation } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(extractChatAnnotation({ field: 123, note: 'x' }), null, 'non-string field');
+  assertEqual(extractChatAnnotation({ field: 'x', note: 123 }), null, 'non-string note');
+  assertEqual(extractChatAnnotation({ field: '   ', note: 'x' }), null, 'whitespace field');
+  assertEqual(extractChatAnnotation({ field: 'x', note: '' }), null, 'empty note');
+  const ok = extractChatAnnotation({ field: '  palette  ', note: '  try warmer hues  ' });
+  assertEqual(ok.field, 'palette', 'field trimmed');
+  assertEqual(ok.note, 'try warmer hues', 'note trimmed');
+  // Oversized bounds
+  assertEqual(extractChatAnnotation({ field: 'x'.repeat(65), note: 'ok' }), null, 'field too long');
+  assertEqual(extractChatAnnotation({ field: 'x', note: 'y'.repeat(281) }), null, 'note too long');
+});
+
+test('SPEC §23: countOccurrences counts non-overlapping occurrences', () => {
+  const { countOccurrences } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(countOccurrences('aaa', 'aa'), 1, 'non-overlapping');
+  assertEqual(countOccurrences('aaaa', 'aa'), 2, 'two non-overlapping');
+  assertEqual(countOccurrences('hello world', 'o'), 2, 'two o chars');
+  assertEqual(countOccurrences('hello world', 'z'), 0, 'zero matches');
+  assertEqual(countOccurrences('hello', ''), 0, 'empty needle → 0');
+});
+
+test('SPEC §23: chat route persists patches + annotations on assistant message (HTTP integration)', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    const port = server.address().port;
+    // Inject an assistant message with patches + annotations directly
+    // (bypassing the LLM path). This simulates the model having
+    // returned the new envelope shape.
+    const sessions = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), 'utf8'));
+    const sess = sessions.find((s) => s.id === sessionId);
+    sess.messages.push({
+      id: 'msg_spec23_patches',
+      role: 'assistant',
+      content: 'I warmed the palette and shortened the subject line.',
+      suggested_prompt: 'A crimson apple on an oak table under warm daylight with soft chiaroscuro lighting.',
+      patches: [
+        { find: 'red', replace: 'crimson', all_occurrences: false },
+        { find: 'wooden', replace: 'oak' }
+      ],
+      annotations: [
+        { field: 'palette', note: 'Consider warmer pigments like cadmium-coral or vermillion for the focal area.' }
+      ],
+      applied_patches: [
+        { patch: { find: 'red', replace: 'crimson' }, position: 2 },
+        { patch: { find: 'wooden', replace: 'oak' }, position: 24 }
+      ],
+      no_op_patches: [],
+      rejected_patches: [],
+      timestamp: new Date().toISOString()
+    });
+    sess.current_prompt = 'A red apple on a wooden table under cool daylight with soft shadows.';
+    fs.writeFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), JSON.stringify(sessions, null, 2));
+
+    // Read the session back through the API.
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}`);
+    assertEqual(r.status, 200, 'session GET returns 200');
+    const json = await r.json();
+    const msg = json.data.messages.find((m) => m.id === 'msg_spec23_patches');
+    assertTrue(msg !== undefined, 'message persisted');
+    assertTrue(Array.isArray(msg.applied_patches) && msg.applied_patches.length === 2,
+      'applied_patches persisted (2 entries)');
+    assertTrue(Array.isArray(msg.annotations) && msg.annotations.length === 1,
+      'annotations persisted');
+    assertEqual(msg.annotations[0].field, 'palette', 'annotation field');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §23: restore chat_sessions.json to pre-slice state', () => {
+  restoreChatFile(spec23Snapshot);
+  assertTrue(true, 'chat file restored');
 });
 
 // ─── CR-4 — Auto-ingest + sync hardening (SPEC §20 / ADR 0025) ──────

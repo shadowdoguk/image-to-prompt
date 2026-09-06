@@ -1090,3 +1090,69 @@ Every chat revision is currently shown to the user as a `pre` block with `curren
 - [ ] `server.js`: `/apply/:messageId` accepts optional `partial_prompt` body; runs anchor-preservation on it; falls back to current behavior when absent.
 - [ ] `tests/run-all.js`: ≥10 tests covering (a) diff round-trip (all-accepted → byte-identical to `suggested_prompt`), (b) partial-merge against `current_prompt`, (c) empty partial prompt rejection, (d) oversized partial prompt rejection, (e) anchor-preservation runs on partial_prompt, (f) declined partial → declined_suggested_prompt + declined_missing_terms populated, (g) HTML/CSS wiring, (h) server endpoint accepts partial_prompt body.
 - [ ] `docs/CODE-REVIEW-29-inline-diff.md`: written with verdict `pass` or `pass+minor`.
+
+## §23 — Bounded AI autonomy — patch + annotate protocol (CR-A8 / ADR 0027)
+
+**Class:** Feature slice + ADR (0027). New mutators on the chat assistant message envelope; additive UI; respects anchor-preservation (ADR 0012).
+
+### Reframe
+
+The chat model is currently constrained to a single mutator: a full-prompt rewrite. This makes localised edits impossible to express, forces the model into "all-or-nothing" turns, and over-triggers the anchor-preservation decline path (ADR 0012). Adding two typed mutators — `patch` (deterministic text replace) and `annotate` (non-mutating hint) — gives the model the *shape* of its new freedom. The system prompt is rewritten within the existing persona to teach the model when to use each mutator. The validator still runs on the merged result, so the safety rail is preserved.
+
+### Scope
+
+- **Schema extension (additive).** Assistant message envelope grows from `{ reply, suggested_prompt }` to `{ reply, suggested_prompt, patches?, annotations? }`. Older clients ignore the new fields; new clients render them.
+- **Server-side merge pipeline.** When `patches[]` is present, the server merges patches against `current_prompt` in declared order, producing the candidate `suggested_prompt`. The merge result runs through `validatePromptPreservation` exactly as today.
+- **Patch rejection modes.** Patches with ambiguous `find` (multiple occurrences, `all_occurrences: false`) are rejected at parse time and stamped on the assistant message as `rejected_patches: [{ patch, reason }]`. The UI shows them so the user can see what the model *intended*.
+- **Annotation pass-through.** Annotations are stored on the assistant message verbatim; the UI renders them as dismissible info-pills above the patch list. They do not affect `suggested_prompt`.
+- **System prompt rewrite (additive).** `DEFAULT_CHAT_SYSTEM_PROMPT` gains one paragraph teaching the model when to use patches vs full rewrite vs annotation. The persona framing, anchor-preservation contract, RAG grounding, and JSON schema all remain.
+- **UI affordances.** Each patch renders as a chip with Accept/Reject; annotations render as info-pills with Dismiss. Apply button cycles through Apply all / Apply selected / Nothing to apply (re-uses SPEC §22 infrastructure).
+- **Audit trail.** Each assistant message gains `applied_patches`, `no_op_patches`, `rejected_patches` arrays for transparency.
+
+### Out of scope
+
+- **Multi-occurrence patch with semantic disambiguation.** A patch that targets `"red"` with `all_occurrences: false` in a prompt containing the word "red" three times is rejected. The model must lengthen `find` to disambiguate. This is correct behaviour; semantic disambiguation is out of scope.
+- **Patch dependency tracking.** The server applies patches in declared order without coordination. If two patches target overlapping text, the second operates on the result of the first — natural composition order. Patch-dependency graphs are out of scope.
+- **Annotation validation.** `annotations[].field` is free-form; the server does not enforce that it matches one of the 14 structured-prompt field names. The UI surfaces field names as-is.
+- **Per-patch decline granularity.** If the post-merge result fails anchor-preservation, the *entire* revision is still declined (the union of patches is the candidate). Per-patch decline is a future optimisation.
+- **Patch streaming.** Patches are emitted as part of the assistant message envelope; they do not stream independently. Future: streaming patches is a Slice I (Streaming responses) follow-up.
+
+### User stories
+
+- As a chat user, I want the model to make small, specific changes when my request is small and specific, so I don't have to reject whole rewrites just to keep one tweak.
+- As a chat user, I want to see what each mutator will change before I commit, so I can accept the lighting tweak and reject the subject rephrasing in the same turn.
+- As a chat user, I want the model to surface its uncertainty ("consider whether softer palette would read better") without forcing me to apply or reject, so I have a thinking partner, not a take-it-or-leave-it editor.
+
+### Implementation decisions
+
+- **Patch shape:** `{ find: string, replace: string, all_occurrences?: boolean }`. Default `all_occurrences: false`.
+- **Annotation shape:** `{ field: string, note: string }`. Both strings trimmed; max lengths enforced (`field` ≤ 64 chars, `note` ≤ 280 chars).
+- **Merge order:** declared in the array. The server does not re-order or coalesce patches.
+- **Patch tracking:** `applied_patches[]` (success), `no_op_patches[]` (find didn't match), `rejected_patches[]` (ambiguous). Each tracked entry includes the original patch object plus a `reason` for the no-op / rejected paths.
+- **Decline path:** same as SPEC §22 — `declined_suggested_prompt` + `declined_missing_terms` + declined-audit message. The UI doesn't need to distinguish whether the candidate came from `suggested_prompt` directly or from a patch merge; the validator measures the merged result.
+- **System prompt location:** `DEFAULT_CHAT_SYSTEM_PROMPT` is the single source of truth (already a code constant per ADR 0011a / CR-1). The new paragraph is appended to the existing "REFINEMENT RULES" section.
+- **UI diff re-use:** SPEC §22's `computeWordDiff` + `groupDiffIntoHunks` are reused to render the patch preview. Each patch's `find → replace` is rendered as its own mini-diff inside its chip, so the user sees the local context of the change.
+
+### Glossary
+
+- **Patch** — A typed mutator `{ find, replace, all_occurrences? }` emitted by the model. Applied by the server in declared order against `current_prompt`. Distinct from `suggested_prompt`, which is a wholesale rewrite.
+- **Annotation** — A non-mutating flag `{ field, note }` emitted by the model. Stored on the assistant message; rendered as an info-pill in the UI; does not affect `suggested_prompt`.
+- **Merge result** — The string produced by applying `patches[]` in order against `current_prompt`. This is the candidate that runs through anchor-preservation; if accepted, it becomes `suggested_prompt`.
+- **Rejection reason** — A short string on `no_op_patches[]` or `rejected_patches[]` entries. Possible values: `'find_not_found'`, `'ambiguous_match'`, `'oversized'`, `'empty_replace'`.
+
+### References
+
+- ADR 0027 — design rationale + rejected alternatives + consequences.
+- ARCH §28.A1–A5 (envelope extension, merge pipeline, system prompt diff, UI affordances, audit shape).
+- PRE-MORTEM §28 (top risks + pre-commitments + kill criteria).
+- docs/CODE-REVIEW-30-patch-protocol.md (verdict pass).
+- ADR 0012 (anchor-preservation contract — the safety rail this slice cooperates with).
+- SPEC §22 (inline-diff-on-Apply — the diff infrastructure this slice reuses).
+
+### DoD
+
+- [ ] `server.js`: `DEFAULT_CHAT_SYSTEM_PROMPT` gains the patch + annotate paragraph; chat route extracts and merges `patches[]`; tracks applied / no-op / rejected; merges against `current_prompt` to produce the validator candidate; records annotations on the assistant message.
+- [ ] `src/app.js`: `buildChatMessageNode` renders patch chips + annotation pills; SPEC §22 `reassembleFromHunks` is re-used; new state slices for chip toggles.
+- [ ] `src/styles.css`: `.chat-patches`, `.chat-patch-chip`, `.chat-annotations`, `.chat-annotation-pill`.
+- [ ] `tests/run-all.js`: ≥15 tests covering (a) merge round-trip (patches → expected text), (b) ambiguous-match rejection, (c) no-op tracking, (d) annotation pass-through, (e) merged result runs through validator, (f) declined patch merge → declined_suggested_prompt + audit, (g) system prompt paragraph presence, (h) schema additive (older clients ignore new fields), (i) UI affordance wiring.
+- [ ] `docs/CODE-REVIEW-30-patch-protocol.md`: verdict `pass` or `pass+minor`.

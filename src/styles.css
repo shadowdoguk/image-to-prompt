@@ -3306,3 +3306,154 @@ body {
   gap: 0.5rem;
   justify-content: flex-end;
 }
+
+/* SPEC §23 / ADR 0027 — patch + annotate protocol. */
+
+/* Annotations render as passive info-pills above the patch list. */
+.chat-annotations {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.chat-annotation-pill {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: var(--radius);
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.chat-annotation-pill__field {
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.15);
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+}
+
+.chat-annotation-pill__note {
+  flex: 1;
+  font-style: italic;
+}
+
+.chat-annotation-pill__dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.95rem;
+  padding: 0 0.2rem;
+  line-height: 1;
+}
+
+.chat-annotation-pill__dismiss:hover {
+  color: var(--text-primary);
+}
+
+.chat-annotation-pill--dismissed {
+  display: none;
+}
+
+/* Patches render as chips with per-patch Accept/Reject. */
+.chat-patches {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.chat-patch-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.chat-patch-chip--rejected {
+  opacity: 0.45;
+  background: var(--bg-primary);
+}
+
+.chat-patch-chip--rejected .chat-patch-chip__diff {
+  text-decoration: line-through;
+}
+
+.chat-patch-chip__checkbox {
+  flex-shrink: 0;
+  margin-top: 0.15rem;
+  cursor: pointer;
+}
+
+.chat-patch-chip__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.chat-patch-chip__label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.chat-patch-chip__diff {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.82rem;
+}
+
+.chat-patch-chip__diff .chat-patch-chip__find {
+  background: rgba(239, 68, 68, 0.18);
+  color: #fca5a5;
+  padding: 0 3px;
+  border-radius: 2px;
+  text-decoration: line-through;
+}
+
+.chat-patch-chip__diff .chat-patch-chip__replace {
+  background: rgba(16, 185, 129, 0.18);
+  color: #6ee7b7;
+  padding: 0 3px;
+  border-radius: 2px;
+}
+
+.chat-patch-chip__status {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.chat-patch-chip--rejected-by-server {
+  border-style: dashed;
+  border-color: var(--warning);
+}
+
+.chat-patch-chip--rejected-by-server .chat-patch-chip__status {
+  color: var(--warning);
+}
+
+.chat-patch-chip--no-op {
+  border-style: dashed;
+  border-color: var(--text-muted);
+}
+
+.chat-patch-chip--no-op .chat-patch-chip__status {
+  color: var(--text-muted);
+}
