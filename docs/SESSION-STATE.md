@@ -1769,3 +1769,43 @@ User approved implementation of Slice I with full autonomy. Slice I removes the 
 ### Mood / risk flag
 
 > Slice I is the polish slice — the lowest-risk of the three. It doesn't change any underlying contract; it adds a new endpoint and a new client-side flow that fall back gracefully to the existing UX. The two real risks are (1) memory growth on long streams (mitigated by immediate per-chunk writes; no buffering on the server) and (2) client disconnects mid-stream (mitigated by `req.on('close')` abort handling + partial-reply persistence). **Net test surface +14 slots, all green.** Commit chain: `<Session #14 / Slice III> → <CR-31 / Session #15>`.
+
+## Session #16 — 2026-09-06 (Chat fluid-two-way G5 polish audit)
+
+**Workflow:** existing (continue mode) — G5 polish audit per App Build methodology. Closes the chat-fluid-two-way series (Slices II + III + I from Sessions #13–#15). No code changes; documentation only.
+
+### What was asked
+
+The chat fluid two-way series was implemented in three slices (Slices II / III / I) per the recommended order from Session #13 investigation. G5 polish audit is the final gate before "ship it" per the App Build methodology.
+
+### What landed
+
+1. **`docs/POLISH-AUDIT-chat-fluid.md`** — Full 7-section polish audit (Accessibility, Visual, Prose, Copy, Performance, Discipline, Dependency). Verdict: **PASS — ship-ready. 9 non-blocking findings; 0 blocking.**
+
+### Verification
+
+- `node tests/run-all.js` → **553 passed, 0 failed** (preserved from Session #15).
+- `node scripts/session-init.js` → 10/10 V-check (preserved).
+
+### Architectural notes
+
+- **The three slices compose cleanly.** Each is orthogonal; together they deliver the headline ask ("fluid two-way chat + AI more freedom to edit") without compounding risk:
+  - **Slice II (Inline diff on Apply)** — Trust-building. Lowest-risk. Pure additive UI on the existing Apply path.
+  - **Slice III (Patch + annotate protocol / ADR 0027)** — Headline ask. Schema-additive (`{ reply, suggested_prompt, patches?, annotations? }`); declined-path unchanged.
+  - **Slice I (Streaming responses)** — Polish slice. New endpoint; existing POST route unchanged.
+- **The anchor-preservation safety rail is preserved across all three.** SPEC §22 runs the validator on partial-prompts; SPEC §23 runs it on the merged patch result; SPEC §24 runs it on the accumulated reply. The streamed text is for UX only; the persisted message is the validator's verdict.
+- **No new dependencies.** All three slices use built-in Node + browser APIs. `package.json` is unchanged.
+
+### Mood / risk flag
+
+> The chat fluid-two-way implementation is complete and ship-ready. The polish audit found 9 non-blocking findings (mostly minor accessibility/UX polish items) and 0 blocking. The test surface grew from 510 → 553 (+43 net new tests across the three slices). The code surface grew ~1100 LOC server + ~700 LOC frontend + ~270 LOC CSS + ~250 LOC docs/SPEC/ARCH/PRE-MORTEM. Commit chain: `eda9fd9 → 2c9adaa → 35072b3 → <Session #16>`.
+
+### Out of scope — parked (potential follow-up slices)
+
+- **Per-patch decline granularity.** SPEC §23 declines the whole merge if any anchor is lost. Per-patch credit would be a future optimisation.
+- **True token-by-token streaming.** SPEC §24 emits ONE synthetic delta when the full reply arrives. Future: integrate with the upstream provider's SSE / chunked response.
+- **Patch streaming.** Patches are part of the message envelope; they don't stream incrementally. Future: incremental patch protocol.
+- **Reconnect on disconnect.** SSE drops mid-stream are not auto-recovered. Future: client-side retry.
+- **Hunk-level `aria-label`.** SPEC §22 diff hunks use a group-level `aria-label` rather than per-hunk. Future polish.
+- **Annotation dismissal persistence.** SPEC §23 dismissal is client-side only. Future: localStorage.
+- **Pre-existing uncommitted changes** (`.env.example`, `data/model_config.json`, `src/index.html` provider labels) — out of scope for chat-fluid; cleanup slice (Session #12 precedent) handles parked drift separately.
