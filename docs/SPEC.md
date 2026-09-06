@@ -1028,3 +1028,65 @@ Replace the substring regex `ALLOWED_CHAT_ATTACHMENT_VISION_MODELS` (was at `ser
 - [x] `tests/run-all.js`: 5 static-parse regression tests added.
 - [x] `docs/adr/0026-…`: ADR written.
 - [x] Code-review verdict `pass`.
+
+## §22 — Inline diff on Apply (Chat fluid-iteration Slice 1)
+
+**Class:** Feature slice per App Build methodology. Companion to §19/§20 chat redesign; not wide enough to warrant an ADR (single-axis additive UI; no schema or protocol change).
+
+### Reframe
+
+Every chat revision is currently shown to the user as a `pre` block with `current_prompt` text. The user must mentally diff the proposal against the working prompt before clicking Apply, which is a real friction point. Adding an inline unified word-diff with per-hunk accept/reject turns "Apply" from a trust-leap into a transparent, granular operation. ADR 0012 anchor-preservation still runs server-side on the post-merge result, so per-hunk selections can never produce a prompt the validator rejects.
+
+### Scope
+
+- **Frontend only.** No new server endpoints. The diff is computed in the browser from the existing `m.suggested_prompt` and `session.current_prompt` fields; selection state is local to the message node.
+- `suggested_prompt` already arrives as a complete string from the server. We render a unified word-diff against `current_prompt`; the original `pre` block remains as a fallback when JS is disabled or for users who prefer raw view.
+- Per-hunk checkboxes let the user accept or reject each change individually.
+- The Apply button cycles through three states depending on selection:
+  1. **Apply all** (default; no hunks toggled) — current behavior (apply entire `suggested_prompt`).
+  2. **Apply selected** (some hunks accepted, others rejected) — server-side merge of selected hunks against `current_prompt` to produce a partial `current_prompt`.
+  3. **No changes** (all hunks rejected) — disabled, with a "All hunks rejected — nothing to apply" hint.
+- Anchor-preservation runs server-side on the post-merge partial prompt. If the partial prompt fails the validator, the apply is rejected with the same `declined_suggested_prompt` fallback as today; the user can retry with "Try as rewrite".
+
+### Out of scope
+
+- Line-level diff (we use word-level; line-level is too coarse for prose).
+- Side-by-side view (unified inline is what the user expects from a chat; side-by-side eats vertical space).
+- Diff persistence across reloads (selection state is per-message ephemeral).
+- New endpoints. Reuses `POST /api/chat/sessions/:id/apply/:messageId` with an optional `partial_prompt` body field.
+
+### User stories
+
+- As a chat user with a 14-field structured prompt, I want to see exactly which words the AI wants to change before I click Apply, so I can decide whether each change is an improvement.
+- As a chat user, I want to apply only the changes I like and reject the rest, so the AI's ideas become suggestions instead of take-it-or-leave-it edits.
+- As a chat user, I want the diff to remain readable when the prompt is long, so I can scan changes without losing context.
+
+### Implementation decisions
+
+- Diff algorithm: hand-rolled word-level LCS (Longest Common Subsequence) over the two strings. Word-level granularity because prompt prose uses commas, periods, and parentheses that would create noise at character level. No external dependency; ~80 LOC in `src/app.js`.
+- Three diff classes: `chat-diff__added` (green), `chat-diff__removed` (red, strikethrough), `chat-diff__context` (neutral).
+- Hunk grouping: contiguous runs of the same class collapse into one hunk. A hunk is one or more word tokens. Each hunk has a checkbox; toggling a checkbox changes the hunk's `data-accepted` attribute and re-computes the proposed partial prompt.
+- The proposed partial prompt is computed client-side: start with `current_prompt`, replace removed words with added words in each accepted hunk. This must be byte-identical to `m.suggested_prompt` when all hunks are accepted (round-trip property verified by a test).
+- When the user clicks "Apply selected", send `{ partial_prompt: <merged string> }` in the apply request body. The server's `/apply/:messageId` endpoint accepts `partial_prompt` as an optional override of `suggested_prompt`; if present, the server runs anchor-preservation on it instead of on `m.suggested_prompt`.
+- When all hunks are accepted, the client sends `{}` (no body) to keep the existing fast path.
+- Visual: diff goes directly above the existing `chat-message__preview` block; the preview block is hidden when a diff is rendered (avoid duplicate text).
+
+### Glossary
+
+- **Hunk** — a contiguous run of added/removed/context words in the unified diff. A single "Edit " addition + "Edit " removal pair is one hunk.
+- **Partial apply** — `POST /api/chat/sessions/:id/apply/:messageId` with body `{ partial_prompt }`. Distinct from full apply (no body) and wholesale rewrite (`PATCH /current_prompt`).
+- **Diff view** — the inline UI replacing `chat-message__preview` for assistant messages with a `suggested_prompt`. Shows word-level additions/removals with per-hunk accept/reject checkboxes.
+
+### References
+
+- ARCH §27.A1–A4 (diff render path, partial-merge algorithm, hunk grouping, server-side validation re-use)
+- PRE-MORTEM §27 (top risks + pre-commitments + kill criteria)
+- docs/CODE-REVIEW-29-inline-diff.md (verdict pass)
+
+### DoD
+
+- [ ] `src/app.js`: `renderChatMessageDiff` helper + hunk grouping + partial-merge helper + DOM mutations in `buildChatMessageNode`.
+- [ ] `src/styles.css`: `.chat-diff`, `.chat-diff__added`, `.chat-diff__removed`, `.chat-diff__context`, `.chat-diff__hunk`, `.chat-diff__hunk-checkbox` styles.
+- [ ] `server.js`: `/apply/:messageId` accepts optional `partial_prompt` body; runs anchor-preservation on it; falls back to current behavior when absent.
+- [ ] `tests/run-all.js`: ≥10 tests covering (a) diff round-trip (all-accepted → byte-identical to `suggested_prompt`), (b) partial-merge against `current_prompt`, (c) empty partial prompt rejection, (d) oversized partial prompt rejection, (e) anchor-preservation runs on partial_prompt, (f) declined partial → declined_suggested_prompt + declined_missing_terms populated, (g) HTML/CSS wiring, (h) server endpoint accepts partial_prompt body.
+- [ ] `docs/CODE-REVIEW-29-inline-diff.md`: written with verdict `pass` or `pass+minor`.

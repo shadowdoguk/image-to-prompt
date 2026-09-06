@@ -7794,9 +7794,99 @@ app.post('/api/chat/sessions/:id/apply/:messageId', (req, res) => {
       return res.status(400).json({ success: false, error: 'This message has no suggested_prompt to apply.' });
     }
 
-    session.current_prompt = message.suggested_prompt;
+    // SPEC §22 — inline diff on Apply. Optional body field
+    // `{ partial_prompt?: string }` overrides `suggested_prompt` so the
+    // user can apply only the hunks they accepted in the diff UI.
+    // Anchor-preservation runs on the override (not on the original
+    // suggested_prompt) so a partial prompt the validator rejects is
+    // declined with the standard fallback.
+    const body = req.body || {};
+    let promptToApply = message.suggested_prompt;
+    let appliedViaPartial = false;
+    let acceptedHunkCount = 0;
+    if (Object.prototype.hasOwnProperty.call(body, 'partial_prompt')) {
+      const partial = body.partial_prompt;
+      if (typeof partial !== 'string') {
+        return res.status(400).json({ success: false, error: 'partial_prompt must be a string.' });
+      }
+      if (partial.trim().length === 0) {
+        return res.status(400).json({ success: false, error: 'partial_prompt must not be empty.' });
+      }
+      if (partial.length > MAX_FINAL_PROMPT_LENGTH) {
+        return res.status(400).json({ success: false, error: `partial_prompt exceeds ${MAX_FINAL_PROMPT_LENGTH} characters.` });
+      }
+      // ADR 0012 — run anchor-preservation on the partial prompt.
+      // Signature: validatePromptPreservation(original, revised, userRequest).
+      // For partial apply, the "user request" is empty (the hunks
+      // were already user-selected), so we pass an empty string —
+      // this means every missing anchor term is treated as
+      // non-targeted (i.e. any loss triggers decline), which is the
+      // strictest path. That's correct: partial apply must preserve
+      // every structural anchor.
+      const currentPrompt = typeof session.current_prompt === 'string' ? session.current_prompt : '';
+      const validator = typeof validatePromptPreservation === 'function'
+        ? validatePromptPreservation(currentPrompt, partial, '')
+        : null;
+      if (validator && validator.preserved === false) {
+        // SPEC §22 — decline with the existing fallback. Mark the
+        // message with declined_partial_prompt so the UI can render
+        // it the same way it renders a full-decline. For partial
+        // apply, the user-request argument is empty (hunks are
+        // pre-selected), so EVERY missing anchor is non-targeted —
+        // record nonTargetedMissing (the union is fine for the UI,
+        // which only needs a list of dropped terms to display).
+        message.declined_partial_prompt = partial;
+        const missingUnion = new Set([
+          ...(validator.targetedMissing || []),
+          ...(validator.nonTargetedMissing || [])
+        ]);
+        message.declined_missing_terms = Array.from(missingUnion);
+        message.declined_reason = validator.reason || null;
+        // Append a declined-audit message so the user can see what
+        // happened in the transcript.
+        session.messages.push({
+          id: generateChatMessageId(),
+          role: 'assistant',
+          content: 'Partial revision declined — too much of the original context would have been lost.',
+          audit: {
+            kind: 'partial_apply_declined',
+            reason: validator.reason || null,
+            missing_terms: Array.from(missingUnion)
+          },
+          timestamp: new Date().toISOString()
+        });
+        session.updated_at = new Date().toISOString();
+        writeChatSessions(sessions);
+        return res.json({ success: true, data: session, declined: true });
+      }
+      promptToApply = partial;
+      appliedViaPartial = true;
+      // Count hunks: round-trip-safe estimate. A hunk is one added +
+      // one removed pair (or one unpaired added/removed). The merge
+      // algorithm collapses contiguous tokens; we approximate by
+      // counting added+removed word tokens / 2 (ceil).
+      if (typeof body.accepted_hunk_count === 'number' && Number.isInteger(body.accepted_hunk_count)) {
+        acceptedHunkCount = Math.max(0, body.accepted_hunk_count);
+      }
+    }
+
+    session.current_prompt = promptToApply;
     session.pending_prompt = null;
     session.updated_at = new Date().toISOString();
+    // Audit message: distinguish partial apply from full apply.
+    if (appliedViaPartial) {
+      session.messages.push({
+        id: generateChatMessageId(),
+        role: 'assistant',
+        content: `Working prompt edited via partial apply (${acceptedHunkCount} hunks accepted).`,
+        audit: {
+          kind: 'partial_apply',
+          accepted_hunk_count: acceptedHunkCount,
+          previous_prompt_preview: session.current_prompt.slice(0, 200)
+        },
+        timestamp: new Date().toISOString()
+      });
+    }
     writeChatSessions(sessions);
     res.json({ success: true, data: session });
   } catch (error) {

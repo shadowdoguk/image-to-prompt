@@ -756,3 +756,87 @@ ANIMA_CHAT_CONSTRAINTS_BLOCK        ← if Anima preset
 - User on a model not in the Set and not in the catalog (corrupted `data/model_config.json`) → chat still works, attachment demoted to text-only. Logged as a `WARN` (existing pattern).
 - Set and `ALLOWED_LLM_MODELS_BY_PROVIDER` diverge → regression tests fail at `node tests/run-all.js`. Smoke flow blocked.
 - Set literal accidentally emptied → all attachments demoted to text-only. Caught by the "Set is defined" regression test.
+
+---
+
+## §27 — Inline-diff-on-Apply (CR-A7, SPEC §22)
+
+### A1 — Render path
+
+Assistant messages with a non-null `suggested_prompt` are rendered through a new `renderChatMessageDiff(messageNode, currentPrompt, suggestedPrompt)` helper in `src/app.js`. The helper:
+
+1. Tokenises both strings into word arrays using `/(\s+|[.,;:()\[\]"'`])/` as the boundary regex (whitespace and punctuation are split-separators).
+2. Runs an LCS-based word-diff (`computeWordDiff(a, b)`) producing a flat array of `{ type: 'context' | 'added' | 'removed', text }` tokens.
+3. Groups contiguous tokens of the same type into **hunks**. A hunk is one or more tokens; each has a checkbox. Default state: `accepted: true` for added, `accepted: false` for removed (so the default "Apply all" produces exactly `suggested_prompt`).
+4. Builds the DOM:
+   ```
+   <div class="chat-diff">
+     <span class="chat-diff__hunk chat-diff__hunk--context" data-hunk-id="0">…context text…</span>
+     <span class="chat-diff__hunk chat-diff__hunk--removed" data-hunk-id="1" data-accepted="false">
+       <input type="checkbox" class="chat-diff__hunk-checkbox" />
+       <span class="chat-diff__text">…removed words…</span>
+     </span>
+     <span class="chat-diff__hunk chat-diff__hunk--added" data-hunk-id="2" data-accepted="true">
+       <input type="checkbox" class="chat-diff__hunk-checkbox" />
+       <span class="chat-diff__text">…added words…</span>
+     </span>
+   </div>
+   ```
+5. Replaces the existing `chat-message__preview` `pre` element when the diff is non-empty (i.e., when the strings differ).
+
+### A2 — Partial-merge algorithm
+
+`computePartialPrompt(currentPrompt, hunks)`:
+
+1. Start with an empty result string.
+2. Iterate over the flat token array (preserving order).
+3. For each token:
+   - `context` → append `text` to result.
+   - `added` with `accepted: true` → append `text` to result.
+   - `removed` with `accepted: true` → append `text` to result (kept = not deleted).
+   - `added` with `accepted: false` → skip.
+   - `removed` with `accepted: false` → skip.
+4. Return result.
+
+**Round-trip property:** when every hunk's `accepted` matches its default state (added → true, removed → false, context → true), the result is byte-identical to `suggested_prompt`. Verified by a test that asserts `computePartialPrompt(currentPrompt, defaultHunks) === suggestedPrompt`.
+
+**Identity property:** when all hunks are toggled to their non-default state (added → false, removed → true), the result is byte-identical to `currentPrompt`. Verified by a test.
+
+### A3 — Hunk grouping + UX
+
+A hunk spans one or more consecutive tokens. A context token surrounded by removed/added pairs stays as its own hunk (it cannot be toggled). The grouping algorithm:
+
+```js
+const hunks = [];
+let current = [];
+for (const token of tokens) {
+  if (current.length === 0 || current[0].type === token.type) {
+    current.push(token);
+  } else {
+    hunks.push(current);
+    current = [token];
+  }
+}
+if (current.length > 0) hunks.push(current);
+```
+
+Context hunks are not user-toggleable (they have no checkbox). Added hunks default to `accepted: true`. Removed hunks default to `accepted: false`. The "Apply all" affordance corresponds to "all added accepted, all removed rejected" — the default state.
+
+The Apply button label cycles through three states based on `acceptedHunks`:
+
+| Accepted hunks count | Button label | Action |
+|---|---|---|
+| All added accepted, all removed rejected (default) | "Apply all" | Apply full `suggested_prompt` (no body) |
+| Some but not all in default state | "Apply selected" | Apply `partial_prompt` body |
+| All added rejected OR all context-only | disabled, "Nothing to apply" | No-op |
+
+### A4 — Server-side reuse
+
+`POST /api/chat/sessions/:id/apply/:messageId` gains an optional `partial_prompt` field. When present:
+
+1. Validate (non-empty string, ≤ `MAX_FINAL_PROMPT_LENGTH`).
+2. Run `validatePromptPreservation(currentPrompt, partialPrompt, …)` instead of `(currentPrompt, suggestedPrompt, …)`.
+3. On accept: set `current_prompt = partialPrompt`, clear `pending_prompt`, append an audit message `{ role: 'assistant', content: 'Working prompt edited via partial apply (N hunks).', audit: { kind: 'partial_apply', hunkCount } }`.
+4. On decline: set `declined_suggested_prompt = partialPrompt` (not `suggestedPrompt`), persist `declined_missing_terms`, append a declined-audit message. The "Try as rewrite" affordance still works because it re-sends the user's original text framed as wholesale.
+
+When `partial_prompt` is absent, behaviour is unchanged (full apply of `suggested_prompt`).

@@ -2399,6 +2399,89 @@ body {
   margin-top: 0.35rem;
 }
 
+/* SPEC §22 — Inline diff on Apply. Word-level additions in green,
+   removed words in red strike-through. Hunks are checkable; the
+   checkbox sits inline at the start of each changeable hunk. */
+.chat-diff {
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius);
+  padding: 0.5rem 0.7rem;
+  margin-top: 0.25rem;
+  line-height: 1.5;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-diff__hunk {
+  display: inline;
+  white-space: pre-wrap;
+}
+
+.chat-diff__hunk--context {
+  color: var(--text-primary);
+}
+
+.chat-diff__hunk--added {
+  background: rgba(16, 185, 129, 0.18);
+  color: #6ee7b7;
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.chat-diff__hunk--added[data-accepted="false"] {
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0.55;
+  text-decoration: line-through;
+  text-decoration-color: rgba(110, 231, 183, 0.5);
+}
+
+.chat-diff__hunk--removed {
+  background: rgba(239, 68, 68, 0.16);
+  color: #fca5a5;
+  border-radius: 3px;
+  padding: 0 2px;
+  text-decoration: line-through;
+  text-decoration-color: rgba(252, 165, 165, 0.55);
+}
+
+.chat-diff__hunk--removed[data-accepted="true"] {
+  background: transparent;
+  color: var(--text-primary);
+  opacity: 0.85;
+  text-decoration: none;
+}
+
+.chat-diff__hunk-checkbox {
+  margin-right: 4px;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.chat-diff__text {
+  /* Inline span; inherits colour from .chat-diff__hunk--{type}. */
+}
+
+.chat-diff__empty {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.chat-message__apply-state {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-style: italic;
+  align-self: center;
+  margin-left: 0.25rem;
+}
+
 /* Issue #1 — declined-revision preview. Rendered when the validator
    (ADR 0012) declined the model's revision after retries: the user
    sees what would have been applied (greyed out) plus a list of the

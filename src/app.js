@@ -4926,6 +4926,251 @@
     dom.chatMessages.scrollTop = dom.chatMessages.scrollHeight;
   };
 
+  // ─── §22 — Inline-diff-on-Apply (CR-A7 / SPEC §22) ──────────────
+
+  /**
+   * Tokenise a prompt string into word tokens. We split on whitespace
+   * AND on punctuation so "Edit," and "Edit" produce identical
+   * tokens; punctuation carries through as its own tokens so the
+   * diff renderer can preserve them faithfully in the merged output.
+   *
+   * Returns an array of `{ text, sep }` where `sep` is the
+   * whitespace/punctuation that follows the word. The merge
+   * algorithm uses `sep` to reassemble the prompt.
+   */
+  const tokeniseForDiff = (text) => {
+    if (typeof text !== 'string' || text.length === 0) return [];
+    // Match: one or more non-whitespace/punct chars (word), then the
+    // trailing whitespace/punct chars (separator). Order matters —
+    // the trailing separator is captured separately so the diff can
+    // keep punctuation with the word it attaches to.
+    const out = [];
+    const re = /([^\s.,;:()\[\]"`'!?\\\/]+)([\s.,;:()\[\]"`'!?\\\/]*)/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      out.push({ text: m[1], sep: m[2] || '' });
+      if (m.index === text.length) break;
+    }
+    return out;
+  };
+
+  /**
+   * Word-level LCS diff between two strings. Returns a flat array of
+   * `{ type: 'context'|'added'|'removed', text, sep }` tokens.
+   *
+   * Algorithm: classic LCS dynamic programming. O(N*M) time, fine
+   * for prompt-sized inputs (≤ 5000 chars). Returns the merged diff
+   * in the order: context-removed pairs interleaved.
+   */
+  const computeWordDiff = (a, b) => {
+    const at = tokeniseForDiff(a);
+    const bt = tokeniseForDiff(b);
+    const n = at.length;
+    const m = bt.length;
+    if (n === 0 && m === 0) return [];
+    if (n === 0) return bt.map((t) => ({ type: 'added', text: t.text, sep: t.sep }));
+    if (m === 0) return at.map((t) => ({ type: 'removed', text: t.text, sep: t.sep }));
+
+    // Build LCS table. lcs[i][j] = LCS length of at[0..i] vs bt[0..j].
+    const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+    for (let i = 1; i <= n; i++) {
+      for (let j = 1; j <= m; j++) {
+        if (at[i - 1].text === bt[j - 1].text) {
+          lcs[i][j] = lcs[i - 1][j - 1] + 1;
+        } else {
+          lcs[i][j] = Math.max(lcs[i - 1][j], lcs[i][j - 1]);
+        }
+      }
+    }
+
+    // Walk the table backwards to produce the diff.
+    const out = [];
+    let i = n;
+    let j = m;
+    while (i > 0 && j > 0) {
+      if (at[i - 1].text === bt[j - 1].text) {
+        out.push({ type: 'context', text: at[i - 1].text, sep: at[i - 1].sep });
+        i--;
+        j--;
+      } else if (lcs[i - 1][j] >= lcs[i][j - 1]) {
+        out.push({ type: 'removed', text: at[i - 1].text, sep: at[i - 1].sep });
+        i--;
+      } else {
+        out.push({ type: 'added', text: bt[j - 1].text, sep: bt[j - 1].sep });
+        j--;
+      }
+    }
+    while (i > 0) {
+      out.push({ type: 'removed', text: at[i - 1].text, sep: at[i - 1].sep });
+      i--;
+    }
+    while (j > 0) {
+      out.push({ type: 'added', text: bt[j - 1].text, sep: bt[j - 1].sep });
+      j--;
+    }
+    out.reverse();
+    return out;
+  };
+
+  /**
+   * Group contiguous tokens of the same type into hunks. Context
+   * tokens each become their own hunk (no checkbox). Added/removed
+   * tokens collapse into a single hunk if they're contiguous.
+   *
+   * Default acceptance state: `added → accepted: true`, `removed →
+   * accepted: false`. With these defaults, `reassembleFromHunks`
+   * produces the same string as `b` (round-trip property).
+   */
+  const groupDiffIntoHunks = (tokens) => {
+    const hunks = [];
+    let buffer = null;
+    for (const tok of tokens) {
+      if (tok.type === 'context') {
+        // Flush any open added/removed buffer first.
+        if (buffer) {
+          hunks.push(buffer);
+          buffer = null;
+        }
+        hunks.push({
+          type: 'context',
+          tokens: [tok],
+          // Context hunks are immutable; always included.
+          immutable: true
+        });
+      } else {
+        if (buffer && buffer.type === tok.type) {
+          buffer.tokens.push(tok);
+        } else {
+          if (buffer) hunks.push(buffer);
+          buffer = {
+            type: tok.type,
+            tokens: [tok],
+            accepted: tok.type === 'added'
+          };
+        }
+      }
+    }
+    if (buffer) hunks.push(buffer);
+    return hunks;
+  };
+
+  /**
+   * Reassemble a string from a hunk array, honouring each hunk's
+   * `accepted` flag. Context hunks are always included. Added hunks
+   * are included iff `accepted: true`. Removed hunks are included
+   * iff `accepted: true` (i.e. user wants to KEEP the original
+   * word — toggling it on prevents removal).
+   *
+   * When all hunks are in default state (added accepted, removed
+   * rejected, context always in), the output is byte-identical to
+   * `b`. When all hunks are toggled to their non-default state
+   * (added rejected, removed accepted), the output is byte-identical
+   * to `a`. Both properties are covered by unit tests.
+   */
+  const reassembleFromHunks = (hunks) => {
+    let out = '';
+    for (const hunk of hunks) {
+      if (hunk.type === 'context') {
+        for (const t of hunk.tokens) out += t.text + t.sep;
+        continue;
+      }
+      if (hunk.accepted) {
+        for (const t of hunk.tokens) out += t.text + t.sep;
+      }
+    }
+    return out;
+  };
+
+  /**
+   * Count accepted hunks of `added` or `removed` type. Used for the
+   * audit message and to determine which apply-mode the user picked.
+   */
+  const countAcceptedHunks = (hunks) => {
+    let n = 0;
+    for (const hunk of hunks) {
+      if (hunk.type === 'context') continue;
+      if (hunk.accepted) n++;
+    }
+    return n;
+  };
+
+  const countTotalChangeHunks = (hunks) => {
+    let n = 0;
+    for (const hunk of hunks) {
+      if (hunk.type !== 'context') n++;
+    }
+    return n;
+  };
+
+  /**
+   * Render the inline diff into a DOM element. The DOM contains one
+   * `<span class="chat-diff__hunk">` per hunk; changeable hunks have
+   * a checkbox that toggles `data-accepted` on the hunk element.
+   *
+   * Returns the root element so `buildChatMessageNode` can drop it
+   * into the message node. The caller is responsible for wiring the
+   * Apply button's click handler to the hunks array it stored on
+   * `node._hunks`.
+   */
+  const renderChatDiff = (currentPrompt, suggestedPrompt, options = {}) => {
+    const tokens = computeWordDiff(currentPrompt, suggestedPrompt);
+    const hunks = groupDiffIntoHunks(tokens);
+
+    const root = document.createElement('div');
+    root.className = 'chat-diff';
+    root.setAttribute('role', 'group');
+    root.setAttribute('aria-label', 'Inline diff of proposed revision');
+
+    if (tokens.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'chat-diff__empty';
+      empty.textContent = 'No textual difference between current prompt and proposal.';
+      root.appendChild(empty);
+      root._hunks = hunks;
+      root._isEmpty = true;
+      return root;
+    }
+
+    hunks.forEach((hunk, idx) => {
+      const hunkEl = document.createElement('span');
+      hunkEl.className = `chat-diff__hunk chat-diff__hunk--${hunk.type}`;
+      hunkEl.dataset.hunkId = String(idx);
+      hunkEl.dataset.hunkType = hunk.type;
+      if (hunk.type !== 'context') {
+        hunkEl.dataset.accepted = hunk.accepted ? 'true' : 'false';
+      }
+
+      if (hunk.type !== 'context') {
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'chat-diff__hunk-checkbox';
+        cb.checked = hunk.accepted;
+        cb.setAttribute(
+          'aria-label',
+          hunk.type === 'added'
+            ? `Accept this addition: ${hunk.tokens.map((t) => t.text).join(' ')}`
+            : `Keep this removed text: ${hunk.tokens.map((t) => t.text).join(' ')}`
+        );
+        cb.addEventListener('change', () => {
+          hunk.accepted = cb.checked;
+          hunkEl.dataset.accepted = cb.checked ? 'true' : 'false';
+          if (typeof options.onChange === 'function') options.onChange(hunks);
+        });
+        hunkEl.appendChild(cb);
+      }
+
+      const textEl = document.createElement('span');
+      textEl.className = 'chat-diff__text';
+      textEl.textContent = hunk.tokens.map((t) => t.text + t.sep).join('');
+      hunkEl.appendChild(textEl);
+
+      root.appendChild(hunkEl);
+    });
+
+    root._hunks = hunks;
+    return root;
+  };
+
   /**
    * Build one chat-message DOM node. User vs assistant styling comes
    * from a `chat-message--{role}` modifier class. Assistant messages
@@ -4999,14 +5244,47 @@
       const previewLabel = document.createElement('div');
       previewLabel.className = 'chat-message__preview-label';
       previewLabel.textContent = isPendingProposal
-        ? 'Unapplied proposal — click Apply proposal to use it'
-        : 'Proposed revision — click Apply to use it';
+        ? 'Unapplied proposal — review the diff, then apply all or selected changes'
+        : 'Proposed revision — review the diff, then apply all or selected changes';
       node.appendChild(previewLabel);
 
+      // SPEC §22 — inline diff view. We render both the diff AND the
+      // raw `pre` preview; CSS hides the raw preview when the diff
+      // is rendered (the diff IS the new affordance). The raw preview
+      // remains in the DOM as a no-JS fallback.
       const preview = document.createElement('pre');
       preview.className = 'chat-message__preview';
       preview.textContent = m.suggested_prompt;
       node.appendChild(preview);
+
+      const activeSession = state.chatSessions.find((s) => s.id === state.chatSessionId);
+      const currentPrompt = (activeSession && typeof activeSession.current_prompt === 'string')
+        ? activeSession.current_prompt
+        : '';
+      const diffAlreadyApplied = activeSession && activeSession.current_prompt === m.suggested_prompt;
+
+      // Only render the diff when the strings differ. If they're
+      // already equal (applied state), the diff would be empty.
+      if (!diffAlreadyApplied && currentPrompt.length > 0) {
+        const diffEl = renderChatDiff(currentPrompt, m.suggested_prompt, {
+          onChange: () => updateApplyButtonState()
+        });
+        node.appendChild(diffEl);
+        // Hide the raw preview when a diff is shown.
+        preview.hidden = true;
+        previewLabel.hidden = false;
+        // Stash the hunks and helpers on the message node so the
+        // apply handler can read them.
+        node._hunks = diffEl._hunks || [];
+        node._diffSuggested = m.suggested_prompt;
+        node._diffCurrent = currentPrompt;
+        node._diffEmpty = Boolean(diffEl._isEmpty);
+      } else {
+        node._hunks = [];
+        node._diffSuggested = m.suggested_prompt;
+        node._diffCurrent = currentPrompt;
+        node._diffEmpty = false;
+      }
 
       const actions = document.createElement('div');
       actions.className = 'chat-message__actions';
@@ -5014,15 +5292,78 @@
       const apply = document.createElement('button');
       apply.type = 'button';
       apply.className = 'chat-message__apply';
-      apply.textContent = isPendingProposal ? 'Apply proposal' : 'Apply revision';
+      apply.textContent = isPendingProposal ? 'Apply all' : 'Apply all';
       apply.setAttribute('aria-label', 'Apply this revision to the generated prompt');
       apply.dataset.messageId = m.id || '';
-      apply.addEventListener('click', () => applyChatRevision(m.id, m.suggested_prompt));
+      apply.dataset.applyMode = 'all';
+
+      const onApplyClick = () => {
+        if (apply.disabled) return;
+        if (apply.dataset.applyMode === 'selected') {
+          // Partial apply: build the merged prompt and send as body.
+          const merged = reassembleFromHunks(node._hunks || []);
+          const acceptedCount = countAcceptedHunks(node._hunks || []);
+          applyChatRevision(m.id, m.suggested_prompt, { partialPrompt: merged, acceptedHunkCount: acceptedCount });
+        } else {
+          applyChatRevision(m.id, m.suggested_prompt);
+        }
+      };
+      apply.addEventListener('click', onApplyClick);
       actions.appendChild(apply);
 
+      const applyState = document.createElement('span');
+      applyState.className = 'chat-message__apply-state';
+      applyState.setAttribute('aria-live', 'polite');
+      actions.appendChild(applyState);
+
+      // Helper to update button label + disabled state based on hunks.
+      const updateApplyButtonState = () => {
+        const hunks = node._hunks || [];
+        const total = countTotalChangeHunks(hunks);
+        if (total === 0) {
+          // Pure context-only diff (strings differ only in whitespace).
+          apply.textContent = 'Apply';
+          apply.dataset.applyMode = 'all';
+          apply.disabled = diffAlreadyApplied;
+          applyState.textContent = '';
+          return;
+        }
+        const accepted = countAcceptedHunks(hunks);
+        const allDefault = hunks.every((h) => {
+          if (h.type === 'context') return true;
+          if (h.type === 'added') return h.accepted === true;
+          if (h.type === 'removed') return h.accepted === false;
+          return true;
+        });
+        const allReverted = hunks.every((h) => {
+          if (h.type === 'context') return true;
+          if (h.type === 'added') return h.accepted === false;
+          if (h.type === 'removed') return h.accepted === true;
+          return true;
+        });
+        if (allReverted) {
+          apply.disabled = true;
+          apply.textContent = 'Nothing to apply';
+          apply.dataset.applyMode = 'none';
+          applyState.textContent = 'All hunks rejected — nothing to apply.';
+          return;
+        }
+        apply.disabled = diffAlreadyApplied;
+        if (allDefault) {
+          apply.textContent = 'Apply all';
+          apply.dataset.applyMode = 'all';
+          applyState.textContent = `${total} change${total === 1 ? '' : 's'} pending — defaults apply all.`;
+        } else {
+          apply.textContent = 'Apply selected';
+          apply.dataset.applyMode = 'selected';
+          applyState.textContent = `${accepted} of ${total} changes selected.`;
+        }
+      };
+      // Initial label + state.
+      updateApplyButtonState();
+
       // Mark already-applied revisions so the user can tell at a glance.
-      const activeSession = state.chatSessions.find((s) => s.id === state.chatSessionId);
-      if (activeSession && activeSession.current_prompt === m.suggested_prompt) {
+      if (diffAlreadyApplied) {
         apply.disabled = true;
         apply.textContent = 'Applied';
         const note = document.createElement('span');
@@ -5535,12 +5876,29 @@
    * on `state.model === 'anima'` to mirror the apply into the right
    * panel. Regression test: scripts/smoke/anima-chat-apply-sync.js.
    */
-  const applyChatRevision = async (messageId, suggestedPrompt) => {
+  const applyChatRevision = async (messageId, suggestedPrompt, opts = {}) => {
     if (!state.chatSessionId || !messageId) return;
+    // SPEC §22 — partial apply. When `opts.partialPrompt` is present,
+    // we send it in the request body so the server runs
+    // anchor-preservation on the merged string and applies only that.
+    const body = (typeof opts.partialPrompt === 'string' && opts.partialPrompt.length > 0)
+      ? { partial_prompt: opts.partialPrompt, accepted_hunk_count: opts.acceptedHunkCount || 0 }
+      : undefined;
     try {
       const updated = await apiCall(`/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}/apply/${encodeURIComponent(messageId)}`, {
-        method: 'POST'
+        method: 'POST',
+        ...(body ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {})
       });
+      // SPEC §22 — if the server declined the partial prompt, the
+      // session gains a `declined_partial_prompt` field on the
+      // assistant message AND an audit message with kind
+      // `partial_apply_declined`. We detect via the latest message.
+      if (body && updated && Array.isArray(updated.messages)) {
+        const lastMsg = updated.messages[updated.messages.length - 1];
+        if (lastMsg && lastMsg.audit && lastMsg.audit.kind === 'partial_apply_declined') {
+          setChatFormStatus('Partial revision declined — too much of the original context would have been lost. Try as rewrite.', true);
+        }
+      }
       // Mirror the new current_prompt into the model-specific result
       // panel. Apply doesn't regenerate through Stage 2; the chat
       // revision IS the new prompt the user wants to copy.
@@ -5578,7 +5936,7 @@
       if (dom.chatSessionStatus && !dom.chatSessionStatus.hidden) {
         dom.chatSessionStatus.textContent = formatChatSessionStatus(updated);
       }
-      setChatFormStatus('Applied revision to the prompt.', false);
+      setChatFormStatus(body ? 'Applied selected changes to the prompt.' : 'Applied revision to the prompt.', false);
     } catch (err) {
       setChatFormStatus(err.message || 'Apply failed.', true);
     }

@@ -1566,3 +1566,63 @@ User said: "FIX ANYTHING OUT OF SCOPE". The pre-existing failing test flagged by
 ### Mood / risk flag
 
 > Both parked items were already shipped by prior uncommitted session work. Session #12 added only test-side / docs-side work. **Zero production-behavior change.** The risk is bounded to "did the in-process test correctly mirror the smoke" — both pass independently (510/0 in-process, 7/0 smoke), so the regression armor is doubled for the Anima-coverage-categories path. Commit chain: `6e50c33 → <Session #12>`.
+
+## Session #13 — 2026-09-06 (Chat fluid-iteration Slice 1: Inline diff on Apply)
+
+**Workflow:** existing (continue mode) — Slice II in the recommended order from Session #13 investigation. Standalone feature slice; pure additive UI on top of SPEC §19/§20 chat redesign. No new endpoints (only an optional body field on `/apply/:messageId`); no new schema fields on the client; no dependency change.
+
+### What was asked
+
+User said: "Analyze the chat feature, investigate ways to have a more fluid two-way chat and give the AI more freedom to edit and manipulate the prompt to meet our end goal." → Investigation landed in Session #13 with three orthogonal axes (Inline diff, Bounded autonomy, Streaming). User then approved implementation in order II → III → I with full autonomy. Slice II ships first.
+
+### What landed
+
+1. **`server.js`** (+~80 net) —
+   - `POST /api/chat/sessions/:id/apply/:messageId` now accepts an optional `partial_prompt` body field. When present: validated as non-empty string ≤ `MAX_FINAL_PROMPT_LENGTH`, run through `validatePromptPreservation(currentPrompt, partial, '')` (strictest path — empty user request means every missing token counts as non-targeted), and on accept, replaces `current_prompt` + clears `pending_prompt` + appends a `partial_apply` audit message. On decline, writes `declined_partial_prompt` + `declined_missing_terms` on the assistant message + appends a `partial_apply_declined` audit message. The legacy happy-path (no body) is unchanged.
+
+2. **`src/app.js`** (+~280 net) —
+   - `tokeniseForDiff(text)` — splits on whitespace AND punctuation; each token carries its trailing separator so the merge can reassemble the original string.
+   - `computeWordDiff(a, b)` — classic LCS dynamic programming over word tokens; returns a flat array of `{ type, text, sep }`.
+   - `groupDiffIntoHunks(tokens)` — collapses contiguous added/removed tokens into hunks; context tokens stay individual.
+   - `reassembleFromHunks(hunks)` — concatenates `text + sep` for accepted tokens; round-trips to `b` (suggested) when defaults are in place.
+   - `countAcceptedHunks(hunks)` + `countTotalChangeHunks(hunks)` — for apply-mode arbitration.
+   - `renderChatDiff(current, suggested, opts)` — builds the DOM with one `<span class="chat-diff__hunk">` per hunk; changeable hunks get a checkbox that toggles `accepted` and fires the `onChange` callback.
+   - `buildChatMessageNode` extended to render the diff above the (now-hidden) raw preview `<pre>`, with a stateful Apply button that cycles through "Apply all" / "Apply selected" / "Nothing to apply" + a `.chat-message__apply-state` hint line.
+   - `applyChatRevision(messageId, suggestedPrompt, opts)` extended to accept `opts.partialPrompt` + `opts.acceptedHunkCount`; sends `partial_prompt` + `accepted_hunk_count` body when present.
+
+3. **`src/styles.css`** (+~80 net) — `.chat-diff` family rules (added = green bg, removed = red strike-through with `data-accepted="true"` toggling the visual back to neutral), checkbox styling, `.chat-message__apply-state` hint line.
+
+4. **`docs/SPEC.md`** — new §22 (Reframe + Scope + Out-of-scope + User stories + Implementation decisions + Glossary + References + DoD).
+
+5. **`docs/ARCHITECTURE.md`** — new §27.A1–A4 (Render path, Partial-merge algorithm, Hunk grouping + UX, Server-side reuse).
+
+6. **`docs/PRE-MORTEM.md`** — new §27 (top risks + pre-commitments + kill criteria).
+
+7. **`docs/CODE-REVIEW-29-inline-diff.md`** — verdict **pass** (Standards + Spec axes both pass; 13/13 new tests green).
+
+8. **`tests/run-all.js`** — 13 new tests under `// ─── SPEC §22 ─`:
+   - 5 static-source (helpers defined, classes wired, CSS rules present).
+   - 8 HTTP integration: successful partial apply, empty `partial_prompt` → 400, oversized → 400, non-string → 400, legacy `{}` body still uses `suggested_prompt`, decline path persists `declined_partial_prompt` + `declined_missing_terms` + `partial_apply_declined` audit, restore chat file at end of slice.
+
+### Verification
+
+- `node --check server.js && node --check src/app.js` → exit 0.
+- `node tests/run-all.js` → **523 passed, 0 failed** (was: 510 in Session #12; +13 net).
+- `node scripts/session-init.js` → re-run for 10/10 V-check (preserved from Session #12).
+
+### Architectural notes
+
+- **Round-trip property** is enforced by the LCS construction itself: with every added hunk accepted and every removed hunk rejected (defaults), `reassembleFromHunks` walks the merged diff in order, concatenating `text + sep` for every added/context token (context always in, added always in by default, removed always out by default) — which is exactly the second input string. This is the structural property that lets "Apply all" remain the fast path (no body in the request).
+- **Strictness for partial apply** is intentional. By passing `''` as the user-request arg to `validatePromptPreservation`, we get the strictest possible path: any anchor loss is non-targeted. This is correct because the hunks were already user-selected — the user explicitly picked which to include, so the validator should refuse any structural loss, not "user-requested loss." If a user wants to drop an anchor, they should use the wholesale-rewrite path (`REWRITE FROM SCRATCH` → "Try as rewrite" affordance).
+- **No new endpoints.** The diff is purely additive UI; the partial-apply capability is a body field on an existing endpoint. This means the legacy clients (none, but if any existed) continue to work unchanged.
+- **No-JS fallback.** The raw `<pre class="chat-message__preview">` element is still in the DOM; JS sets `hidden = true` when a diff is rendered. If JS is disabled, the user sees the raw proposed text and can click Apply (legacy fast path). Cost: ~50 bytes of HTML per assistant message.
+
+### Out of scope — parked (rollback candidates)
+
+- **Reading `declined_partial_prompt` in the UI** — Cosmetic mismatch. The existing decline-render branch reads `m.declined_suggested_prompt`; the server now writes either field depending on the decline path. Users see the declined-audit message body + missing terms regardless. Parked; trivial polish.
+- **Persisting hunk-toggle state across reloads** — Ephemeral by design. Parked.
+- **Side-by-side diff view** — Unified inline is what users expect from chat. Parked.
+
+### Mood / risk flag
+
+> Slice II is the lowest-risk of the three planned slices (no schema change, no protocol change, single optional body field, all additivity). The diff algorithm is hand-rolled + LCS-classic, so no library dependency risk. The two real risks are (1) word-level boundaries producing unintuitive hunks — mitigated by the round-trip test + structural property — and (2) the partial-apply path being too strict and declining too often — mitigated by the wholesale-rewrite escape hatch which is unchanged. **Net test surface +13 slots, all green.** Commit chain: `<Session #12> → <CR-29 / Session #13>`.

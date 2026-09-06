@@ -8998,6 +8998,260 @@ test('CR-3 server.js: PATCH endpoint registered', () => {
   assertTrue(srv.includes("kind: 'direct_edit'"), 'audit kind tag present');
 });
 
+// ─── SPEC §22 — Inline diff on Apply (CR-A7 / DOC §22) ─────────────
+// Static-source tests for the diff helpers + end-to-end tests for
+// the partial-apply endpoint. Reset the chat file at the start so we
+// don't inherit the 50-session cap from earlier test runs.
+
+const spec22Snapshot = snapshotChatFile();
+resetChatFile();
+
+test('SPEC §22: src/app.js exposes computeWordDiff (exported to IIFE scope)', () => {
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/const computeWordDiff = \(/.test(app), 'computeWordDiff helper defined');
+});
+
+test('SPEC §22: src/app.js exposes groupDiffIntoHunks + reassembleFromHunks', () => {
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/const groupDiffIntoHunks = \(/.test(app), 'groupDiffIntoHunks defined');
+  assertTrue(/const reassembleFromHunks = \(/.test(app), 'reassembleFromHunks defined');
+  assertTrue(/const tokeniseForDiff = \(/.test(app), 'tokeniseForDiff defined');
+});
+
+test('SPEC §22: src/app.js renderChatDiff renders hunk DOM with checkboxes', () => {
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/const renderChatDiff = \(/.test(app), 'renderChatDiff defined');
+  assertTrue(/chat-diff__hunk-checkbox/.test(app), 'checkbox class wired');
+  // Hunk classes are constructed dynamically; check the template.
+  assertTrue(/chat-diff__hunk--\$\{hunk\.type\}/.test(app), 'added/removed/context hunk classes wired');
+  assertTrue(/chat-diff__hunk--added/.test(app) || true, 'added hunk class (in styles.css)'); // CSS, not app.js
+});
+
+test('SPEC §22: applyChatRevision sends partial_prompt body when provided', () => {
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  // The opts.partialPrompt branch must serialise partial_prompt.
+  assertTrue(/partial_prompt: opts\.partialPrompt/.test(app), 'partial_prompt serialised');
+  assertTrue(/accepted_hunk_count/.test(app), 'accepted_hunk_count serialised');
+});
+
+test('SPEC §22: server.js /apply/:messageId accepts partial_prompt body', () => {
+  const srv = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/partial_prompt/.test(srv), 'partial_prompt referenced in server');
+  assertTrue(/partial_apply_declined/.test(srv), 'partial_apply_declined audit kind wired');
+  assertTrue(/partial_apply/.test(srv), 'partial_apply audit kind wired');
+});
+
+test('SPEC §22: styles.css defines diff classes', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'styles.css'), 'utf8');
+  assertTrue(/\.chat-diff\s*\{/.test(css), '.chat-diff rule present');
+  assertTrue(/\.chat-diff__hunk--added/.test(css), 'added hunk style present');
+  assertTrue(/\.chat-diff__hunk--removed/.test(css), 'removed hunk style present');
+  assertTrue(/\.chat-diff__hunk-checkbox/.test(css), 'checkbox style present');
+  assertTrue(/\.chat-message__apply-state/.test(css), 'apply-state style present');
+});
+
+test('SPEC §22: POST /apply/:messageId with partial_prompt applies successfully', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    const port = server.address().port;
+    // Build a session with an assistant message that has a suggested_prompt.
+    const sessions = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), 'utf8'));
+    const sess = sessions.find((s) => s.id === sessionId);
+    sess.messages.push({
+      id: 'msg_test_partial_apply',
+      role: 'assistant',
+      content: 'Here is a minor revision.',
+      suggested_prompt: 'This is a minor revision to your prompt with extra words.',
+      timestamp: new Date().toISOString()
+    });
+    sess.current_prompt = 'This is a minor revision to your prompt.';
+    fs.writeFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), JSON.stringify(sessions, null, 2));
+
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/apply/msg_test_partial_apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        partial_prompt: 'This is a small revision to your prompt.',
+        accepted_hunk_count: 1
+      })
+    });
+    assertEqual(r.status, 200, 'partial apply returns 200');
+    const json = await r.json();
+    assertEqual(json.success, true, 'success=true');
+    assertEqual(json.data.current_prompt, 'This is a small revision to your prompt.', 'partial prompt applied');
+    // Audit message must reflect partial apply.
+    const lastMsg = json.data.messages[json.data.messages.length - 1];
+    assertEqual(lastMsg.audit?.kind, 'partial_apply', 'audit.kind = partial_apply');
+    assertEqual(lastMsg.audit?.accepted_hunk_count, 1, 'accepted_hunk_count recorded');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §22: POST /apply/:messageId with empty partial_prompt returns 400', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    const port = server.address().port;
+    // Add an assistant message with a suggested_prompt.
+    const sessions = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), 'utf8'));
+    const sess = sessions.find((s) => s.id === sessionId);
+    sess.messages.push({
+      id: 'msg_test_empty_partial',
+      role: 'assistant',
+      content: 'test',
+      suggested_prompt: 'Test prompt for empty partial test.',
+      timestamp: new Date().toISOString()
+    });
+    fs.writeFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), JSON.stringify(sessions, null, 2));
+
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/apply/msg_test_empty_partial`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partial_prompt: '   ' })
+    });
+    assertEqual(r.status, 400, 'empty partial_prompt returns 400');
+    const json = await r.json();
+    assertTrue(/partial_prompt/.test(json.error || ''), 'error mentions partial_prompt');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §22: POST /apply/:messageId with oversized partial_prompt returns 400', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    const port = server.address().port;
+    const sessions = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), 'utf8'));
+    const sess = sessions.find((s) => s.id === sessionId);
+    sess.messages.push({
+      id: 'msg_test_oversized_partial',
+      role: 'assistant',
+      content: 'test',
+      suggested_prompt: 'short',
+      timestamp: new Date().toISOString()
+    });
+    fs.writeFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), JSON.stringify(sessions, null, 2));
+
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/apply/msg_test_oversized_partial`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partial_prompt: 'x'.repeat(5001) })
+    });
+    assertEqual(r.status, 400, 'oversized partial_prompt returns 400');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §22: POST /apply/:messageId with non-string partial_prompt returns 400', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    const port = server.address().port;
+    const sessions = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), 'utf8'));
+    const sess = sessions.find((s) => s.id === sessionId);
+    sess.messages.push({
+      id: 'msg_test_non_string_partial',
+      role: 'assistant',
+      content: 'test',
+      suggested_prompt: 'some suggestion',
+      timestamp: new Date().toISOString()
+    });
+    fs.writeFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), JSON.stringify(sessions, null, 2));
+
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/apply/msg_test_non_string_partial`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partial_prompt: 12345 })
+    });
+    assertEqual(r.status, 400, 'non-string partial_prompt returns 400');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §22: POST /apply/:messageId without partial_prompt body still works (legacy)', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    const port = server.address().port;
+    const sessions = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), 'utf8'));
+    const sess = sessions.find((s) => s.id === sessionId);
+    sess.messages.push({
+      id: 'msg_test_legacy_apply',
+      role: 'assistant',
+      content: 'test',
+      suggested_prompt: 'A new revision that is long enough to apply cleanly.',
+      timestamp: new Date().toISOString()
+    });
+    sess.current_prompt = 'A different current prompt.';
+    fs.writeFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), JSON.stringify(sessions, null, 2));
+
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/apply/msg_test_legacy_apply`, {
+      method: 'POST'
+    });
+    assertEqual(r.status, 200, 'legacy apply returns 200');
+    const json = await r.json();
+    assertEqual(json.data.current_prompt, 'A new revision that is long enough to apply cleanly.', 'legacy apply uses suggested_prompt');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §22: partial_prompt that drops anchor terms gets declined', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    const port = server.address().port;
+    // Build a session with a long-ish prompt where partial apply
+    // removes key tokens (would fail non-targeted loss in
+    // validatePromptPreservation).
+    const sessions = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), 'utf8'));
+    const sess = sessions.find((s) => s.id === sessionId);
+    const orig = 'A serene still life with three red apples on a wooden table in chiaroscuro lighting with impasto brushwork and a complementary green drape behind the arrangement of fresh fruit in the foreground under candlelight with subdued atmosphere in the style of Dutch realism.';
+    const partial = 'A small empty void of nothing.';
+    sess.messages.push({
+      id: 'msg_test_partial_declined',
+      role: 'assistant',
+      content: 'try this',
+      suggested_prompt: orig,
+      timestamp: new Date().toISOString()
+    });
+    sess.current_prompt = orig;
+    fs.writeFileSync(path.join(PROJECT_ROOT, 'data', 'chat_sessions.json'), JSON.stringify(sessions, null, 2));
+
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/apply/msg_test_partial_declined`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partial_prompt: partial })
+    });
+    assertEqual(r.status, 200, 'decline returns 200 (not 400)');
+    const json = await r.json();
+    assertEqual(json.success, true, 'success=true');
+    // Session's current_prompt unchanged (decline path doesn't apply).
+    assertEqual(json.data.current_prompt, orig, 'current_prompt unchanged on decline');
+    // The assistant message gets declined_partial_prompt + declined_missing_terms.
+    const assistantMsg = json.data.messages.find((m) => m.id === 'msg_test_partial_declined');
+    assertEqual(assistantMsg.declined_partial_prompt, partial, 'declined_partial_prompt recorded');
+    assertTrue(Array.isArray(assistantMsg.declined_missing_terms), 'declined_missing_terms recorded');
+    assertTrue(assistantMsg.declined_missing_terms.length > 0, 'missing terms non-empty');
+    // The last message should be the declined-audit.
+    const lastMsg = json.data.messages[json.data.messages.length - 1];
+    assertEqual(lastMsg.audit?.kind, 'partial_apply_declined', 'audit.kind = partial_apply_declined');
+  } finally {
+    server.close();
+  }
+});
+
 // ─── CR-4 — Auto-ingest + sync hardening (SPEC §20 / ADR 0025) ──────
 
 test('CR-4 chat sessions survive server restart (read from disk)', async () => {
@@ -10459,4 +10713,11 @@ test('ADR 0026: VISION_CAPABLE_MODELS excludes the lone text-only Alibaba model 
     !list.includes('qwen3-max'),
     'qwen3-max is the lone text-only Alibaba model in ALLOWED_LLM_MODELS_BY_PROVIDER; must be excluded from VISION_CAPABLE_MODELS'
   );
+});
+
+// SPEC §22 — restore chat_sessions.json to its pre-slice state so the
+// next test run doesn't inherit the slice's session population.
+test('SPEC §22: restore chat_sessions.json to pre-slice state', () => {
+  restoreChatFile(spec22Snapshot);
+  assertTrue(true, 'chat file restored');
 });

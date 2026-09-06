@@ -430,3 +430,26 @@ Kill the sub-slice if:
 - The 5 regression tests do not lock membership (i.e. they pass with an empty Set) → kill the fix; the lock is the entire point.
 - The Set is moved away from `ALLOWED_LLM_MODELS_BY_PROVIDER` without a regression test to bridge them → kill the fix; the colocation is part of the design.
 - The change crosses into the orchestrator / provider adapters → kill; that's a wider slice, not a CR-fix.
+
+---
+
+## §27 — Inline-diff-on-Apply (SPEC §22)
+
+### Top risks
+
+- **R-1 (HIGH):** Word-level diff produces unintuitive boundaries. A change like "Edit" → "Edited" tokenises as a removal + an addition; merging them back may produce "EditEdited" if the user toggles the wrong hunk. *Mitigation:* the partial-merge algorithm only ever picks from the actual token positions; the round-trip property guarantees byte-identicality with default state. A test exercises the "Edit" → "Edited" case to catch off-by-one in the merge.
+- **R-2 (MEDIUM):** Anchor-preservation may reject a partial prompt even when the user explicitly selected it. *Mitigation:* server-side, partial_prompt runs through the same validator; on decline, the existing `declined_suggested_prompt` + "Try as rewrite" fallback is shown. The user understands the prompt has structural anchors (subject, palette) that cannot be partially removed.
+- **R-3 (MEDIUM):** Long prompts produce large diffs and slow DOM rendering. *Mitigation:* the diff is rendered only when the message is the active `pending_prompt` proposal (≤1 visible diff at a time in practice). For multi-thousand-word diffs, the user can fall back to the existing `chat-message__preview` block (still rendered, hidden by CSS).
+- **R-4 (LOW):** The checkbox state is lost on page reload. *Mitigation:* selection state is ephemeral by design; the user can re-toggle. Persistence would add localStorage complexity for a small UX win.
+
+### Pre-commitments
+
+- **P-1:** The diff must not break the existing Apply button when JS is disabled. The `<pre class="chat-message__preview">` element is still rendered server-side; JS enhances it into a diff but the original is always present in the DOM (hidden via `hidden` attribute, not removed).
+- **P-2:** The round-trip property is enforced by a unit test that asserts `computePartialPrompt(current, default) === suggested` for every fixture prompt.
+- **P-3:** The server endpoint must accept BOTH legacy `{}` body (full apply) and new `{ partial_prompt }` body. Both code paths must be exercised in tests.
+
+### Kill criteria
+
+- **K-1:** If the round-trip test fails on more than one fixture prompt, revert the slice. The diff is too unreliable to ship.
+- **K-2:** If the partial-merge produces a prompt the validator rejects in >20% of test fixtures, the user-facing affordance creates more friction than it solves. Park the slice and reconsider.
+- **K-3:** If the diff DOM adds more than 50ms to message render time on a 14-field prompt, consider collapsing to character-level for the long-prompt case. (Not blocking; measured in §27 G5 polish.)
