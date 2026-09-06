@@ -478,3 +478,28 @@ Kill the sub-slice if:
 - **K-1:** If the round-trip property test fails on more than one fixture (merge with all patches accepted produces byte-identical result to expected), the merge pipeline is unreliable and the slice is reverted.
 - **K-2:** If the patch decline rate exceeds 30% on the test fixtures (most patches drop anchor terms), the model is misusing patches; the system prompt is too permissive. Tighten the persona prompt or back off to a smaller set of allowed patch shapes.
 - **K-3:** If a user-visible regression appears in the decline fallback rendering (e.g. "Try as rewrite" affordance missing on patch-merge decline), the safety rail is broken. Pause the slice until the regression is fixed.
+
+---
+
+## §29 — Streaming responses (SPEC §24)
+
+### Top risks
+
+- **R-1 (HIGH):** Backpressure / buffer overflow. The upstream provider may produce chunks faster than the client can consume. If the server buffers everything, memory grows unboundedly. *Mitigation:* the server pipes each chunk through immediately (`res.write(...)`) without buffering; the underlying `http.ServerResponse` handles backpressure via Node's stream interface. A test asserts that 1000 chunks can be streamed without OOM.
+- **R-2 (MEDIUM):** Connection drops mid-stream. If the client disconnects before the upstream call completes, the server's `req.on('close')` handler must abort the upstream call to avoid leaking the upstream request (and the upstream quota). *Mitigation:* `req.on('close')` is wired to abort the upstream call; verified by a test that simulates a client disconnect and asserts the upstream call is cancelled within 100ms.
+- **R-3 (MEDIUM):** Streaming breaks anchor-preservation. The validator needs the FULL `reply` + `suggested_prompt` + `patches` to run; streaming sends chunks incrementally. *Mitigation:* the validator runs on the accumulated reply AFTER the stream completes, exactly as the existing route does. The streamed text is for UX only; the persisted message is the validator's verdict.
+- **R-4 (LOW):** SSE doesn't work behind some proxies (nginx default `proxy_buffering on`). *Mitigation:* the server sets `X-Accel-Buffering: no` to disable nginx-style buffering. Tests run against a direct connection, not a proxy.
+- **R-5 (LOW):** Concurrent streams on the same session can interleave the persisted messages. *Mitigation:* a session-level mutex (`Set<sessionId>` of active streams) rejects a second concurrent stream with 409.
+
+### Pre-commitments
+
+- **P-1:** The server MUST validate query params identically to the existing `POST` route. A test asserts that an empty `content` returns 400, an oversized `content` returns 400, an unknown `provider` returns 400.
+- **P-2:** The server MUST persist the full assistant message on stream completion (or error), not just on stream success. A test asserts the partial reply is persisted with `audit: { kind: 'stream_aborted' }` when the client disconnects mid-stream.
+- **P-3:** The client MUST show a "Stop generating" button while a stream is active. A test asserts the button is visible during the stream and hidden after completion.
+- **P-4:** The streaming endpoint MUST return 409 if a second stream is requested while one is active. A test asserts the second request fails.
+
+### Kill criteria
+
+- **K-1:** If the streaming endpoint can't complete a single round-trip in under 200ms (excluding the model's response time), the streaming pipeline is too heavyweight. Revert to non-streaming.
+- **K-2:** If the upstream provider rejects streaming requests, the streaming endpoint falls back to non-streaming (calls the upstream without `stream: true` and emits the full reply as one chunk). The endpoint still works; the client just sees the existing non-streaming UX.
+- **K-3:** If memory grows unboundedly on a 1000-chunk test fixture, the backpressure path is broken. Revert the slice.

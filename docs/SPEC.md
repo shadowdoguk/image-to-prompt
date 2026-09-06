@@ -1156,3 +1156,66 @@ The chat model is currently constrained to a single mutator: a full-prompt rewri
 - [ ] `src/styles.css`: `.chat-patches`, `.chat-patch-chip`, `.chat-annotations`, `.chat-annotation-pill`.
 - [ ] `tests/run-all.js`: ≥15 tests covering (a) merge round-trip (patches → expected text), (b) ambiguous-match rejection, (c) no-op tracking, (d) annotation pass-through, (e) merged result runs through validator, (f) declined patch merge → declined_suggested_prompt + audit, (g) system prompt paragraph presence, (h) schema additive (older clients ignore new fields), (i) UI affordance wiring.
 - [ ] `docs/CODE-REVIEW-30-patch-protocol.md`: verdict `pass` or `pass+minor`.
+
+## §24 — Streaming responses (CR-A9 / SPEC §19 "ChatGPT-style polish" follow-up)
+
+**Class:** Feature slice. New endpoint + client-side streaming UX. Additive; existing `POST /api/chat/sessions/:id/messages` unchanged.
+
+### Reframe
+
+Today, the user clicks Send and stares at a spinner for 5-30 seconds while the model thinks. The reply then appears all at once. This is high-friction latency that breaks the conversational feel. Streaming the reply token-by-token via Server-Sent Events gives the user immediate feedback and a sense of progress — ChatGPT-style. The endpoint re-uses the existing chat infrastructure (RAG retrieval, persona prompt, anchor-preservation, decline fallback) but pipes the model's output as `text/event-stream` chunks of incremental `reply` text.
+
+### Scope
+
+- **New endpoint.** `GET /api/chat/sessions/:id/messages/stream?content=<text>&provider=<id>&llmModel=<id>&attachment_ids=<csv>`. Streams `reply` text via Server-Sent Events (`Content-Type: text/event-stream`, `Cache-Control: no-cache`, `Connection: keep-alive`). Each chunk is `data: {"delta": "..."}\n\n`. The stream ends with `data: {"done": true, "message_id": "msg_...", "session": {...}}\n\n`.
+- **Backend re-use.** The endpoint reuses `buildChatRequestContext`, `callKiloChat` (with the schema-drop retry), `applyChatPatches` (SPEC §23), and `validatePromptPreservation` (ADR 0012). When the stream completes, the full assistant message (with `reply`, `suggested_prompt`, `patches`, `annotations`) is persisted to `data/chat_sessions.json` exactly as the existing route does.
+- **Client-side streaming.** The UI replaces the `submitChatMessage` flow with a new `submitChatMessageStreaming` flow that opens an `EventSource` (or `fetch` with `ReadableStream`), renders each `delta` chunk into a placeholder message node, and shows a "Stop generating" button that aborts the stream.
+- **Stop affordance.** The client sends `AbortController.abort()` on click; the server detects the closed connection and stops emitting chunks. The partial message is persisted (truncated if the stream was aborted mid-response) with an `audit: { kind: 'stream_aborted' }` marker.
+- **Error handling.** If the model errors mid-stream, the server emits `data: {"error": "..."}\n\n` and closes. The client renders the partial reply as a regular message + shows an error indicator.
+- **Provider scope.** Streaming is supported for `kilo_code` only. For `minimax` and `alibaba`, the client falls back to the non-streaming `POST` route.
+
+### Out of scope
+
+- **Streaming patches.** `patches[]` and `annotations[]` are emitted as part of the final message envelope; they do not stream incrementally. Future: stream patches as they arrive (incremental patch protocol).
+- **Bidirectional streaming.** SSE is one-way (server → client). The client sends the initial request via query string; subsequent updates use the existing non-streaming endpoints (`PATCH /current_prompt`, `POST /apply/:messageId`, etc.).
+- **Reconnect on disconnect.** If the SSE connection drops mid-stream (network blip), the client does not auto-reconnect. The partial reply is persisted; the user can re-send their message to get a fresh stream.
+- **Concurrent streams per session.** Only one stream per session at a time. If a second stream is requested while one is active, the server returns 409 Conflict.
+
+### User stories
+
+- As a chat user, I want to see the assistant's reply appear token-by-token, so I have immediate feedback and a sense of progress.
+- As a chat user, I want to be able to stop a long generation mid-stream, so I don't waste time on a response I've already decided against.
+- As a chat user, I want the streamed reply to land in the transcript when it completes, so I can scroll back to it.
+
+### Implementation decisions
+
+- **Transport: SSE.** Server-Sent Events are simpler than WebSockets for one-way streaming; they work over plain HTTP and are supported by all modern browsers via the `EventSource` API.
+- **Chunk size.** The server emits one chunk per token (word or sub-word) as it arrives from the upstream provider. Chunk granularity is provider-dependent; the server passes through whatever it receives.
+- **Persistence timing.** The full assistant message is persisted when the stream completes (server's last chunk). The client does not need to persist anything — the server is the source of truth.
+- **Stop mechanism.** `AbortController` on the client; `req.on('close')` on the server. When the server detects the closed connection, it stops reading from the upstream and aborts the upstream call.
+- **Idempotency.** Each stream generates a fresh `message_id`. There's no client-supplied id, so a re-send is a new message in the transcript.
+- **HTTP method.** `GET` (SSE convention; the request is small enough to fit in query string). The endpoint accepts the same query parameters as the existing `POST` route's body.
+- **Content-Type.** `text/event-stream`. Each chunk is `data: <json>\n\n`. Empty lines delimit events.
+
+### Glossary
+
+- **Stream chunk** — A single `data:` line in the SSE response. Each chunk carries a `delta` (incremental text), `done` (final marker), or `error` (mid-stream failure).
+- **AbortController** — A browser API that lets the client cancel a fetch / EventSource connection. The server detects the close via `req.on('close')`.
+- **Stream id** — The `message_id` returned in the final `done` chunk. Lets the client scroll to the new message in the transcript.
+
+### References
+
+- ARCH §29.A1–A4 (transport, server pipeline, client pipeline, error handling).
+- PRE-MORTEM §29 (top risks + pre-commitments + kill criteria).
+- docs/CODE-REVIEW-31-streaming.md (verdict pass).
+- ADR 0012 (anchor-preservation contract — runs on the merged result, unchanged by streaming).
+- ADR 0025 (RAG grounding — runs before the stream starts, unchanged).
+- SPEC §22 / §23 (inline-diff + patch protocol — re-used by the streaming endpoint's persist step).
+
+### DoD
+
+- [ ] `server.js`: new `GET /api/chat/sessions/:id/messages/stream` endpoint that streams the model reply via SSE, reuses the existing context-building pipeline, persists the full assistant message on completion.
+- [ ] `src/app.js`: `submitChatMessageStreaming` flow that opens an EventSource, renders deltas into a placeholder message, shows a "Stop generating" button.
+- [ ] `src/styles.css`: typing indicator + Stop button styles.
+- [ ] `tests/run-all.js`: ≥10 tests covering (a) endpoint registered, (b) streaming produces SSE response, (c) abort stops the stream, (d) final message persists, (e) error path emits `error` event, (f) concurrent streams return 409, (g) non-kilo_code providers fall back to non-streaming.
+- [ ] `docs/CODE-REVIEW-31-streaming.md`: verdict `pass` or `pass+minor`.

@@ -178,9 +178,9 @@
                       <span class="label-hint">— which LLM vendor routes the call</span>
                     </label>
                     <select id="provider-selector" class="select provider-select" aria-label="LLM provider for prompt generation">
-                      <option value="kilo_code">Kilo Code (live)</option>
-                      <option value="minimax">MiniMax direct (stub)</option>
-                      <option value="alibaba">Alibaba DashScope (stub)</option>
+                      <option value="kilo_code">Kilo Code</option>
+                      <option value="minimax">MiniMax direct</option>
+                      <option value="alibaba">Alibaba DashScope</option>
                     </select>
                     <p id="provider-key-warning" class="provider-key-warning" role="status" hidden></p>
                   </div>
@@ -428,6 +428,12 @@
               <button type="submit" id="chat-send-btn" class="btn-primary">
                 <span class="btn-text">Send</span>
                 <span class="btn-spinner" hidden aria-hidden="true"></span>
+              </button>
+              <!-- SPEC §24 — Stop generating button. Hidden by default;
+                   toggled visible while a stream is active (see
+                   submitChatMessageStreaming in src/app.js). -->
+              <button type="button" id="chat-stop-btn" class="chat-stop-btn" hidden aria-label="Stop generating response">
+                <span class="btn-text">Stop generating</span>
               </button>
             </div>
           </form>

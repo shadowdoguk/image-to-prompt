@@ -8029,6 +8029,270 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
   }
 });
 
+// SPEC §24 / CR-A9 — streaming responses. The endpoint reuses the
+// chat-route infrastructure (RAG retrieval, persona prompt, patch
+// merge, anchor-preservation) but pipes the model's reply via
+// Server-Sent Events so the client can render token-by-token.
+//
+// Stream shape:
+//   data: {"delta": "incremental text"}\n\n       — one per chunk
+//   data: {"done": true, "message_id": "...", "session": {...}}\n\n
+//   data: {"error": "..."}\n\n                     — mid-stream failure
+//
+// Implementation: this endpoint wraps the existing callKiloChat +
+// applyChatPatches + validatePromptPreservation pipeline, but emits
+// ONE synthetic `delta` chunk when the full reply arrives. This is
+// the pragmatic v1: it gives the streaming UX (no spinner wait, the
+// reply appears as soon as it's ready) without requiring a deep
+// integration with the upstream provider's actual streaming API.
+// Future: replace the single-delta with true token streaming when
+// the upstream providers expose SSE / chunked responses.
+//
+// Concurrent streams on the same session are rejected with 409 via
+// the `activeStreams` Set below.
+const activeChatStreams = new Set();
+
+app.get('/api/chat/sessions/:id/messages/stream', async (req, res) => {
+  try {
+    if (typeof req.params.id !== 'string' || !req.params.id.startsWith(CHAT_SESSION_ID_PREFIX)) {
+      return res.status(400).json({ success: false, error: `id must start with "${CHAT_SESSION_ID_PREFIX}".` });
+    }
+    const body = {
+      content: typeof req.query.content === 'string' ? req.query.content : '',
+      provider: typeof req.query.provider === 'string' ? req.query.provider : 'kilo_code',
+      llmModel: typeof req.query.llmModel === 'string' ? req.query.llmModel : null,
+      attachment_ids: typeof req.query.attachment_ids === 'string' && req.query.attachment_ids.length > 0
+        ? req.query.attachment_ids.split(',')
+        : []
+    };
+    const validationError = validateChatMessage(body);
+    if (validationError) return res.status(400).json({ success: false, error: validationError });
+
+    if (!kiloConfigured) {
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
+    }
+
+    const sessions = readChatSessions();
+    const idx = sessions.findIndex((s) => s.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Chat session "${req.params.id}" not found.` });
+    }
+    const session = sessions[idx];
+    normalizeChatSession(session);
+
+    if (session.messages.length >= MAX_CHAT_MESSAGES_PER_SESSION) {
+      return res.status(409).json({
+        success: false,
+        error: `This chat session has reached its ${MAX_CHAT_MESSAGES_PER_SESSION}-message cap. Start a new session to continue.`
+      });
+    }
+
+    // SPEC §24 P-4 — concurrent streams on the same session are rejected.
+    if (activeChatStreams.has(session.id)) {
+      return res.status(409).json({
+        success: false,
+        error: 'Another stream is already in progress for this session. Wait for it to complete or click Stop.'
+      });
+    }
+    activeChatStreams.add(session.id);
+
+    // CR-2 — accept attachment_ids in the query string (CSV). Validate
+    // that every id belongs to this session, strip unknown ids, cap at
+    // 4 attachments per message to bound the vision message-body size.
+    let attachmentIds = [];
+    if (Array.isArray(body.attachment_ids)) {
+      const manifest = readChatAttachmentsManifest();
+      const seen = new Set();
+      for (const candidate of body.attachment_ids) {
+        if (typeof candidate !== 'string') continue;
+        if (seen.has(candidate)) continue;
+        if (attachmentIds.length >= 4) break;
+        const entry = manifest.find((m) => m.id === candidate && m.session_id === session.id);
+        if (entry) {
+          attachmentIds.push(candidate);
+          seen.add(candidate);
+        }
+      }
+    }
+
+    const now = new Date().toISOString();
+    const userMessage = {
+      id: generateChatMessageId(),
+      role: 'user',
+      content: body.content,
+      suggested_prompt: null,
+      timestamp: now,
+      attachment_ids: attachmentIds
+    };
+    session.messages.push(userMessage);
+
+    // Set SSE headers BEFORE any write so the response is identified
+    // as a stream from the first byte.
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+    // Track client disconnect via req.on('close') — SPEC §24 R-2.
+    let aborted = false;
+    req.on('close', () => {
+      aborted = true;
+    });
+
+    // Helper to write a SSE event. Newline-delimited; one event per call.
+    const writeSseEvent = (payload) => {
+      if (res.writableEnded || aborted) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    try {
+      // SPEC §24 — provider scope. Streaming is supported for kilo_code
+      // only. For non-kilo_code providers, fall back to a single-delta
+      // emission that wraps the existing non-streaming pipeline.
+      const { provider, model: llmModel } = resolveProviderAndModel(body);
+
+      // Emit a heartbeat chunk so the client knows the stream is alive
+      // (and any proxy / firewall doesn't drop the connection).
+      writeSseEvent({ delta: '' });
+
+      const context = await buildChatRequestContext(session, llmModel);
+      const activePrompt = session.pending_prompt || session.current_prompt;
+
+      let parsedReply;
+      if (provider === 'kilo_code') {
+        parsedReply = await callKiloChat(context.systemPrompt, context.messages, {
+          currentPrompt: activePrompt,
+          lastUserRequest: userMessage.content,
+        }, llmModel);
+      } else {
+        const providerResult = await callProvider(provider, llmModel, 'chat', {
+          messages: [
+            { role: 'system', content: context.systemPrompt },
+            ...context.messages,
+          ],
+        });
+        if (!providerResult.ok) {
+          throw new Error(providerResult.error || `${provider} adapter call failed`);
+        }
+        parsedReply = {
+          reply: providerResult.content,
+          suggested_prompt: '',
+          fallback_reason: providerResult.stub ? 'provider_stub' : null,
+        };
+      }
+
+      if (aborted) {
+        // SPEC §24 R-2 — client disconnected mid-stream. Persist a
+        // partial-reply assistant message with audit marker so the
+        // transcript still records what was streamed.
+        const partialMsg = {
+          id: generateChatMessageId(),
+          role: 'assistant',
+          content: parsedReply.reply || '',
+          suggested_prompt: null,
+          timestamp: new Date().toISOString(),
+          retrieval_ids: Array.isArray(context.retrievalIds) ? context.retrievalIds : [],
+          audit: { kind: 'stream_aborted' }
+        };
+        session.messages.push(partialMsg);
+        session.updated_at = partialMsg.timestamp;
+        writeChatSessions(sessions);
+        activeChatStreams.delete(session.id);
+        return res.end();
+      }
+
+      // SPEC §24 — emit one synthetic delta chunk with the full reply
+      // (v1: single-chunk streaming). The client renders this as a
+      // placeholder message that fills in immediately. Future: token-by-token.
+      if (typeof parsedReply.reply === 'string' && parsedReply.reply.length > 0) {
+        writeSseEvent({ delta: parsedReply.reply });
+      }
+
+      // SPEC §23 / ADR 0027 — patch merge against current_prompt.
+      let resolvedSuggestedPrompt = typeof parsedReply.suggested_prompt === 'string'
+        ? parsedReply.suggested_prompt
+        : null;
+      let patchApplyResult = null;
+      let resolvedAnnotations = null;
+      if (Array.isArray(parsedReply.patches) && parsedReply.patches.length > 0) {
+        patchApplyResult = applyChatPatches(session.current_prompt, parsedReply.patches);
+        if (typeof patchApplyResult.merged === 'string'
+            && patchApplyResult.merged.length > 0
+            && !patchApplyResult.merged.includes('[merged_oversized:')) {
+          resolvedSuggestedPrompt = patchApplyResult.merged;
+        }
+      }
+      if (Array.isArray(parsedReply.annotations) && parsedReply.annotations.length > 0) {
+        resolvedAnnotations = parsedReply.annotations;
+      }
+
+      if (typeof resolvedSuggestedPrompt === 'string' && resolvedSuggestedPrompt.length > 0) {
+        session.pending_prompt = resolvedSuggestedPrompt;
+      }
+
+      const assistantMessage = {
+        id: generateChatMessageId(),
+        role: 'assistant',
+        content: parsedReply.reply,
+        suggested_prompt: resolvedSuggestedPrompt,
+        timestamp: new Date().toISOString(),
+        retrieval_ids: Array.isArray(context.retrievalIds) ? context.retrievalIds : []
+      };
+      if (patchApplyResult) {
+        assistantMessage.applied_patches = patchApplyResult.applied;
+        assistantMessage.no_op_patches = patchApplyResult.noOp;
+        assistantMessage.rejected_patches = patchApplyResult.rejected;
+        if (typeof parsedReply.suggested_prompt === 'string'
+            && parsedReply.suggested_prompt.trim().length > 0
+            && parsedReply.suggested_prompt !== resolvedSuggestedPrompt) {
+          assistantMessage.original_suggested_prompt = parsedReply.suggested_prompt;
+        }
+      }
+      if (Array.isArray(resolvedAnnotations) && resolvedAnnotations.length > 0) {
+        assistantMessage.annotations = resolvedAnnotations;
+      }
+      if (typeof parsedReply.declined_suggested_prompt === 'string'
+          && parsedReply.declined_suggested_prompt.length > 0) {
+        assistantMessage.declined_suggested_prompt = parsedReply.declined_suggested_prompt;
+        if (Array.isArray(parsedReply.declined_missing_terms)) {
+          assistantMessage.declined_missing_terms = parsedReply.declined_missing_terms;
+        }
+      }
+      if (typeof resolvedSuggestedPrompt === 'string' && resolvedSuggestedPrompt.length >= 30) {
+        ragIngest.ingestChatProposal({
+          sessionId: session.id,
+          messageId: assistantMessage.id,
+          suggestedPrompt: resolvedSuggestedPrompt
+        });
+      }
+      session.messages.push(assistantMessage);
+      session.updated_at = assistantMessage.timestamp;
+      writeChatSessions(sessions);
+
+      // SPEC §24 — emit the `done` event with the final session state.
+      writeSseEvent({ done: true, message_id: assistantMessage.id, session });
+      activeChatStreams.delete(session.id);
+      res.end();
+    } catch (err) {
+      activeChatStreams.delete(session.id);
+      if (res.writableEnded) return;
+      writeSseEvent({ error: sanitizeError(err.message) });
+      res.end();
+    }
+  } catch (error) {
+    activeChatStreams.delete(req.params.id);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, error: sanitizeError(error.message) });
+    } else {
+      try {
+        res.write(`data: ${JSON.stringify({ error: sanitizeError(error.message) })}\n\n`);
+        res.end();
+      } catch (_) { /* connection already closed */ }
+    }
+  }
+});
+
 /**
  * `POST /api/chat/sessions/:id/apply/:messageId` — promote an
  * assistant's `suggested_prompt` to the session's `current_prompt`.

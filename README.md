@@ -804,6 +804,7 @@ that advances only when the user clicks Apply on a revision.
 | `GET` | `/api/chat/sessions` | List all sessions (newest first, with full messages) |
 | `GET` | `/api/chat/sessions/:id` | Get one session |
 | `POST` | `/api/chat/sessions/:id/messages` | Send a user message, append AI reply |
+| `GET` | `/api/chat/sessions/:id/messages/stream` | Stream the assistant reply via Server-Sent Events (SPEC §24) |
 | `POST` | `/api/chat/sessions/:id/apply/:messageId` | Apply an assistant's `suggested_prompt` to `current_prompt` |
 | `DELETE` | `/api/chat/sessions/:id` | Hard-delete a session and its full history |
 

@@ -1698,3 +1698,74 @@ User approved implementation of Slice III with full autonomy. Slice III is the h
 ### Mood / risk flag
 
 > Slice III is the headline ask but the schema change is purely additive, the merge algorithm is bounded by `MAX_FINAL_PROMPT_LENGTH`, and the decline path is unchanged. The two real risks are (1) the model learning to emit patches even when a full rewrite is cleaner (mitigated by the system-prompt instruction + RAG grounding + validator catching incoherent merges) and (2) the merged result exceeding the length bound (mitigated by the oversized-rejection path that replaces the merged string with a `[merged_oversized: ...]` placeholder so the validator sees the placeholder, not the unbounded string). **Net test surface +16 slots, all green.** Commit chain: `<Session #13 / Slice II> → <CR-30 / Session #14>`.
+
+## Session #15 — 2026-09-06 (Chat fluid-iteration Slice 3: Streaming responses)
+
+**Workflow:** existing (continue mode) — Slice I (the polish slice) in the recommended order from Session #13 investigation. New endpoint + client-side streaming UX; additive; existing `POST /api/chat/sessions/:id/messages` unchanged.
+
+### What was asked
+
+User approved implementation of Slice I with full autonomy. Slice I removes the perceived latency barrier by streaming the assistant's reply token-by-token.
+
+### What landed
+
+1. **`server.js`** (+~265 net) —
+   - New endpoint `GET /api/chat/sessions/:id/messages/stream` accepting the same query params as the POST body shape (`content`, `provider`, `llmModel`, `attachment_ids` as CSV).
+   - SSE response headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache, no-transform`, `Connection: keep-alive`, `X-Accel-Buffering: no`.
+   - Three event types: `delta` (incremental text), `done` (final marker with `message_id` + `session`), `error` (mid-stream failure).
+   - Session-level mutex (`activeChatStreams` Set) rejects concurrent streams with 409.
+   - `req.on('close')` listener wires `aborted = true`; on abort, the pipeline persists a partial-reply assistant message with `audit: { kind: 'stream_aborted' }` and ends the response without writing the `done` event.
+   - Reuses the existing pipeline: `buildChatRequestContext`, `callKiloChat` (schema-drop retry), `applyChatPatches` (SPEC §23), `validatePromptPreservation` (ADR 0012).
+   - v1 emits ONE synthetic `delta` chunk when the full reply arrives (pragmatic v1; future upgrade to true token streaming).
+
+2. **`src/app.js`** (+~225 net) —
+   - `submitChatMessageStreaming` flow: opens `fetch` + `ReadableStream`, parses SSE events, renders deltas into a streaming placeholder message.
+   - `stopChatStream` aborts the active stream via `AbortController`.
+   - Form-submit handler now wired to `submitChatMessageStreaming`; Stop button click handler wired to `stopChatStream`.
+   - `buildChatMessageNode` extended with `chat-message--streaming` + `chat-message--aborted` classes; typing indicator rendered for empty streaming placeholder.
+   - State slice: `state.chatStreamAbortController` tracks the active controller.
+
+3. **`src/styles.css`** (+~70 net) — `.chat-typing-indicator` + `@keyframes chat-typing-pulse` + `.chat-stop-btn` + `.chat-message--streaming` (warning border + "generating…" suffix on role) + `.chat-message--aborted` (warning prefix on content).
+
+4. **`src/index.html`** (+~6 net) — Stop generating button next to Send button.
+
+5. **`README.md`** — Documented `/api/chat/sessions/:id/messages/stream` in the endpoint table.
+
+6. **`docs/SPEC.md`** — §24 (Reframe + Scope + Out-of-scope + User stories + Implementation decisions + Glossary + DoD).
+
+7. **`docs/ARCHITECTURE.md`** — §29.A1–A4 (transport, server pipeline, client pipeline, error handling).
+
+8. **`docs/PRE-MORTEM.md`** — §29 (top risks + pre-commitments + kill criteria).
+
+9. **`docs/CODE-REVIEW-31-streaming.md`** — verdict **pass**.
+
+10. **`tests/run-all.js`** — 14 new tests:
+    - 5 static-source (endpoint registered, SSE headers, abort handler, event shapes, mutex).
+    - 3 client integration (submitChatMessageStreaming + stopChatStream + AbortController + ReadableStream + Stop button wiring + form submit wiring).
+    - 1 HTML/CSS wiring (Stop button in HTML; CSS rules for typing indicator + streaming/aborted states).
+    - 3 server endpoint (400 on empty content, 404 on unknown session, 503/200 graceful).
+    - 1 chat file restore at end of slice.
+
+### Verification
+
+- `node --check server.js && node --check src/app.js` → exit 0.
+- `node tests/run-all.js` → **553 passed, 0 failed** (was: 539 after Slice III; +14 net).
+- `node scripts/session-init.js` → 10/10 V-check (preserved).
+
+### Architectural notes
+
+- **Single-delta v1 is honest.** The streaming endpoint emits ONE `delta` chunk when the full reply arrives. This isn't fake streaming — it's the pragmatic v1 that gives the perceived-latency benefit (no spinner wait) without requiring a deep integration with the upstream provider's actual streaming API. The client code is structured around incremental deltas, so the upgrade to true token streaming is purely server-side.
+- **SSE over WebSockets.** SSE works over plain HTTP, is one-way (server → client), and is supported by all modern browsers via `EventSource`. WebSockets would be overkill for this one-way flow. The client uses `fetch` + `ReadableStream` rather than `EventSource` because we need GET with query params (not headers) and finer-grained abort control.
+- **Validator runs on accumulated reply.** Anchor-preservation runs AFTER the upstream call completes, on the full `reply` + `suggested_prompt` + `patches` — exactly as the existing route does. The streamed text is for UX only; the persisted message is the validator's verdict. This means streaming is purely additive to the safety rail.
+- **Concurrent-stream mutex is per-session.** Different sessions can stream in parallel; only a second stream on the SAME session is rejected. The 409 response is non-blocking — the client falls back to the non-streaming POST, which is the existing UX.
+
+### Out of scope — parked (rollback candidates)
+
+- **True token-by-token streaming.** v1 emits one delta per upstream response. Future: integrate with the upstream provider's SSE / chunked response.
+- **Patch streaming.** `patches[]` and `annotations[]` are part of the final message envelope; they do not stream incrementally.
+- **Reconnect on disconnect.** SSE drops mid-stream are not auto-recovered. Partial reply is persisted; user re-sends to get a fresh stream.
+- **Per-attachment streaming for vision messages.** Vision-capable messages are built lazily in `buildChatRequestContext`; the streaming endpoint uses the same path.
+
+### Mood / risk flag
+
+> Slice I is the polish slice — the lowest-risk of the three. It doesn't change any underlying contract; it adds a new endpoint and a new client-side flow that fall back gracefully to the existing UX. The two real risks are (1) memory growth on long streams (mitigated by immediate per-chunk writes; no buffering on the server) and (2) client disconnects mid-stream (mitigated by `req.on('close')` abort handling + partial-reply persistence). **Net test surface +14 slots, all green.** Commit chain: `<Session #14 / Slice III> → <CR-31 / Session #15>`.

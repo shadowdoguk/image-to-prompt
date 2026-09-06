@@ -975,3 +975,197 @@ audit: {
 ```
 
 The audit trail is end-to-end inspectable from `data/chat_sessions.json` without re-running the merge logic.
+
+---
+
+## §29 — Streaming responses (CR-A9 / SPEC §24)
+
+### A1 — Transport
+
+Server-Sent Events over plain HTTP. The endpoint is `GET /api/chat/sessions/:id/messages/stream` with query parameters:
+
+```
+content:       string   (the user's message; required)
+provider:      string   (default 'kilo_code')
+llmModel:      string   (provider-specific)
+attachment_ids: csv     (comma-separated; optional)
+```
+
+Response headers:
+
+```
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+X-Accel-Buffering: no   (disable nginx-style buffering if behind a proxy)
+```
+
+Each event is one `data: <json>\n\n` line. Three event types:
+
+```
+data: {"delta": "incremental text"}\n\n
+data: {"done": true, "message_id": "msg_...", "session": {...}}\n\n
+data: {"error": "error message"}\n\n
+```
+
+The client uses the `delta` events to append to a placeholder message; the `done` event carries the final session state; the `error` event indicates mid-stream failure.
+
+### A2 — Server pipeline
+
+The streaming endpoint mirrors the existing `POST /api/chat/sessions/:id/messages` route but pipes the model's response as it arrives. The pipeline:
+
+1. Validate query params (mirror of `validateChatMessage` for `content`, `provider`, `llmModel`, `attachment_ids`).
+2. Resolve session + provider/model.
+3. Build the chat request context (RAG retrieval, history compaction, persona prompt assembly).
+4. Append the user message to the session.
+5. Call the upstream provider with `stream: true`. The provider returns a ReadableStream of chunks.
+6. Pipe each chunk to the SSE response: parse the chunk, extract the `delta` field, write `data: {"delta": "..."}\n\n` to `res`.
+7. On stream completion, extract the full `reply` + `suggested_prompt` + `patches` + `annotations` from the accumulated response.
+8. Run the SPEC §23 patch merge + ADR 0012 anchor-preservation on the result.
+9. Persist the full assistant message on the session.
+10. Emit `data: {"done": true, "message_id": "...", "session": {...}}\n\n`.
+11. Listen for `req.on('close')` to abort the upstream call if the client disconnects.
+
+```js
+app.get('/api/chat/sessions/:id/messages/stream', async (req, res) => {
+  // 1-4: validate + resolve + context + append user message
+  // ...
+  
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  
+  let aborted = false;
+  req.on('close', () => { aborted = true; });
+  
+  try {
+    const stream = callProviderStream(provider, llmModel, 'chat', {
+      messages: [...],
+      stream: true
+    });
+    
+    let accumulatedReply = '';
+    for await (const chunk of stream) {
+      if (aborted) break;
+      const delta = extractDelta(chunk);
+      if (delta) {
+        accumulatedReply += delta;
+        res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+      }
+    }
+    
+    if (aborted) {
+      // Persist partial reply + audit
+      persistAssistantMessage(session, accumulatedReply, null, /* audit */ { kind: 'stream_aborted' });
+      return;
+    }
+    
+    // 6-9: parse + merge + validate + persist
+    const parsedReply = extractChatReply(accumulatedReply);
+    const patchResult = applyChatPatches(currentPrompt, parsedReply.patches);
+    const finalSuggested = patchResult.merged || parsedReply.suggested_prompt;
+    persistAssistantMessage(session, parsedReply.reply, finalSuggested, /* ... */);
+    
+    res.write(`data: ${JSON.stringify({ done: true, message_id: '...', session: session })}\n\n`);
+    res.end();
+  } catch (err) {
+    res.write(`data: ${JSON.stringify({ error: sanitizeError(err.message) })}\n\n`);
+    res.end();
+  }
+});
+```
+
+### A3 — Client pipeline
+
+The client replaces `submitChatMessage` with a streaming flow:
+
+```js
+const submitChatMessageStreaming = async () => {
+  if (!state.chatSessionId) return;
+  const content = dom.chatInput.value.trim();
+  if (!content) return;
+  
+  // Optimistically append a placeholder user message + an empty assistant message
+  const userMessage = { id: 'temp_user', role: 'user', content, timestamp: new Date().toISOString() };
+  const assistantPlaceholder = { id: 'temp_assistant', role: 'assistant', content: '', timestamp: new Date().toISOString() };
+  renderChatMessages({ ...session, messages: [...session.messages, userMessage, assistantPlaceholder] });
+  
+  // Build the URL with query params
+  const params = new URLSearchParams({
+    content,
+    provider: state.provider || 'kilo_code',
+    llmModel: state.llmModel || '',
+    attachment_ids: state.chatPendingAttachmentIds.join(',')
+  });
+  const url = `/api/chat/sessions/${state.chatSessionId}/messages/stream?${params}`;
+  
+  // Use fetch + ReadableStream (works in all modern browsers; EventSource is GET-only and doesn't support POST bodies — we use GET because the request fits in a query string)
+  const controller = new AbortController();
+  state.chatStreamAbortController = controller;
+  
+  // Show Stop button
+  showStopButton();
+  
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n\n');
+      buffer = lines.pop(); // incomplete event stays in buffer
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = JSON.parse(line.slice(6));
+        if (payload.delta) {
+          assistantPlaceholder.content += payload.delta;
+          // Re-render the placeholder
+          renderChatMessages({ ...session, messages: [...session.messages, userMessage, assistantPlaceholder] });
+        } else if (payload.done) {
+          // Replace placeholder with final message
+          state.chatSessions[idx] = payload.session;
+          renderChatMessages(payload.session);
+        } else if (payload.error) {
+          showChatError(payload.error);
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      // User clicked Stop
+      assistantPlaceholder.audit = { kind: 'stream_aborted' };
+    } else {
+      showChatError(err.message);
+    }
+  } finally {
+    hideStopButton();
+    state.chatStreamAbortController = null;
+  }
+};
+```
+
+The Stop button:
+
+```js
+const stopStreaming = () => {
+  if (state.chatStreamAbortController) {
+    state.chatStreamAbortController.abort();
+  }
+};
+```
+
+### A4 — Error handling
+
+Three failure modes:
+
+1. **Connection drop mid-stream.** Server detects `req.on('close')`, aborts upstream call, persists partial reply with `audit: { kind: 'stream_aborted' }`. Client sees `AbortError`, doesn't show error toast (just stops rendering).
+2. **Model error mid-stream.** Server catches the upstream error, emits `data: {"error": "..."}\n\n`, ends the stream. Client shows error toast + replaces the placeholder with the partial reply + an error indicator.
+3. **Concurrent stream.** Server's session-level mutex rejects a second concurrent stream with 409. Client falls back to non-streaming `POST` and shows "another stream is already in progress" status.
+
+The session-level mutex is a simple `Set<sessionId>` of active streams, cleared when the stream completes or errors.

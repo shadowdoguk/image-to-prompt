@@ -3457,3 +3457,92 @@ body {
 .chat-patch-chip--no-op .chat-patch-chip__status {
   color: var(--text-muted);
 }
+
+/* SPEC §24 / CR-A9 — streaming responses. Typing indicator + Stop
+   button + live-reply placeholder. */
+
+/* Typing indicator: three pulsing dots that signal "the model is
+   responding". Hidden when the stream emits any text. */
+.chat-typing-indicator {
+  display: inline-flex;
+  gap: 4px;
+  padding: 0.4rem 0.6rem;
+  background: var(--bg-secondary);
+  border-radius: var(--radius);
+  margin-top: 0.4rem;
+}
+
+.chat-typing-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: chat-typing-pulse 1.2s ease-in-out infinite;
+}
+
+.chat-typing-indicator__dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.chat-typing-indicator__dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes chat-typing-pulse {
+  0%, 60%, 100% {
+    opacity: 0.3;
+    transform: scale(0.85);
+  }
+  30% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.chat-typing-indicator--streaming {
+  /* Style variant shown alongside a partial reply (dots at the end). */
+  font-style: italic;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+/* Stop generating button: replaces the Send button while a stream is
+   active. Visible only when state.chatStreamAbortController is set. */
+.chat-stop-btn {
+  background: var(--warning);
+  color: #0f1115;
+  border: none;
+  border-radius: var(--radius);
+  padding: 0.5rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.chat-stop-btn:hover {
+  filter: brightness(1.1);
+}
+
+/* Live-reply placeholder: a translucent assistant message that fills
+   in as the stream emits deltas. Visually distinct from a final
+   message so the user knows the response is still in progress. */
+.chat-message--streaming .chat-message__content {
+  border-left: 2px solid var(--warning);
+  padding-left: 0.6rem;
+}
+
+.chat-message--streaming .chat-message__role::after {
+  content: ' · generating…';
+  color: var(--warning);
+  font-style: italic;
+  font-weight: normal;
+}
+
+/* When streaming is aborted, mark the message with a subtle indicator. */
+.chat-message--aborted .chat-message__content::before {
+  content: '⏹ Stream aborted — ';
+  color: var(--warning);
+  font-style: italic;
+  font-size: 0.78rem;
+}

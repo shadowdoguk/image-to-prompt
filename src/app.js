@@ -47,6 +47,7 @@
     chatSessions: [],           // ADR 0011 — all chat sessions, newest first
     chatSessionId: null,        // ADR 0011 — id of the session anchored to the current generated prompt
     chatIsSending: false,       // ADR 0011 — true while waiting on /api/chat/sessions/:id/messages
+    chatStreamAbortController: null, // SPEC §24 — AbortController for the active stream
     chatPendingAttachmentIds: [], // CR-2 — attachment ids queued for the next send
     chatPendingAttachmentMeta: {}, // CR-2 — map id → { filename, mime, size } for the preview UI
     selectedAspectRatio: '',    // ADR 0019 Issue #15 — '' means "auto / no preference"
@@ -284,6 +285,7 @@
     chatInput: $('chat-input'),
     chatInputCount: $('chat-input-count'),
     chatSendBtn: $('chat-send-btn'),
+    chatStopBtn: $('chat-stop-btn'),
     chatFormStatus: $('chat-form-status'),
     chatAttachBtn: $('chat-attach-btn'),
     chatAttachInput: $('chat-attach-input'),
@@ -5201,6 +5203,15 @@
     if (isPendingProposal) {
       node.classList.add('chat-message--pending');
     }
+    // SPEC §24 — streaming + aborted visual states. The streaming
+    // placeholder carries a `streaming: true` flag on the message
+    // (set by submitChatMessageStreaming); the aborted state is
+    // inferred from `audit.kind === 'stream_aborted'`.
+    if (m.streaming === true) {
+      node.classList.add('chat-message--streaming');
+    } else if (m.audit && m.audit.kind === 'stream_aborted') {
+      node.classList.add('chat-message--aborted');
+    }
 
     const header = document.createElement('div');
     header.className = 'chat-message__header';
@@ -5223,6 +5234,20 @@
     body.className = 'chat-message__content';
     body.textContent = m.content || '';
     node.appendChild(body);
+
+    // SPEC §24 — typing indicator for an empty streaming placeholder.
+    // Three pulsing dots; hidden once any content arrives.
+    if (m.streaming === true && (!m.content || m.content.length === 0)) {
+      const typing = document.createElement('div');
+      typing.className = 'chat-typing-indicator';
+      typing.setAttribute('aria-label', 'Assistant is generating a response');
+      for (let i = 0; i < 3; i++) {
+        const dot = document.createElement('span');
+        dot.className = 'chat-typing-indicator__dot';
+        typing.appendChild(dot);
+      }
+      node.appendChild(typing);
+    }
 
     // CR-2 — render attachment thumbnails under the message body.
     if (Array.isArray(m.attachment_ids) && m.attachment_ids.length > 0) {
@@ -5968,6 +5993,197 @@
     }
   };
 
+  // ─── SPEC §24 / CR-A9 — streaming responses ──────────────
+
+  /**
+   * SPEC §24 — submitChatMessageStreaming. Streams the assistant's
+   * reply via Server-Sent Events so the user sees the response fill
+   * in token-by-token instead of staring at a spinner.
+   *
+   * v1 implementation: opens a fetch + ReadableStream against the
+   * new `/api/chat/sessions/:id/messages/stream` endpoint. The server
+   * currently emits ONE synthetic `delta` chunk when the full reply
+   * arrives; the client renders it as a placeholder message that
+   * fills in immediately. Future: replace with true token streaming
+   * when the upstream providers expose SSE / chunked responses.
+   *
+   * Failure modes:
+   *  - Network error: client-side fetch throws; placeholder message
+   *    is preserved with the partial content + an error indicator.
+   *  - Server-side abort: client disconnects via the Stop button;
+   *    placeholder is preserved with `audit: { kind: 'stream_aborted' }`.
+   *  - 409 concurrent: server rejects a second stream; client falls
+   *    back to the non-streaming POST route.
+   */
+  const submitChatMessageStreaming = async (e) => {
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
+    if (state.chatIsSending) return;
+    if (!state.chatSessionId) {
+      setChatFormStatus('No active conversation — generate a prompt first.', true);
+      return;
+    }
+    const text = (dom.chatInput.value || '').trim();
+    if (text.length === 0) {
+      setChatFormStatus('Message cannot be empty.', true);
+      return;
+    }
+    if (text.length > 2000) {
+      setChatFormStatus('Message must be 2000 characters or fewer.', true);
+      return;
+    }
+
+    state.chatIsSending = true;
+    if (dom.chatSendBtn) dom.chatSendBtn.hidden = true;
+    if (dom.chatStopBtn) dom.chatStopBtn.hidden = false;
+    setChatFormStatus('Streaming…', false);
+
+    // Optimistically render the user message + a streaming placeholder.
+    const session = state.chatSessions.find((s) => s.id === state.chatSessionId);
+    const userMessage = {
+      id: `temp_user_${Date.now()}`,
+      role: 'user',
+      content: text,
+      suggested_prompt: null,
+      timestamp: new Date().toISOString(),
+      attachment_ids: Array.isArray(state.chatPendingAttachmentIds) ? [...state.chatPendingAttachmentIds] : []
+    };
+    const streamingPlaceholder = {
+      id: `temp_streaming_${Date.now()}`,
+      role: 'assistant',
+      content: '',
+      suggested_prompt: null,
+      timestamp: new Date().toISOString(),
+      retrieval_ids: [],
+      streaming: true
+    };
+    if (session) {
+      session.messages.push(userMessage, streamingPlaceholder);
+      renderChatMessages(session);
+    }
+
+    // Build the SSE URL with query params (the endpoint accepts GET).
+    const params = new URLSearchParams({
+      content: text,
+      provider: state.provider || 'kilo_code',
+      llmModel: state.llmModel || '',
+      attachment_ids: Array.isArray(state.chatPendingAttachmentIds)
+        ? state.chatPendingAttachmentIds.join(',')
+        : ''
+    });
+    const url = `/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}/messages/stream?${params.toString()}`;
+
+    const controller = new AbortController();
+    state.chatStreamAbortController = controller;
+
+    let sendSucceeded = false;
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok || !res.body) {
+        // Server rejected the stream (e.g. 409 concurrent, 400 validation).
+        // Fall back to the non-streaming POST.
+        const errText = await res.text().catch(() => '');
+        setChatFormStatus(`Streaming unavailable (${res.status}). Falling back to non-streaming.`, true);
+        // Roll back the optimistic messages.
+        if (session) {
+          session.messages = session.messages.filter((m) => m.id !== userMessage.id && m.id !== streamingPlaceholder.id);
+          renderChatMessages(session);
+        }
+        // Fall through to non-streaming submit.
+        await submitChatMessage();
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let accumulatedReply = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const event of events) {
+          if (!event.startsWith('data: ')) continue;
+          const payloadStr = event.slice(6);
+          let payload;
+          try { payload = JSON.parse(payloadStr); } catch (_) { continue; }
+          if (typeof payload.delta === 'string' && payload.delta.length > 0) {
+            accumulatedReply += payload.delta;
+            streamingPlaceholder.content = accumulatedReply;
+            if (session) renderChatMessages(session);
+          } else if (payload.done === true && payload.session) {
+            // Final event — splice the persisted session.
+            const idx = state.chatSessions.findIndex((s) => s.id === payload.session.id);
+            if (idx !== -1) state.chatSessions[idx] = payload.session;
+            else state.chatSessions.unshift(payload.session);
+            state.chatSessions.sort((a, b) => {
+              const at = new Date(a.updated_at || a.created_at || 0).getTime();
+              const bt = new Date(b.updated_at || b.created_at || 0).getTime();
+              return bt - at;
+            });
+            renderChatSessionSelect();
+            renderChatMessages(payload.session);
+            // Mirror to result panel if the assistant proposed a revision.
+            if (state.model === 'anima' && state.animaResult && payload.session.current_prompt) {
+              state.animaResult = { ...state.animaResult, positive: payload.session.current_prompt };
+              if (dom.animaResultPositive) dom.animaResultPositive.value = payload.session.current_prompt;
+            } else if (payload.session.current_prompt) {
+              state.finalPrompt = payload.session.current_prompt;
+              if (dom.resultPrompt) dom.resultPrompt.textContent = payload.session.current_prompt;
+              updateTokenReminderBanner();
+            }
+            if (dom.chatSessionStatus && !dom.chatSessionStatus.hidden) {
+              dom.chatSessionStatus.textContent = formatChatSessionStatus(payload.session);
+            }
+            sendSucceeded = true;
+          } else if (typeof payload.error === 'string') {
+            setChatFormStatus(`Stream error: ${payload.error}`, true);
+            streamingPlaceholder.content = accumulatedReply;
+            streamingPlaceholder.audit = { kind: 'stream_error', error: payload.error };
+            if (session) renderChatMessages(session);
+          }
+        }
+      }
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        // User clicked Stop. The placeholder is preserved with the
+        // partial reply and an audit marker.
+        streamingPlaceholder.audit = { kind: 'stream_aborted' };
+        if (session) renderChatMessages(session);
+        setChatFormStatus('Stream stopped.', false);
+      } else {
+        const friendly = friendlyChatError(err.message || 'Network error');
+        setChatFormStatus(friendly, true);
+        streamingPlaceholder.audit = { kind: 'stream_error', error: err.message };
+        if (session) renderChatMessages(session);
+      }
+    } finally {
+      state.chatIsSending = false;
+      state.chatStreamAbortController = null;
+      if (dom.chatSendBtn) dom.chatSendBtn.hidden = false;
+      if (dom.chatStopBtn) dom.chatStopBtn.hidden = true;
+      if (sendSucceeded) {
+        dom.chatInput.value = '';
+        updateChatInputCount();
+        setChatFormStatus('Reply received.', false);
+      }
+      updateChatSendButton();
+    }
+  };
+
+  /**
+   * SPEC §24 — stop the active stream. Wired to the Stop generating
+   * button. Aborts the underlying fetch via AbortController; the
+   * server detects the closed connection and persists a partial
+   * reply with `audit: { kind: 'stream_aborted' }`.
+   */
+  const stopChatStream = () => {
+    if (state.chatStreamAbortController) {
+      state.chatStreamAbortController.abort();
+    }
+  };
+
   /**
    * Inject (or refresh) a "Retry" button next to the chat status line.
    * Clicking it re-submits the same message text — handy when the
@@ -6196,7 +6412,13 @@
   // ─── Wire up chat console controls ──────────────────────────────────
 
   if (dom.chatForm) {
-    dom.chatForm.addEventListener('submit', submitChatMessage);
+    // SPEC §24 — the form now submits via the streaming endpoint.
+    // Falls back to the non-streaming POST on server rejection.
+    dom.chatForm.addEventListener('submit', submitChatMessageStreaming);
+    // SPEC §24 — wire the Stop generating button.
+    if (dom.chatStopBtn) {
+      dom.chatStopBtn.addEventListener('click', stopChatStream);
+    }
 
     // CR-2 — wire up the paperclip + file input handlers.
     if (dom.chatAttachBtn && dom.chatAttachInput) {
