@@ -8285,6 +8285,121 @@ test('Chat context: bounds pathological system prompt and retains original promp
   assertTrue(/truncat|…/i.test(context.systemPrompt), 'truncation is marked clearly');
 });
 
+// ─── Chat regression: prompt-budget overflow must not silently drop user history ──
+//
+// Bug: when the system prompt (including RAG retrieval block) exceeds
+// CHAT_CONTEXT_CHAR_BUDGET, buildChatRequestContext returns an empty
+// messages array — only the system message is sent to the upstream.
+// Kilo Code / MiniMax reject the request with HTTP 400 "messages must
+// not be empty (2013)" and the chat route re-raises it as a 500 to the
+// browser. The previous behaviour silently degraded conversation history
+// to zero turns.
+//
+// Regression: buildChatRequestContext must ALWAYS include at least the
+// last user turn when the session has any user messages, regardless of
+// whether the system prompt fits the budget. The seam is the context
+// builder; the wire body must not have [system] alone.
+//
+// Verified against the bug report (chat_dfb906dde2c77025, 2026-09-07):
+// system prompt 20,434 chars (RAG retrieval block pushed it past the
+// 20,000-char cap), messages = [] — confirmed upstream error
+//   Kilo Code chat error (400): invalid params, messages must not be empty (2013)
+
+test('Chat context regression: prompt-budget overflow must not collapse history to zero', async () => {
+  const {
+    CHAT_CONTEXT_CHAR_BUDGET,
+    buildChatRequestContext
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+
+  // The bug fires when the system prompt (including the RAG retrieval
+  // block) exceeds CHAT_CONTEXT_CHAR_BUDGET. To reproduce in a
+  // KILO_API_KEY-less test environment, stub rag.retrieve to return
+  // a realistic top-k corpus. Restore the original method after.
+  // 4 chunks × 480 chars each ≈ 1,800 chars of retrieval block + base
+  // system prompt (19,310 chars for an 8k working prompt) ≈ 21k chars,
+  // past the 20,000-char budget. This is exactly the production path:
+  // sessions that have been iterated over several turns accumulate
+  // retrieval history that pushes the system prompt past the cap.
+  const ragModule = require(path.join(PROJECT_ROOT, 'server/lib/rag.js'));
+  const originalRetrieve = ragModule.retrieve;
+  ragModule.retrieve = async () => ([
+    { id: 'a', source: 'stage2', content: 'Pastel-focal alla prima oil painting — saturated focal accent. '.repeat(20), similarity: 0.95 },
+    { id: 'b', source: 'chat', content: 'Lost-and-found edges, scumbled atmospheric layers. '.repeat(20), similarity: 0.85 },
+    { id: 'c', source: 'stage2', content: 'Palette-knife ridges, no depicted light source. '.repeat(20), similarity: 0.80 },
+    { id: 'd', source: 'chat', content: 'Chromatic vibration from juxtaposed warm and cool near-complementaries. '.repeat(20), similarity: 0.75 }
+  ]);
+  try {
+    // ~3.3 KB of working prompt — the sweet spot where the trim cascade
+    // in buildChatSystemPrompt does NOT shrink the prompt (so the base
+    // system prompt is at its largest), but combined with the retrieval
+    // block it overflows CHAT_CONTEXT_CHAR_BUDGET.
+    const session = {
+      preset_id: 'preset_968c0ccdf6fc6151',
+      original_prompt: 'A woman stands at the center of the composition. '.repeat(70),
+      current_prompt: 'A woman stands at the center, frontal view, body oriented toward the viewer. '.repeat(70),
+      pending_prompt: null,
+      analysis_snapshot: null,
+      messages: [
+        { role: 'user', content: 'first user turn', suggested_prompt: null, timestamp: '2026-09-07T09:00:00.000Z', attachment_ids: [] },
+        { role: 'assistant', content: 'first assistant turn', suggested_prompt: null, timestamp: '2026-09-07T09:00:01.000Z', retrieval_ids: [] },
+        { role: 'user', content: 'second user turn — the last one', suggested_prompt: null, timestamp: '2026-09-07T09:00:02.000Z', attachment_ids: [] }
+      ]
+    };
+
+    const context = await buildChatRequestContext(session);
+
+    // Diagnostic surface (visible if the assertion fails):
+    assertTrue(
+      context.systemPrompt.length > CHAT_CONTEXT_CHAR_BUDGET,
+      `test premise holds: system prompt (${context.systemPrompt.length}) exceeds budget (${CHAT_CONTEXT_CHAR_BUDGET}); otherwise this test does not exercise the bug. Bump the session prompt size or stub a larger retrieval chunk.`
+    );
+
+    // Core regression assertion:
+    assertTrue(
+      context.messages.length >= 1,
+      'context.messages must include at least the last user turn when the session has user messages — even if the system prompt overflows the budget. An empty messages array triggers upstream "messages must not be empty (2013)" rejection.'
+    );
+
+    // Last message in context.messages must be the most recent user turn
+    // (mirrors the buildChatRequestContext contract — replacement only
+    // happens when the last session message is a user turn).
+    const last = context.messages[context.messages.length - 1];
+    assertEqual(last.role, 'user', 'last message in context is the user turn');
+    assertTrue(
+      typeof last.content === 'string' && last.content.length > 0,
+      'last user message content is non-empty (may be truncated when budget is too small to fit it verbatim)'
+    );
+  } finally {
+    ragModule.retrieve = originalRetrieve;
+  }
+});
+
+test('Chat context: non-overflowing prompt preserves last user turn verbatim', async () => {
+  // Regression for the budget-overflow fix: confirm we did NOT regress
+  // the happy-path behaviour. When the system prompt fits the budget,
+  // the last user turn must be preserved verbatim.
+  const {
+    buildChatRequestContext
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const session = {
+    preset_id: 'preset_968c0ccdf6fc6151',
+    original_prompt: 'Short original.',
+    current_prompt: 'Short current.',
+    pending_prompt: null,
+    analysis_snapshot: null,
+    messages: [
+      { role: 'user', content: 'first user turn', suggested_prompt: null, timestamp: '2026-09-07T09:00:00.000Z', attachment_ids: [] },
+      { role: 'assistant', content: 'first assistant turn', suggested_prompt: null, timestamp: '2026-09-07T09:00:01.000Z', retrieval_ids: [] },
+      { role: 'user', content: 'final user turn', suggested_prompt: null, timestamp: '2026-09-07T09:00:02.000Z', attachment_ids: [] }
+    ]
+  };
+  const context = await buildChatRequestContext(session);
+  assertTrue(context.messages.length >= 1, 'history includes the last user turn');
+  const last = context.messages[context.messages.length - 1];
+  assertEqual(last.role, 'user', 'last message is the user turn');
+  assertEqual(last.content, 'final user turn', 'last user turn preserved verbatim when budget fits');
+});
+
 // ─── CR-1 — RAG foundation (SPEC §17 / ADR 0025) ───────────────────
 
 // Each CR-1 test uses a fresh tmp index path via process.env.RAG_INDEX_FILE

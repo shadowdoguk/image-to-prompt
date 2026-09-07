@@ -7416,13 +7416,41 @@ const compactChatAnalysisSnapshot = (snapshot, maxFieldLength = 240) => {
 
 const buildBoundedChatHistory = (messages, maxChars = CHAT_HISTORY_CHAR_BUDGET) => {
   if (!Array.isArray(messages)) return [];
+  // Walk newest-first, fitting as many turns as the budget allows.
+  //
+  // Safety valve: if we exit the loop with no turns selected
+  // (because the budget is exhausted by the system prompt), the
+  // upstream provider sees a wire body of `[system]` alone and
+  // rejects with "messages must not be empty (2013)". Any
+  // non-system turn is enough to satisfy the wire contract — at
+  // minimum we ship the most-recent turn (truncated if the budget
+  // is too tight to fit it whole) so the upstream never sees an
+  // empty `messages` array.
   const selected = [];
   let chars = 0;
   for (let i = messages.length - 1; i >= 0 && selected.length < CHAT_HISTORY_MAX_MESSAGES; i--) {
     const message = messages[i];
     if (!message || (message.role !== 'user' && message.role !== 'assistant')) continue;
     if (typeof message.content !== 'string' || message.content.length === 0) continue;
-    if (chars + message.content.length > maxChars) break;
+    if (chars + message.content.length > maxChars) {
+      // Safety valve: emit the most-recent turn truncated if needed.
+      // The wire protocol requires at least one non-system message;
+      // the upstream rejects `[system]` alone with 2013.
+      if (selected.length === 0) {
+        const headChars = Math.min(64, message.content.length);
+        // Prefer within-budget (remaining > 0); when over-budget
+        // we still ship up to 64 chars because the model's context
+        // window tolerates a small overage but a totally empty
+        // turn array does not.
+        const remaining = Math.max(0, maxChars - chars);
+        const truncated = remaining >= headChars
+          ? message.content.slice(0, headChars)
+          : `${message.content.slice(0, Math.max(0, Math.min(remaining, headChars) - 1))}…`;
+        selected.unshift({ role: message.role, content: truncated });
+        chars += truncated.length;
+      }
+      break;
+    }
     selected.unshift({ role: message.role, content: message.content });
     chars += message.content.length;
   }
