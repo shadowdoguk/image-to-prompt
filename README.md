@@ -726,6 +726,41 @@ timestamp. (ADR 0009.)
 | `GET` | `/api/directives/export/all` | Download all directives as `.i2p.json` |
 | `POST` | `/api/directives/import` | Import an `.i2p.json` envelope (atomic; mints fresh ids) |
 
+### `GET /api/notes` / `POST /api/notes` / `PUT /api/notes/:id` / `DELETE /api/notes/:id` (UI-R8)
+
+Personal notes for prompts, persisted to `data/notes.json`. Each note carries `title`, `body`, optional `job_id`, optional `folder_id`, plus `created_at` / `updated_at` timestamps. `job_id` is informational — not validated against the job registry — and may be set, changed, or cleared at any time. `folder_id` references a folder in `data/notes_folders.json` (UI-R9); set it to `null` to put the note in the "Unfiled" pseudo-folder.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/notes` | List all notes, newest first by `updated_at`. Optional `?folder=<id>` (filter to folder) or `?folder=unfiled` (filter to `folder_id === null`). |
+| `GET` | `/api/notes/:id` | Get a single note (`404` if missing) |
+| `POST` | `/api/notes` | Create a note (body: `{ title, body, job_id?, folder_id? }`) |
+| `PUT` | `/api/notes/:id` | Update an existing note (body: `{ title?, body?, job_id?, folder_id? }`, partial) |
+| `PUT` | `/api/notes/:id/move` | Move a note to a folder (body: `{ folder_id: "<folder_id>" \| null }`) |
+| `DELETE` | `/api/notes/:id` | Hard-delete a note (cascades to attachments) |
+
+### Note folders (UI-R9)
+
+Folders are flat (no nesting), persisted to `data/notes_folders.json`. Two pseudo-folders — "All notes" and "Unfiled" — are surfaced client-side without any server record. The `notes_count` field is currently computed on demand by the client (server-side `notes_count` cache deferred per SPEC §25.9).
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/notes/folders` | List folders ordered by `sort_order` asc |
+| `POST` | `/api/notes/folders` | Create a folder (body: `{ name }`). 400 on duplicate name. |
+| `PUT` | `/api/notes/folders/:id` | Rename / reorder (body: `{ name?, sort_order? }`) |
+| `DELETE` | `/api/notes/folders/:id` | Hard-delete folder; notes reset to `folder_id: null` (Unfiled) |
+
+### Note attachments (UI-R9)
+
+Image attachments per note, stored on disk under `data/note_attachments/<note_id>/` with a lookup manifest at `data/note_attachments/_manifest.json`. JPG / PNG / GIF only, max 5 MB per file, max 5 attachments per note. Mirror pattern of `chat_attachments/` (ADR 0025).
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/notes/:id/attachments` | List attachments for a note (ordered by `created_at` asc) |
+| `POST` | `/api/notes/:id/attachments` | Multipart upload (field `image`). 400 on wrong MIME, 413 on > 5 MB, 409 on > 5 attachments. |
+| `GET` | `/api/note-attachments/:id/file` | Stream the file bytes (sets `Content-Disposition: inline`) |
+| `DELETE` | `/api/note-attachments/:id` | Hard-delete an attachment (file + manifest entry) |
+
 ### `POST /api/directives` body shape
 
 ```json

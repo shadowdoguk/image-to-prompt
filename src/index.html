@@ -25,6 +25,7 @@
           <a role="tab" id="nav-chat" class="nav-link" href="#/chat" aria-controls="view-chat" tabindex="-1">Chat</a>
           <a role="tab" id="nav-providers" class="nav-link" href="#/providers" aria-controls="view-providers" tabindex="-1">Providers &amp; keys</a>
           <a role="tab" id="nav-models" class="nav-link" href="#/models" aria-controls="view-models" tabindex="-1">Models</a>
+          <a role="tab" id="nav-notes" class="nav-link" href="#/notes" aria-controls="view-notes" tabindex="-1">Notes</a>
           <a role="tab" id="nav-settings" class="nav-link" href="#/settings" aria-controls="view-settings" tabindex="-1">Settings</a>
         </div>
       </nav>
@@ -456,6 +457,54 @@
       <h1 class="view-title" id="view-models-title" tabindex="-1">Models</h1>
       <p class="view-sub">Choose which models each provider offers in the app. Disabled models disappear from every dropdown immediately. At least one model must stay enabled per provider.</p>
       <div id="model-manager-root" class="model-manager" aria-busy="true">Loading model configuration…</div>
+    </section>
+
+    <section class="view" id="view-notes" role="tabpanel" aria-labelledby="nav-notes" hidden>
+      <h1 class="view-title" id="view-notes-title" tabindex="-1">Notes</h1>
+      <p class="view-sub">Personal notes and thoughts about prompts. Saved automatically to this machine (<code>data/notes.json</code>). Optionally link a note to a generation job by setting <code>job_id</code>.</p>
+
+      <div class="notes-layout notes-layout--r9">
+        <aside class="notes-folders-region" aria-label="Notes folders">
+          <div class="notes-folders-toolbar">
+            <h2 class="notes-folders-title">Folders</h2>
+            <button type="button" id="notes-new-folder-btn" class="btn-secondary notes-folders-new-btn" title="Create folder" aria-label="Create folder">+ New</button>
+          </div>
+          <ul id="notes-folders-list" class="notes-folders-list" role="listbox" aria-label="Folders">
+            <li class="notes-folder-item notes-folder-item--pseudo" data-folder-id="__all__" role="option" aria-selected="true">
+              <button type="button" class="notes-folder-btn notes-folder-btn--active">
+                <span class="notes-folder-name">All notes</span>
+                <span class="notes-folder-count" id="notes-folder-count-all">0</span>
+              </button>
+            </li>
+            <li class="notes-folder-item notes-folder-item--pseudo" data-folder-id="__unfiled__" role="option" aria-selected="false">
+              <button type="button" class="notes-folder-btn">
+                <span class="notes-folder-name">Unfiled</span>
+                <span class="notes-folder-count" id="notes-folder-count-unfiled">0</span>
+              </button>
+            </li>
+            <li class="notes-folders-separator" aria-hidden="true"></li>
+          </ul>
+          <ul id="notes-folders-user" class="notes-folders-list notes-folders-list--user" aria-label="User folders"></ul>
+        </aside>
+
+        <div class="notes-list-region">
+          <div class="notes-list-toolbar">
+            <input type="search" id="notes-search" class="text-input" placeholder="Filter by title or body…" autocomplete="off" aria-label="Filter notes" aria-controls="notes-list">
+            <span id="notes-count" class="notes-count" aria-live="polite"></span>
+            <div class="notes-toolbar-actions">
+              <button type="button" id="notes-new-btn" class="btn-secondary">New note</button>
+            </div>
+          </div>
+          <ul id="notes-list" class="notes-list" role="listbox" aria-label="Notes in selected folder"></ul>
+          <p id="notes-empty" class="notes-empty" hidden>No notes yet. Click <strong>New note</strong> to start one.</p>
+        </div>
+
+        <div class="notes-panel-region" aria-label="Selected note details">
+          <div id="notes-panel" class="notes-panel" aria-busy="false">
+            <p class="notes-panel__placeholder">Select a note to view, edit, or link it to a job. Changes save automatically.</p>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="view" id="view-settings" role="tabpanel" aria-labelledby="nav-settings" hidden>

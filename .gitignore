@@ -22,6 +22,17 @@ data/subject_prompt.json
 # ADR 0024 — provider API keys saved via the Providers & keys view.
 # Never part of the codebase.
 data/provider_keys.json
+# UI-R8 — personal notes for prompts (Notes tab). Per-user state;
+# persisted to the local desktop install. Never part of the codebase.
+data/notes.json
+# UI-R9 — note folders (flat list; per-user state).
+data/notes_folders.json
+# UI-R9 — note-attachment blobs on disk + the per-directory manifest.
+# Mirrors data/chat_attachments/ (gitignored, ADR 0025).
+data/note_attachments/
+# SPEC §26 / ADR 0029 — preservation-override telemetry. Per-user
+# append-only log; never part of the codebase.
+data/preservation_override_log.json
 # CR-series (SPEC §17–20 / ADR 0025) — auto-managed RAG index and
 # user-uploaded chat attachments. The curated seed in data/rag_corpus/
 # IS tracked (it's part of the codebase). The index is auto-managed

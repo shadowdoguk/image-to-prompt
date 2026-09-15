@@ -24,7 +24,7 @@
   // ─── §1 Utilities ────────────────────────────────────────────────────────
 
   const $ = (id) => document.getElementById(id);
-  const VIEWS = ['create', 'library', 'chat', 'providers', 'models', 'settings'];
+  const VIEWS = ['create', 'library', 'chat', 'providers', 'models', 'notes', 'settings'];
 
   const announcer = $('a11y-announcer');
   /** Announce to screen readers via the polite live region (AX5). */
@@ -82,6 +82,9 @@
     }
     if (view === 'models') {
       renderModelsView(); // fresh config whenever the module is opened
+    }
+    if (view === 'notes') {
+      renderNotesView(); // fresh fetch + re-render whenever the module is opened
     }
   };
 
@@ -1075,6 +1078,724 @@
     watchAnnounce('analysis-editor', 'Analysis complete. Edit any field, then generate.');
   };
 
+  // ─── §10 Notes view (UI-R8) ──────────────────────────────────────────────
+  // Personal notes for prompts. CRUD against /api/notes, persisted to
+  // data/notes.json on the server. Auto-save: edits to title/body/job_id
+  // fire a debounced PUT ~600ms after the last keystroke; the "Save"
+  // button forces an immediate save and reports the outcome.
+
+  // UI-R9 — Notes folders + attachments state.
+  // Folders are flat (no nesting). The "All notes" and "Unfiled"
+  // pseudo-folders are client-only constructs.
+  const notesState = {
+    items: [],
+    selectedId: null,
+    filter: '',
+    folders: [],           // server-known folders (sorted by sort_order)
+    activeFolderId: '__all__', // '__all__' | '__unfiled__' | folder_<hex>
+    attachments: {},        // { [note_id]: [{id, filename, mime, size, ...}] }
+    attachmentsLoading: {},  // { [note_id]: boolean }
+    draggingNoteId: null    // UI-R9 — title drag source
+  };
+  const NOTES_AUTOSAVE_MS = 600;
+  const notesAutosaveTimers = new Map();
+  const NOTE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+  const NOTE_ATTACHMENT_ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/gif'];
+
+  // helpers
+  const formatBytes = (n) => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / 1024 / 1024).toFixed(2)} MB`;
+  };
+  const computeFolderCounts = () => {
+    const counts = { __all__: notesState.items.length, __unfiled__: 0 };
+    notesState.folders.forEach((f) => { counts[f.id] = 0; });
+    notesState.items.forEach((n) => {
+      if (n.folder_id == null) counts.__unfiled__ += 1;
+      else if (counts[n.folder_id] !== undefined) counts[n.folder_id] += 1;
+    });
+    return counts;
+  };
+
+  const renderNotesView = async () => {
+    const list = $('notes-list');
+    if (!list) return;
+    const panel = $('notes-panel');
+    if (panel) panel.setAttribute('aria-busy', 'true');
+    try {
+      const [notesBody, foldersBody] = await Promise.all([
+        api('/api/notes'),
+        api('/api/notes/folders').catch(() => ({ success: false, data: [] }))
+      ]);
+      notesState.items = Array.isArray(notesBody.data) ? notesBody.data : [];
+      notesState.folders = Array.isArray(foldersBody.data) ? foldersBody.data : [];
+    } catch (err) {
+      notesState.items = [];
+      notesState.folders = [];
+      if (panel) {
+        panel.setAttribute('aria-busy', 'false');
+        panel.innerHTML = `<p class="notes-error">Could not load notes: ${escapeHtml(err.message)}</p>`;
+      }
+      renderNotesList();
+      renderNotesFolders();
+      return;
+    }
+    if (panel) panel.setAttribute('aria-busy', 'false');
+    // If the previously selected note is gone (deleted elsewhere), drop it.
+    if (notesState.selectedId && !notesState.items.some((n) => n.id === notesState.selectedId)) {
+      notesState.selectedId = null;
+    }
+    renderNotesList();
+    renderNotesFolders();
+  };
+
+  const renderNotesList = () => {
+    const list = $('notes-list');
+    const empty = $('notes-empty');
+    const count = $('notes-count');
+    if (!list) return;
+    const filter = notesState.filter.trim().toLowerCase();
+    // UI-R9 — filter by active folder.
+    const folderItems = notesState.items.filter((n) => {
+      const fid = notesState.activeFolderId;
+      if (fid === '__all__') return true;
+      if (fid === '__unfiled__') return n.folder_id == null;
+      return n.folder_id === fid;
+    });
+    const items = folderItems.filter((n) => {
+      if (!filter) return true;
+      return (n.title || '').toLowerCase().includes(filter)
+        || (n.body || '').toLowerCase().includes(filter)
+        || ((n.job_id || '') && n.job_id.toLowerCase().includes(filter));
+    });
+    list.textContent = '';
+    if (count) count.textContent = `${items.length} of ${folderItems.length}`;
+    if (items.length === 0) {
+      if (empty) {
+        const active = notesState.activeFolderId;
+        const folderName = active === '__all__' ? null
+          : active === '__unfiled__' ? 'Unfiled'
+          : (notesState.folders.find((f) => f.id === active) || {}).name;
+        if (filter) {
+          empty.textContent = 'Nothing matches that filter.';
+        } else if (folderName) {
+          empty.textContent = `No notes in "${folderName}" yet.`;
+        } else {
+          empty.textContent = 'No notes yet. Click New note to start one.';
+        }
+        empty.hidden = false;
+      }
+      renderNotesPanel(null);
+      return;
+    }
+    if (empty) empty.hidden = true;
+    items.forEach((note) => {
+      const li = document.createElement('li');
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'notes-item' + (note.id === notesState.selectedId ? ' notes-item--active' : '');
+      btn.dataset.id = note.id;
+      btn.setAttribute('role', 'option');
+      btn.setAttribute('aria-selected', note.id === notesState.selectedId ? 'true' : 'false');
+      const preview = (note.body || '').slice(0, 80).replace(/\s+/g, ' ').trim();
+      const folderTag = note.folder_id
+        ? (notesState.folders.find((f) => f.id === note.folder_id) || {}).name || 'Folder'
+        : null;
+      const metaParts = [];
+      if (folderTag) metaParts.push(folderTag);
+      if (note.job_id) metaParts.push(`job: ${note.job_id}`);
+      if (metaParts.length === 0) metaParts.push(new Date(note.updated_at || note.created_at || '').toLocaleString());
+      const meta = metaParts.join(' · ');
+      btn.innerHTML = `
+        <span class="notes-item__name">${escapeHtml(note.title || '(untitled)')}</span>
+        ${preview ? `<span class="notes-item__preview">${escapeHtml(preview)}</span>` : ''}
+        <span class="notes-item__meta">${escapeHtml(meta)}</span>`;
+      btn.addEventListener('click', () => {
+        notesState.selectedId = note.id;
+        renderNotesList();
+        renderNotesPanel(note);
+      });
+      li.appendChild(btn);
+      list.appendChild(li);
+    });
+    const selected = items.find((n) => n.id === notesState.selectedId);
+    renderNotesPanel(selected || null);
+    // Update folder count badges.
+    renderNotesFoldersCounts();
+  };
+
+  // ─── UI-R9 — Notes folders render ─────────────────────────────────────────
+
+  const renderNotesFolders = () => {
+    const userList = $('notes-folders-user');
+    if (!userList) return;
+    userList.textContent = '';
+    notesState.folders.forEach((folder) => {
+      const li = document.createElement('li');
+      li.className = 'notes-folder-item';
+      li.dataset.folderId = folder.id;
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', folder.id === notesState.activeFolderId ? 'true' : 'false');
+      const isActive = folder.id === notesState.activeFolderId;
+      li.innerHTML = `
+        <div class="notes-folder-btn ${isActive ? 'notes-folder-btn--active' : ''}" data-folder-id="${escapeHtml(folder.id)}" tabindex="0">
+          <span class="notes-folder-name" data-folder-name="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</span>
+          <span class="notes-folder-count" data-folder-count="${escapeHtml(folder.id)}">0</span>
+          <span class="notes-folder-actions">
+            <button type="button" class="notes-folder-action-btn notes-folder-action-btn--rename" data-action="rename" data-folder-id="${escapeHtml(folder.id)}" title="Rename" aria-label="Rename folder ${escapeHtml(folder.name)}">✎</button>
+            <button type="button" class="notes-folder-action-btn notes-folder-action-btn--danger" data-action="delete" data-folder-id="${escapeHtml(folder.id)}" title="Delete" aria-label="Delete folder ${escapeHtml(folder.name)}">×</button>
+          </span>
+        </div>`;
+      userList.appendChild(li);
+    });
+    // Update pseudo-folder aria-selected.
+    ['__all__', '__unfiled__'].forEach((id) => {
+      const el = document.querySelector(`.notes-folder-item[data-folder-id="${id}"]`);
+      if (el) el.setAttribute('aria-selected', notesState.activeFolderId === id ? 'true' : 'false');
+    });
+    // Update active class on pseudo.
+    document.querySelectorAll('.notes-folder-item--pseudo .notes-folder-btn').forEach((btn) => {
+      const id = btn.parentElement.dataset.folderId;
+      btn.classList.toggle('notes-folder-btn--active', id === notesState.activeFolderId);
+    });
+    renderNotesFoldersCounts();
+    wireNotesFolderDragHandlers();
+  };
+
+  const renderNotesFoldersCounts = () => {
+    const counts = computeFolderCounts();
+    const allEl = $('notes-folder-count-all');
+    const unfiledEl = $('notes-folder-count-unfiled');
+    if (allEl) allEl.textContent = counts.__all__;
+    if (unfiledEl) unfiledEl.textContent = counts.__unfiled__;
+    notesState.folders.forEach((f) => {
+      const el = document.querySelector(`[data-folder-count="${cssEscape(f.id)}"]`);
+      if (el) el.textContent = counts[f.id] || 0;
+    });
+  };
+
+  // CSS.escape polyfill — covers browsers in our test env.
+  const cssEscape = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+
+  const setActiveFolder = (folderId) => {
+    notesState.activeFolderId = folderId;
+    notesState.selectedId = null; // clear selection when changing folder
+    renderNotesFolders();
+    renderNotesList();
+  };
+
+  const wireNotesFolderDragHandlers = () => {
+    // Click handler for folder selection + rename/delete buttons.
+    document.querySelectorAll('.notes-folder-btn').forEach((btn) => {
+      const folderId = btn.dataset.folderId;
+      if (!folderId) return;
+      // Avoid duplicate listeners: use a flag.
+      if (btn.dataset._notesWired === '1') return;
+      btn.dataset._notesWired = '1';
+      btn.addEventListener('click', (e) => {
+        if (e.target.closest('.notes-folder-action-btn')) return; // handled below
+        setActiveFolder(folderId);
+      });
+    });
+    document.querySelectorAll('.notes-folder-action-btn').forEach((btn) => {
+      if (btn.dataset._notesWired === '1') return;
+      btn.dataset._notesWired = '1';
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const folderId = btn.dataset.folderId;
+        const action = btn.dataset.action;
+        if (action === 'rename') {
+          const folder = notesState.folders.find((f) => f.id === folderId);
+          if (folder) promptRenameFolder(folder);
+        } else if (action === 'delete') {
+          await confirmDeleteFolder(folderId);
+        }
+      });
+    });
+
+    // Drop target: drag a note onto a folder name to move it.
+    document.querySelectorAll('.notes-folder-item').forEach((item) => {
+      if (item.dataset._dropWired === '1') return;
+      item.dataset._dropWired = '1';
+      item.addEventListener('dragover', (e) => {
+        if (!notesState.draggingNoteId) return;
+        e.preventDefault();
+        item.classList.add('notes-folder-drag-over');
+      });
+      item.addEventListener('dragleave', () => item.classList.remove('notes-folder-drag-over'));
+      item.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        item.classList.remove('notes-folder-drag-over');
+        const noteId = notesState.draggingNoteId;
+        if (!noteId) return;
+        const folderId = item.dataset.folderId;
+        if (!folderId) return;
+        await moveNoteToFolder(noteId, folderId);
+      });
+    });
+  };
+
+  const promptRenameFolder = (folder) => {
+    const li = document.querySelector(`.notes-folder-item[data-folder-id="${cssEscape(folder.id)}"]`);
+    if (!li) return;
+    const nameSpan = li.querySelector('[data-folder-name]');
+    if (!nameSpan) return;
+    const original = folder.name;
+    const form = document.createElement('form');
+    form.className = 'notes-folder-rename-form';
+    form.innerHTML = `
+      <input type="text" class="text-input" maxlength="60" required aria-label="Folder name" value="${escapeHtml(original)}">
+      <button type="submit" class="btn-primary" style="font-size:0.75rem;padding:0.2rem 0.5rem;">Save</button>
+      <button type="button" class="btn-secondary notes-folder-cancel" style="font-size:0.75rem;padding:0.2rem 0.5rem;">Cancel</button>
+    `;
+    nameSpan.replaceWith(form);
+    const input = form.querySelector('input');
+    input.focus();
+    input.select();
+    const restore = () => {
+      const span = document.createElement('span');
+      span.className = 'notes-folder-name';
+      span.dataset.folderName = folder.id;
+      span.textContent = folder.name;
+      form.replaceWith(span);
+    };
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const newName = (input.value || '').trim();
+      if (!newName) { restore(); return; }
+      try {
+        const body = await api(`/api/notes/folders/${encodeURIComponent(folder.id)}`, {
+          method: 'PUT',
+          body: JSON.stringify({ name: newName })
+        });
+        const idx = notesState.folders.findIndex((f) => f.id === folder.id);
+        if (idx !== -1) notesState.folders[idx] = body.data;
+        folder.name = body.data.name;
+        renderNotesFolders();
+        renderNotesList();
+        announce(`Folder renamed to "${body.data.name}".`);
+      } catch (err) {
+        announce(`Could not rename folder: ${err.message}`);
+        restore();
+      }
+    });
+    form.querySelector('.notes-folder-cancel').addEventListener('click', (e) => {
+      e.preventDefault();
+      restore();
+    });
+  };
+
+  const confirmDeleteFolder = async (folderId) => {
+    const folder = notesState.folders.find((f) => f.id === folderId);
+    if (!folder) return;
+    const counts = computeFolderCounts();
+    const noteCount = counts[folderId] || 0;
+    const msg = noteCount > 0
+      ? `Delete folder "${folder.name}"? ${noteCount} note(s) will be moved to Unfiled. This cannot be undone.`
+      : `Delete folder "${folder.name}"? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
+    try {
+      await api(`/api/notes/folders/${encodeURIComponent(folderId)}`, { method: 'DELETE' });
+      notesState.folders = notesState.folders.filter((f) => f.id !== folderId);
+      notesState.items.forEach((n) => { if (n.folder_id === folderId) n.folder_id = null; });
+      if (notesState.activeFolderId === folderId) notesState.activeFolderId = '__all__';
+      renderNotesFolders();
+      renderNotesList();
+      announce(`Folder "${folder.name}" deleted.`);
+    } catch (err) {
+      announce(`Could not delete folder: ${err.message}`);
+    }
+  };
+
+  const createFolder = async () => {
+    const name = window.prompt('New folder name (1-60 chars):', '');
+    if (name == null) return;
+    const trimmed = name.trim();
+    if (trimmed.length === 0) { announce('Folder name required.'); return; }
+    try {
+      const body = await api('/api/notes/folders', {
+        method: 'POST',
+        body: JSON.stringify({ name: trimmed })
+      });
+      notesState.folders.push(body.data);
+      renderNotesFolders();
+      announce(`Folder "${body.data.name}" created.`);
+    } catch (err) {
+      announce(`Could not create folder: ${err.message}`);
+    }
+  };
+
+  const moveNoteToFolder = async (noteId, folderIdRaw) => {
+    let targetFolderId = folderIdRaw;
+    if (folderIdRaw === '__all__' || folderIdRaw === '__unfiled__') {
+      targetFolderId = null;
+    }
+    try {
+      const body = await api(`/api/notes/${encodeURIComponent(noteId)}/move`, {
+        method: 'PUT',
+        body: JSON.stringify({ folder_id: targetFolderId })
+      });
+      const idx = notesState.items.findIndex((n) => n.id === noteId);
+      if (idx !== -1) notesState.items[idx].folder_id = body.data.folder_id;
+      renderNotesList();
+      const folderName = targetFolderId
+        ? (notesState.folders.find((f) => f.id === targetFolderId) || {}).name || 'folder'
+        : 'Unfiled';
+      announce(`Note moved to ${folderName}.`);
+    } catch (err) {
+      announce(`Could not move note: ${err.message}`);
+    }
+  };
+
+  // ─── UI-R9 — Attachment state ─────────────────────────────────────────────
+
+  const fetchAttachments = async (noteId) => {
+    try {
+      const body = await api(`/api/notes/${encodeURIComponent(noteId)}/attachments`);
+      notesState.attachments[noteId] = Array.isArray(body.data) ? body.data : [];
+    } catch (err) {
+      notesState.attachments[noteId] = [];
+    }
+    renderAttachmentsGrid(noteId);
+  };
+
+  const renderAttachmentsGrid = (noteId) => {
+    const grid = $(`notes-attachments-grid-${cssEscape(noteId)}`);
+    if (!grid) return;
+    const items = notesState.attachments[noteId] || [];
+    const busy = !!notesState.attachmentsLoading[noteId];
+    grid.innerHTML = '';
+    items.forEach((att) => {
+      const tile = document.createElement('a');
+      tile.href = `/api/note-attachments/${encodeURIComponent(att.id)}/file`;
+      tile.target = '_blank';
+      tile.rel = 'noopener noreferrer';
+      tile.className = 'notes-attachment-thumb';
+      tile.setAttribute('role', 'listitem');
+      tile.setAttribute('aria-label', `${att.filename} (${formatBytes(att.size)})`);
+      tile.draggable = false;
+      tile.innerHTML = `
+        <img src="/api/note-attachments/${encodeURIComponent(att.id)}/file" alt="${escapeHtml(att.filename)}" loading="lazy">
+        <span class="notes-attachment-meta">${escapeHtml(att.filename)} · ${formatBytes(att.size)}</span>
+        <button type="button" class="notes-attachment-delete" data-att-id="${escapeHtml(att.id)}" aria-label="Delete attachment ${escapeHtml(att.filename)}" title="Remove">×</button>`;
+      grid.appendChild(tile);
+    });
+    // "+ Add" tile — only when under cap.
+    if (items.length < 5) {
+      const add = document.createElement('label');
+      add.className = 'notes-attachment-thumb notes-attachment-thumb--add' + (busy ? ' notes-attachment-thumb--busy' : '');
+      add.setAttribute('role', 'listitem');
+      add.setAttribute('aria-label', 'Add image attachment');
+      add.innerHTML = `
+        <span class="notes-attachment-add-label" aria-hidden="true">+</span>
+        <input type="file" accept="image/jpeg,image/png,image/gif" data-note-id="${escapeHtml(noteId)}" aria-label="Choose image to attach">`;
+      grid.appendChild(add);
+    }
+    // Re-wire delete + upload handlers (we replace innerHTML, so listeners are gone).
+    grid.querySelectorAll('.notes-attachment-delete').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const attId = btn.dataset.attId;
+        if (!attId) return;
+        if (!window.confirm('Remove this image from the note?')) return;
+        try {
+          await api(`/api/note-attachments/${encodeURIComponent(attId)}`, { method: 'DELETE' });
+          notesState.attachments[noteId] = (notesState.attachments[noteId] || []).filter((a) => a.id !== attId);
+          renderAttachmentsGrid(noteId);
+          announce('Image removed.');
+        } catch (err) {
+          announce(`Could not remove image: ${err.message}`);
+        }
+      });
+    });
+    grid.querySelectorAll('input[type="file"]').forEach((input) => {
+      input.addEventListener('change', async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        await uploadAttachment(noteId, file);
+        e.target.value = '';
+      });
+    });
+  };
+
+  const uploadAttachment = async (noteId, file) => {
+    if (!NOTE_ATTACHMENT_ALLOWED_MIME.includes(file.type)) {
+      announce('Only JPG, PNG, GIF allowed.');
+      return;
+    }
+    if (file.size > NOTE_ATTACHMENT_MAX_BYTES) {
+      announce('Image must be 5 MB or smaller.');
+      return;
+    }
+    const items = notesState.attachments[noteId] || [];
+    if (items.length >= 5) {
+      announce('Maximum 5 attachments per note.');
+      return;
+    }
+    notesState.attachmentsLoading[noteId] = true;
+    renderAttachmentsGrid(noteId);
+    announce('Uploading image…');
+    const fd = new FormData();
+    fd.append('image', file);
+    try {
+      const data = await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/api/notes/${encodeURIComponent(noteId)}/attachments`);
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try { resolve(JSON.parse(xhr.responseText)); }
+            catch (_) { resolve({ success: false, error: 'Invalid response' }); }
+          } else {
+            try {
+              const body = JSON.parse(xhr.responseText);
+              reject(new Error(body.error || `HTTP ${xhr.status}`));
+            } catch (_) {
+              reject(new Error(`HTTP ${xhr.status}`));
+            }
+          }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.send(fd);
+      });
+      notesState.attachments[noteId] = [...(notesState.attachments[noteId] || []), data.data];
+      announce(`Image "${data.data.filename}" attached.`);
+    } catch (err) {
+      announce(`Upload failed: ${err.message}`);
+    } finally {
+      notesState.attachmentsLoading[noteId] = false;
+      renderAttachmentsGrid(noteId);
+    }
+  };
+
+  // ─── UI-R9 — renderNotesPanel (folders + attachments) ─────────────────────
+
+  const renderNotesPanel = (note) => {
+    const panel = $('notes-panel');
+    if (!panel) return;
+    if (!note) {
+      panel.innerHTML = '<p class="notes-panel__placeholder">Select a note to view, edit, or link it to a job. Changes save automatically.</p>';
+      return;
+    }
+    const hasJob = note.job_id != null && note.job_id !== '';
+    const folderOptions = ['<option value="">Unfiled</option>']
+      .concat(notesState.folders.map((f) => `<option value="${escapeHtml(f.id)}"${note.folder_id === f.id ? ' selected' : ''}>${escapeHtml(f.name)}</option>`))
+      .join('');
+    panel.innerHTML = `
+      <form id="notes-edit-form" class="notes-edit-form" data-id="${escapeHtml(note.id)}" autocomplete="off">
+        <div class="notes-field">
+          <label for="notes-title-input" class="label">Title</label>
+          <input type="text" id="notes-title-input" class="text-input" name="title" maxlength="120" value="${escapeHtml(note.title || '')}" required aria-required="true" draggable="true" data-drag-note="${escapeHtml(note.id)}" title="Drag this title onto a folder to move the note">
+        </div>
+        <div class="notes-field">
+          <label for="notes-body-input" class="label">Body</label>
+          <textarea id="notes-body-input" class="text-input notes-body" name="body" rows="12" required aria-required="true" maxlength="50000">${escapeHtml(note.body || '')}</textarea>
+          <span id="notes-body-counter" class="notes-counter" aria-live="off">${(note.body || '').length} / 50000</span>
+        </div>
+        <div class="notes-field">
+          <label for="notes-job-input" class="label">Linked job_id <span class="notes-field__hint">(optional)</span></label>
+          <input type="text" id="notes-job-input" class="text-input" name="job_id" maxlength="200" value="${hasJob ? escapeHtml(note.job_id) : ''}" placeholder="e.g. job_abc123">
+        </div>
+        <div class="notes-move-row">
+          <label for="notes-folder-select" class="label" style="margin:0;">Folder</label>
+          <select id="notes-folder-select" class="select">${folderOptions}</select>
+        </div>
+        <div class="notes-attachments-region" aria-busy="false">
+          <span class="label">Attachments <span class="notes-field__hint">(JPG / PNG / GIF, max 5 MB each, up to 5)</span></span>
+          <div id="notes-attachments-grid-${escapeHtml(note.id)}" class="notes-attachments-grid" role="list"></div>
+        </div>
+        <div class="notes-meta">
+          <span class="notes-meta__row">Created: <time datetime="${escapeHtml(note.created_at || '')}">${escapeHtml(note.created_at ? new Date(note.created_at).toLocaleString() : '—')}</time></span>
+          <span class="notes-meta__row">Updated: <time datetime="${escapeHtml(note.updated_at || '')}">${escapeHtml(note.updated_at ? new Date(note.updated_at).toLocaleString() : '—')}</time></span>
+        </div>
+        <div class="notes-actions">
+          <button type="submit" id="notes-save-btn" class="btn-primary">Save now</button>
+          <button type="button" id="notes-delete-btn" class="btn-secondary btn-danger-outline">Delete note</button>
+          <span id="notes-status" class="notes-status" role="status" aria-live="polite"></span>
+        </div>
+      </form>`;
+
+    // Wire the form: auto-save on input (debounced), explicit Save, Delete.
+    const form = $('notes-edit-form');
+    const titleInput = $('notes-title-input');
+    const bodyInput = $('notes-body-input');
+    const jobInput = $('notes-job-input');
+    const counter = $('notes-body-counter');
+    const folderSelect = $('notes-folder-select');
+
+    const updateCounter = () => {
+      if (counter) counter.textContent = `${(bodyInput.value || '').length} / 50000`;
+    };
+
+    const queueAutosave = () => {
+      const id = note.id;
+      if (notesAutosaveTimers.has(id)) clearTimeout(notesAutosaveTimers.get(id));
+      const timer = setTimeout(() => { notesAutosaveTimers.delete(id); submitNotesUpdate(id, { silent: true }); }, NOTES_AUTOSAVE_MS);
+      notesAutosaveTimers.set(id, timer);
+    };
+
+    [titleInput, bodyInput, jobInput].forEach((el) => {
+      if (!el) return;
+      el.addEventListener('input', () => {
+        if (el === bodyInput) updateCounter();
+        queueAutosave();
+      });
+    });
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      submitNotesUpdate(note.id, { silent: false });
+    });
+
+    const delBtn = $('notes-delete-btn');
+    if (delBtn) {
+      delBtn.addEventListener('click', async () => {
+        if (!window.confirm(`Delete note "${note.title || '(untitled)'}"? This cannot be undone.`)) return;
+        await deleteNote(note.id);
+      });
+    }
+
+    // UI-R9 — folder select handler (saves immediately; not debounced so the
+    // sidebar count updates promptly).
+    if (folderSelect) {
+      folderSelect.addEventListener('change', async () => {
+        const folderId = folderSelect.value || null;
+        try {
+          const body = await api(`/api/notes/${encodeURIComponent(note.id)}/move`, {
+            method: 'PUT',
+            body: JSON.stringify({ folder_id: folderId })
+          });
+          const idx = notesState.items.findIndex((n) => n.id === note.id);
+          if (idx !== -1) notesState.items[idx].folder_id = body.data.folder_id;
+          renderNotesFoldersCounts();
+          renderNotesList();
+          const folderName = folderId
+            ? (notesState.folders.find((f) => f.id === folderId) || {}).name || 'folder'
+            : 'Unfiled';
+          announce(`Note moved to ${folderName}.`);
+        } catch (err) {
+          announce(`Could not move note: ${err.message}`);
+        }
+      });
+    }
+
+    // UI-R9 — drag title onto a folder in the sidebar.
+    if (titleInput) {
+      titleInput.addEventListener('dragstart', (e) => {
+        notesState.draggingNoteId = note.id;
+        e.dataTransfer.effectAllowed = 'move';
+        try { e.dataTransfer.setData('text/plain', note.id); } catch (_) { /* ignore */ }
+      });
+      titleInput.addEventListener('dragend', () => {
+        notesState.draggingNoteId = null;
+      });
+    }
+
+    // UI-R9 — load + render attachments for this note.
+    fetchAttachments(note.id);
+  };
+
+  const submitNotesUpdate = async (id, opts) => {
+    const titleInput = $('notes-title-input');
+    const bodyInput = $('notes-body-input');
+    const jobInput = $('notes-job-input');
+    const status = $('notes-status');
+    if (!titleInput || !bodyInput || !jobInput) return;
+
+    const title = titleInput.value.trim();
+    const body = bodyInput.value;
+    const jobRaw = jobInput.value;
+    const job_id = jobRaw.trim() === '' ? null : jobRaw.trim();
+
+    if (title.length === 0) {
+      if (status) status.textContent = 'Title required.';
+      return;
+    }
+    if (body.trim().length === 0) {
+      if (status) status.textContent = 'Body required.';
+      return;
+    }
+
+    try {
+      const result = await api(`/api/notes/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ title, body, job_id })
+      });
+      // Patch the in-memory list with the server's normalised payload.
+      const idx = notesState.items.findIndex((n) => n.id === id);
+      if (idx !== -1) notesState.items[idx] = result.data;
+      if (!opts || !opts.silent) {
+        if (status) status.textContent = 'Saved.';
+        announce('Note saved.');
+      } else {
+        if (status) status.textContent = 'Auto-saved.';
+      }
+      window.setTimeout(() => { if (status && status.textContent) status.textContent = ''; }, 2500);
+      // Refresh list so the meta timestamp updates without losing focus.
+      renderNotesList();
+    } catch (err) {
+      if (status) status.textContent = `Save failed: ${err.message}`;
+      announce(`Could not save note: ${err.message}`);
+    }
+  };
+
+  const createNote = async () => {
+    let result;
+    try {
+      result = await api('/api/notes', {
+        method: 'POST',
+        body: JSON.stringify({ title: 'Untitled note', body: 'Write something…', job_id: null })
+      });
+    } catch (err) {
+      announce(`Could not create note: ${err.message}`);
+      return;
+    }
+    notesState.items.unshift(result.data);
+    notesState.selectedId = result.data.id;
+    renderNotesList();
+    // Focus the title so the user can rename immediately.
+    window.requestAnimationFrame(() => {
+      const t = $('notes-title-input');
+      if (t) {
+        t.focus();
+        t.select();
+      }
+    });
+  };
+
+  const deleteNote = async (id) => {
+    try {
+      await api(`/api/notes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch (err) {
+      announce(`Could not delete note: ${err.message}`);
+      return;
+    }
+    notesState.items = notesState.items.filter((n) => n.id !== id);
+    if (notesAutosaveTimers.has(id)) {
+      clearTimeout(notesAutosaveTimers.get(id));
+      notesAutosaveTimers.delete(id);
+    }
+    notesState.selectedId = null;
+    renderNotesList();
+    announce('Note deleted.');
+  };
+
+  const bindNotes = () => {
+    const search = $('notes-search');
+    if (search) {
+      search.addEventListener('input', () => {
+        notesState.filter = search.value || '';
+        renderNotesList();
+      });
+    }
+    const newBtn = $('notes-new-btn');
+    if (newBtn) newBtn.addEventListener('click', () => createNote());
+    // UI-R9 — New folder button.
+    const newFolderBtn = $('notes-new-folder-btn');
+    if (newFolderBtn) newFolderBtn.addEventListener('click', () => createFolder());
+  };
+
   // ─── Init ────────────────────────────────────────────────────────────────
 
   const initShell = () => {
@@ -1082,6 +1803,7 @@
     bindModalTraps();
     bindLibrary();
     bindSettings();
+    bindNotes();
     bindCreateExtras();
 
     fetchProviders();

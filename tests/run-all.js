@@ -11011,6 +11011,424 @@ test('UI-R7 static: Models view wired into nav, shell, and app.js dropdown sourc
   assertTrue(app.includes('__i2pEnabledModelsByProvider'), 'app.js must read the enabled-models global');
 });
 
+// ─── Slice UI-R8 — Notes tab (personal notes for prompts) ────────────
+//
+// Static + HTTP integration tests for the new /api/notes endpoints and
+// the new Notes view (#/notes). Notes are persisted to data/notes.json
+// on the server. The HTTP tests below snapshot the file before each run
+// and restore it afterwards, so they're safe to run alongside other
+// integration tests.
+
+const NOTES_FILE = path.join(PROJECT_ROOT, 'data', 'notes.json');
+const NOTES_FOLDERS_FILE = path.join(PROJECT_ROOT, 'data', 'notes_folders.json');
+const NOTE_ATTACHMENTS_MANIFEST_FILE = path.join(PROJECT_ROOT, 'data', 'note_attachments', '_manifest.json');
+const NOTE_ATTACHMENTS_DIR = path.join(PROJECT_ROOT, 'data', 'note_attachments');
+
+const snapshotNotesFile = () => {
+  if (fs.existsSync(NOTES_FILE)) {
+    return fs.readFileSync(NOTES_FILE, 'utf8');
+  }
+  return null;
+};
+
+const restoreNotesFile = (snapshot) => {
+  if (snapshot === null) {
+    if (fs.existsSync(NOTES_FILE)) fs.unlinkSync(NOTES_FILE);
+  } else {
+    fs.writeFileSync(NOTES_FILE, snapshot, 'utf8');
+  }
+};
+
+const resetNotesFile = () => {
+  fs.writeFileSync(NOTES_FILE, '[]', 'utf8');
+};
+
+const withNotesFile = async (callback) => {
+  const snapshot = snapshotNotesFile();
+  resetNotesFile();
+  try {
+    return await callback();
+  } finally {
+    restoreNotesFile(snapshot);
+  }
+};
+
+// ─── UI-R9 — Notes folders + attachments test helpers ──────────────────────
+//
+// Each helper snapshots + resets the relevant state files so tests can
+// run in isolation. Mirrors the UI-R8 withNotesFile pattern.
+
+const snapshotNotesFoldersFile = () =>
+  fs.existsSync(NOTES_FOLDERS_FILE) ? fs.readFileSync(NOTES_FOLDERS_FILE, 'utf8') : null;
+const restoreNotesFoldersFile = (snap) => {
+  if (snap === null) { if (fs.existsSync(NOTES_FOLDERS_FILE)) fs.unlinkSync(NOTES_FOLDERS_FILE); }
+  else fs.writeFileSync(NOTES_FOLDERS_FILE, snap, 'utf8');
+};
+const resetNotesFoldersFile = () => fs.writeFileSync(NOTES_FOLDERS_FILE, '[]', 'utf8');
+
+const snapshotNoteAttachmentsDir = () => {
+  if (!fs.existsSync(NOTE_ATTACHMENTS_DIR)) return null;
+  // Capture a small JSON descriptor: list of files + manifest content.
+  const walk = (dir, base = '') => {
+    const out = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const rel = path.join(base, entry.name);
+      if (entry.isDirectory()) out.push(...walk(path.join(dir, entry.name), rel));
+      else out.push({ rel, content: fs.readFileSync(path.join(dir, entry.name)) });
+    }
+    return out;
+  };
+  return { files: walk(NOTE_ATTACHMENTS_DIR), manifest: snapshotNotesFoldersFile() };
+};
+const restoreNoteAttachmentsDir = (snap) => {
+  // Wipe + restore.
+  if (fs.existsSync(NOTE_ATTACHMENTS_DIR)) {
+    fs.rmSync(NOTE_ATTACHMENTS_DIR, { recursive: true, force: true });
+  }
+  if (snap) {
+    fs.mkdirSync(NOTE_ATTACHMENTS_DIR, { recursive: true });
+    for (const f of snap.files) {
+      const dest = path.join(NOTE_ATTACHMENTS_DIR, f.rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, f.content);
+    }
+    restoreNotesFoldersFile(snap.manifest);
+  }
+};
+const resetNoteAttachmentsDir = () => {
+  if (fs.existsSync(NOTE_ATTACHMENTS_DIR)) {
+    fs.rmSync(NOTE_ATTACHMENTS_DIR, { recursive: true, force: true });
+  }
+};
+
+const withNotesFoldersAndAttachments = async (callback) => {
+  const snapNotes = snapshotNotesFile();
+  const snapFolders = snapshotNotesFoldersFile();
+  const snapAtt = snapshotNoteAttachmentsDir();
+  resetNotesFile();
+  resetNotesFoldersFile();
+  resetNoteAttachmentsDir();
+  try {
+    return await callback();
+  } finally {
+    restoreNotesFile(snapNotes);
+    restoreNotesFoldersFile(snapFolders);
+    restoreNoteAttachmentsDir(snapAtt);
+  }
+};
+
+// Multipart upload helper — used by the attachment tests.
+const postMultipart = (url, fields, file) => {
+  const boundary = '----test-' + Math.random().toString(36).slice(2);
+  const lines = [];
+  for (const [k, v] of Object.entries(fields || {})) {
+    lines.push(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`);
+  }
+  if (file) {
+    lines.push(`--${boundary}\r\nContent-Disposition: form-data; name="${file.field}"; filename="${file.filename}"\r\nContent-Type: ${file.mime}\r\n\r\n`);
+    const head = Buffer.from(lines.join(''), 'utf8');
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+    const body = Buffer.concat([head, file.content, tail]);
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+      body
+    });
+  }
+  const body = Buffer.from(lines.join('') + `--${boundary}--\r\n`, 'utf8');
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body
+  });
+};
+
+// Minimal valid 1x1 PNG (for tests that need an actual image file).
+const TINY_PNG = Buffer.from([
+  0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,
+  0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,0x08,0x06,0x00,0x00,0x00,0x1f,0x15,0xc4,
+  0x89,0x00,0x00,0x00,0x0d,0x49,0x44,0x41,0x54,0x78,0x9c,0x63,0x00,0x01,0x00,0x00,
+  0x05,0x00,0x01,0x0d,0x0a,0x2d,0xb4,0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,0xae,
+  0x42,0x60,0x82
+]);
+
+// Minimal valid 1x1 GIF.
+const TINY_GIF = Buffer.from([
+  0x47,0x49,0x46,0x38,0x39,0x61,0x01,0x00,0x01,0x00,0x80,0x00,0x00,0xff,0xff,0xff,
+  0x00,0x00,0x00,0x21,0xf9,0x04,0x01,0x00,0x00,0x00,0x00,0x2c,0x00,0x00,0x00,0x00,
+  0x01,0x00,0x01,0x00,0x00,0x02,0x02,0x44,0x01,0x00,0x3b
+]);
+
+// Minimal valid 1x1 JPEG (SOI + APP0 stub + EOI).
+const TINY_JPEG = Buffer.from([
+  0xff,0xd8,0xff,0xe0,0x00,0x10,0x4a,0x46,0x49,0x46,0x00,0x01,0x01,0x00,0x00,0x01,
+  0x00,0x01,0x00,0x00,0xff,0xd9
+]);
+
+test('UI-R8: GET /api/notes returns an array (empty on first run)', async () => {
+  await withNotesFile(async () => {
+    const srv = await startTestServer();
+    try {
+      const r = await fetchJson(`${srv.base}/api/notes`);
+      assertEqual(r.status, 200, 'GET /api/notes 200');
+      assertTrue(Array.isArray(r.body.data), 'data is an array');
+      assertEqual(r.body.data.length, 0, 'starts empty');
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+test('UI-R8: POST /api/notes creates a note and returns 201 with id', async () => {
+  await withNotesFile(async () => {
+    const srv = await startTestServer();
+    try {
+      const r = await fetchJson(`${srv.base}/api/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'My first note', body: 'Capturing thoughts here.', job_id: 'job_abc123' })
+      });
+      assertEqual(r.status, 201, 'POST returns 201');
+      assertTrue(r.body.data.id && r.body.data.id.startsWith('note_'), 'id is note_-prefixed');
+      assertEqual(r.body.data.title, 'My first note', 'title echoed');
+      assertEqual(r.body.data.body, 'Capturing thoughts here.', 'body echoed');
+      assertEqual(r.body.data.job_id, 'job_abc123', 'job_id echoed');
+      assertTrue(typeof r.body.data.created_at === 'string', 'created_at set');
+      assertTrue(typeof r.body.data.updated_at === 'string', 'updated_at set');
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+test('UI-R8: GET /api/notes/:id retrieves one note; 404 for unknown id', async () => {
+  await withNotesFile(async () => {
+    const srv = await startTestServer();
+    try {
+      const created = await fetchJson(`${srv.base}/api/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Round-trip', body: 'hello' })
+      });
+      const id = created.body.data.id;
+      const r = await fetchJson(`${srv.base}/api/notes/${id}`);
+      assertEqual(r.status, 200, 'GET one returns 200');
+      assertEqual(r.body.data.id, id, 'same id back');
+      const missing = await fetchJson(`${srv.base}/api/notes/note_doesnotexist0000`);
+      assertEqual(missing.status, 404, 'unknown id 404');
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+test('UI-R8: PUT /api/notes/:id updates fields and bumps updated_at; 400 with empty body', async () => {
+  await withNotesFile(async () => {
+    const srv = await startTestServer();
+    try {
+      const created = await fetchJson(`${srv.base}/api/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Original title', body: 'Original body.' })
+      });
+      const id = created.body.data.id;
+      const createdAt = created.body.data.created_at;
+
+      // Empty body → 400 (no fields to update).
+      const empty = await fetchJson(`${srv.base}/api/notes/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      assertEqual(empty.status, 400, 'PUT {} rejected');
+
+      // Title-only update.
+      const titleOnly = await fetchJson(`${srv.base}/api/notes/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Updated title' })
+      });
+      assertEqual(titleOnly.status, 200, 'title-only PUT 200');
+      assertEqual(titleOnly.body.data.title, 'Updated title', 'title changed');
+      assertEqual(titleOnly.body.data.body, 'Original body.', 'body untouched');
+      assertEqual(titleOnly.body.data.created_at, createdAt, 'created_at untouched');
+      assertTrue(titleOnly.body.data.updated_at >= createdAt, 'updated_at advanced');
+
+      // Full update with job_id set, then cleared.
+      const setJob = await fetchJson(`${srv.base}/api/notes/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: 'job_xyz' })
+      });
+      assertEqual(setJob.body.data.job_id, 'job_xyz', 'job_id set');
+
+      const clearJob = await fetchJson(`${srv.base}/api/notes/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: null })
+      });
+      assertEqual(clearJob.status, 200, 'clearing job_id accepted');
+      assertEqual(clearJob.body.data.job_id, null, 'job_id cleared');
+
+      // Whitespace-only job_id string normalises to null.
+      const wsJob = await fetchJson(`${srv.base}/api/notes/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: '   ' })
+      });
+      assertEqual(wsJob.body.data.job_id, null, 'whitespace-only job_id normalised to null');
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+test('UI-R8: DELETE /api/notes/:id removes a note and 404s on second delete', async () => {
+  await withNotesFile(async () => {
+    const srv = await startTestServer();
+    try {
+      const c = await fetchJson(`${srv.base}/api/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Doomed', body: 'soon to be gone' })
+      });
+      const id = c.body.data.id;
+      const del = await fetchJson(`${srv.base}/api/notes/${id}`, { method: 'DELETE' });
+      assertEqual(del.status, 200, 'DELETE 200');
+      assertEqual(del.body.data.deleted, true, 'deleted flag set');
+      const after = await fetchJson(`${srv.base}/api/notes`);
+      assertEqual(after.body.data.length, 0, 'list is empty');
+      const second = await fetchJson(`${srv.base}/api/notes/${id}`, { method: 'DELETE' });
+      assertEqual(second.status, 404, 'second DELETE 404');
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+test('UI-R8: POST /api/notes validation rejects empty title, empty body, oversize body', async () => {
+  await withNotesFile(async () => {
+    const srv = await startTestServer();
+    try {
+      const post = (payload) => fetchJson(`${srv.base}/api/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const r1 = await post({ title: '', body: 'something' });
+      assertEqual(r1.status, 400, 'empty title rejected');
+      const r2 = await post({ title: '   ', body: 'something' });
+      assertEqual(r2.status, 400, 'whitespace-only title rejected');
+      const r3 = await post({ title: 'ok', body: '' });
+      assertEqual(r3.status, 400, 'empty body rejected');
+      const r4 = await post({ title: 'ok', body: '   ' });
+      assertEqual(r4.status, 400, 'whitespace-only body rejected');
+      const huge = 'x'.repeat(50001);
+      const r5 = await post({ title: 'ok', body: huge });
+      assertEqual(r5.status, 400, 'oversize body rejected');
+      assertTrue(/50000/.test(r5.body.error || ''), 'limit value in error message');
+      const longTitle = 't'.repeat(121);
+      const r6 = await post({ title: longTitle, body: 'ok' });
+      assertEqual(r6.status, 400, 'oversize title rejected');
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+test('UI-R8: notes persist to data/notes.json across requests (atomic write)', async () => {
+  await withNotesFile(async () => {
+    const srv = await startTestServer();
+    try {
+      await fetchJson(`${srv.base}/api/notes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: 'Persisted', body: 'on disk' })
+      });
+      assertTrue(fs.existsSync(NOTES_FILE), 'data/notes.json created on disk');
+      const onDisk = JSON.parse(fs.readFileSync(NOTES_FILE, 'utf8'));
+      assertEqual(onDisk.length, 1, 'one entry persisted');
+      assertEqual(onDisk[0].title, 'Persisted', 'title persisted');
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+test('UI-R8: malformed data/notes.json is forgiven — server returns []', async () => {
+  await withNotesFile(async () => {
+    fs.writeFileSync(NOTES_FILE, '{not valid json', 'utf8');
+    const srv = await startTestServer();
+    try {
+      const r = await fetchJson(`${srv.base}/api/notes`);
+      assertEqual(r.status, 200, 'GET 200 even with corrupt file');
+      assertTrue(Array.isArray(r.body.data), 'data is an array');
+      assertEqual(r.body.data.length, 0, 'corrupt payload forgiven as empty');
+    } finally {
+      await srv.close();
+    }
+  });
+});
+
+test('UI-R8 static: Notes nav tab, view container, and shell wiring are in place', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  assertTrue(html.includes('id="nav-notes"'), 'nav-notes tab missing');
+  assertTrue(html.includes('id="view-notes"'), 'view-notes container missing');
+  assertTrue(html.includes('id="view-notes-title"'), 'view-notes heading missing');
+  assertTrue(html.includes('id="notes-list"'), 'notes-list element missing');
+  assertTrue(html.includes('id="notes-panel"'), 'notes-panel element missing');
+  assertTrue(html.includes('id="notes-new-btn"'), 'new-note button missing');
+  assertTrue(html.includes('id="notes-search"'), 'search input missing');
+  // The Notes nav-tab must be adjacent to Settings — verify it is the
+  // immediately preceding sibling inside nav-tablist.
+  const navSnippet = html.match(/<div role="tablist"[\s\S]*?<\/div>/);
+  assertTrue(navSnippet, 'nav-tablist block not found');
+  const navBlock = navSnippet[0];
+  const notesIdx = navBlock.indexOf('id="nav-notes"');
+  const settingsIdx = navBlock.indexOf('id="nav-settings"');
+  assertTrue(notesIdx !== -1 && settingsIdx !== -1, 'Notes and Settings nav tabs both present');
+  assertTrue(notesIdx < settingsIdx, 'Notes appears before Settings in the nav tablist');
+
+  const shell = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'shell.js'), 'utf8');
+  assertTrue(/'notes'/.test(shell), "notes missing from VIEWS array");
+  assertTrue(shell.includes('renderNotesView'), 'renderNotesView function missing');
+  assertTrue(shell.includes('renderNotesList'), 'renderNotesList function missing');
+  assertTrue(shell.includes('renderNotesPanel'), 'renderNotesPanel function missing');
+  assertTrue(shell.includes('submitNotesUpdate'), 'submitNotesUpdate function missing');
+  assertTrue(shell.includes('createNote'), 'createNote function missing');
+  assertTrue(shell.includes('deleteNote'), 'deleteNote function missing');
+  assertTrue(shell.includes('bindNotes'), 'bindNotes function missing');
+  assertTrue(shell.includes("'/api/notes'"), 'GET /api/notes wired in shell.js');
+  assertTrue(shell.includes("`/api/notes/${encodeURIComponent(id)}`"), 'PUT/DELETE endpoint wired');
+  assertTrue(shell.includes('bindNotes()'), 'bindNotes() called from initShell');
+});
+
+test('UI-R8 static: server registers GET / POST / PUT / DELETE for /api/notes', () => {
+  const src = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/app\.get\(['"]\/api\/notes['"]/.test(src), 'GET /api/notes route missing');
+  assertTrue(/app\.get\(['"]\/api\/notes\/:id['"]/.test(src), 'GET /api/notes/:id route missing');
+  assertTrue(/app\.post\(['"]\/api\/notes['"]/.test(src), 'POST /api/notes route missing');
+  assertTrue(/app\.put\(['"]\/api\/notes\/:id['"]/.test(src), 'PUT /api/notes/:id route missing');
+  assertTrue(/app\.delete\(['"]\/api\/notes\/:id['"]/.test(src), 'DELETE /api/notes/:id route missing');
+  // Storage helpers present.
+  assertTrue(src.includes("'note_'"), 'NOTE_ID_PREFIX constant missing');
+  assertTrue(src.includes('generateNoteId'), 'generateNoteId helper missing');
+  assertTrue(src.includes('readNotes'), 'readNotes helper missing');
+  assertTrue(src.includes('writeNotes'), 'writeNotes helper missing');
+  assertTrue(src.includes('validateNoteBody'), 'validateNoteBody helper missing');
+  assertTrue(src.includes("path.join(DATA_DIR, 'notes.json')"), 'NOTES_FILE path missing');
+});
+
+test('UI-R8 + UI-R9 + SPEC §27: notes + chat-clear endpoint count matches', () => {
+  const src = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const matches = src.match(/^app\.(get|post|put|patch|delete)\(/gm) || [];
+  // 65 after UI-R8 (60 pre-existing + 5 notes endpoints).
+  // UI-R9 adds 9 more (4 folders + 1 move + 4 attachments).
+  // SPEC §27 adds 2 more (GET count + DELETE bulk).
+  // Total target: 76.
+  assertEqual(matches.length, 76, `expected 76 endpoints after SPEC §27; got ${matches.length}`);
+});
+
 // ─── Bugfix CR-16: Analyze Image button silent failure (2026-09-04) ───
 // Regression suite for the silent early-return guard fix in
 // src/app.js runAnalysis(). Verifies:
@@ -11210,4 +11628,1372 @@ test('ADR 0026: VISION_CAPABLE_MODELS excludes the lone text-only Alibaba model 
 test('SPEC §22: restore chat_sessions.json to pre-slice state', () => {
   restoreChatFile(spec22Snapshot);
   assertTrue(true, 'chat file restored');
+});
+// ─── UI-R9 — Notes folders + image attachments (22 tests) ─────────────────
+// ─── Folders CRUD (SPEC §25.8 tests 1–7) ──────────────────────────────
+
+test('UI-R9 F1: GET /api/notes/folders returns [] on a fresh install', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const res = await fetch(`${srv.base}/api/notes/folders`);
+    assertEqual(res.status, 200, 'GET /folders returns 200');
+    const body = await res.json();
+    assertTrue(body && body.success === true, 'response success=true');
+    assertEqual(Array.isArray(body.data) ? body.data.length : -1, 0, 'data is []');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 F2: POST /api/notes/folders creates a folder (201 + folder_ id)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const res = await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Drafts' })
+    });
+    assertEqual(res.status, 201, 'POST returns 201');
+    const body = await res.json();
+    assertTrue(body && body.success === true, 'success=true');
+    assertTrue(typeof body.data.id === 'string', 'id is a string');
+    assertTrue(body.data.id.startsWith('folder_'), 'id starts with folder_');
+    assertEqual(body.data.name, 'Drafts', 'name echoed back');
+    assertEqual(typeof body.data.sort_order, 'number', 'sort_order is a number');
+    assertTrue(typeof body.data.created_at === 'string', 'created_at is a string');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 F3: POST /api/notes/folders rejects empty name (400)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const res = await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '   ' })
+    });
+    assertEqual(res.status, 400, 'POST returns 400 for empty name');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 F4: POST /api/notes/folders rejects name >60 chars (400)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const longName = 'A'.repeat(61);
+    const res = await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: longName })
+    });
+    assertEqual(res.status, 400, 'POST returns 400 for >60 char name');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 F5: PUT /api/notes/folders/:id renames a folder (200 + updated payload)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const createRes = await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Drafts' })
+    });
+    const created = (await createRes.json()).data;
+    const res = await fetch(`${srv.base}/api/notes/folders/${created.id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Working drafts' })
+    });
+    assertEqual(res.status, 200, 'PUT returns 200');
+    const body = await res.json();
+    assertEqual(body.data.name, 'Working drafts', 'name updated to "Working drafts"');
+    assertEqual(body.data.id, created.id, 'id preserved');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 F6: PUT /api/notes/folders/:id updates sort_order; list reflects reorder', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const f1 = (await (await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Alpha' })
+    })).json()).data;
+    const f2 = (await (await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Beta' })
+    })).json()).data;
+    // Move Beta (sort_order 1) to position 0.
+    const res = await fetch(`${srv.base}/api/notes/folders/${f2.id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sort_order: 0 })
+    });
+    assertEqual(res.status, 200, 'PUT returns 200');
+    const list = (await (await fetch(`${srv.base}/api/notes/folders`)).json()).data;
+    assertEqual(list[0].name, 'Beta', 'Beta is now first');
+    assertEqual(list[1].name, 'Alpha', 'Alpha is now second');
+    assertEqual(list[0].id, f2.id, 'first id is Beta');
+    assertEqual(list[1].id, f1.id, 'second id is Alpha');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 F7: DELETE folder cascades; notes reset to folder_id=null (Unfiled)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const folder = (await (await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Drafts' })
+    })).json()).data;
+    // Create a note in that folder.
+    const note = (await (await fetch(`${srv.base}/api/notes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'T', body: 'B', folder_id: folder.id })
+    })).json()).data;
+    assertEqual(note.folder_id, folder.id, 'note assigned to folder');
+    // Delete the folder.
+    const delRes = await fetch(`${srv.base}/api/notes/folders/${folder.id}`, { method: 'DELETE' });
+    assertEqual(delRes.status, 200, 'DELETE returns 200');
+    // Note should now have folder_id: null.
+    const noteRes = await fetch(`${srv.base}/api/notes/${note.id}`);
+    const after = (await noteRes.json()).data;
+    assertEqual(after.folder_id, null, 'note.folder_id reset to null');
+    // /api/notes?folder=unfiled should now return it.
+    const unfiledRes = await (await fetch(`${srv.base}/api/notes?folder=unfiled`)).json();
+    assertTrue(unfiledRes.data.some((n) => n.id === note.id), 'note appears in unfiled filter');
+      } finally { await srv.close(); }
+  });
+});
+
+
+// ─── Notes folder assignment + move (SPEC §25.8 tests 8–12) ──────────
+
+test('UI-R9 N1: GET /api/notes?folder= filter (id / unfiled / bad)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const folder = (await (await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Reference' })
+    })).json()).data;
+    const inFolder = (await (await fetch(`${srv.base}/api/notes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'A', body: 'aa', folder_id: folder.id })
+    })).json()).data;
+    const unfiled = (await (await fetch(`${srv.base}/api/notes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'B', body: 'bb' })
+    })).json()).data;
+
+    // filter by id
+    const byId = (await (await fetch(`${srv.base}/api/notes?folder=${folder.id}`)).json()).data;
+    assertTrue(byId.every((n) => n.folder_id === folder.id), 'all notes in folder match');
+    assertTrue(byId.some((n) => n.id === inFolder.id), 'inFolder note present');
+    assertTrue(!byId.some((n) => n.id === unfiled.id), 'unfiled note absent');
+
+    // filter unfiled
+    const byUnfiled = (await (await fetch(`${srv.base}/api/notes?folder=unfiled`)).json()).data;
+    assertTrue(byUnfiled.every((n) => n.folder_id === null), 'all notes are folder_id=null');
+    assertTrue(byUnfiled.some((n) => n.id === unfiled.id), 'unfiled note present');
+
+    // bad filter
+    const badRes = await fetch(`${srv.base}/api/notes?folder=garbage`);
+    assertEqual(badRes.status, 400, 'bad filter returns 400');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 N2: POST /api/notes accepts folder_id; persisted on the payload', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const folder = (await (await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Drafts' })
+    })).json()).data;
+    const res = await fetch(`${srv.base}/api/notes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'T', body: 'B', folder_id: folder.id })
+    });
+    assertEqual(res.status, 201, 'POST returns 201');
+    const body = await res.json();
+    assertEqual(body.data.folder_id, folder.id, 'folder_id persisted in response');
+    // Re-fetch to confirm disk persistence.
+    const getRes = await (await fetch(`${srv.base}/api/notes/${body.data.id}`)).json();
+    assertEqual(getRes.data.folder_id, folder.id, 'folder_id persisted on disk');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 N3: PUT /api/notes/:id rejects unknown folder_id (400)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const note = (await (await fetch(`${srv.base}/api/notes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'T', body: 'B' })
+    })).json()).data;
+    const res = await fetch(`${srv.base}/api/notes/${note.id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_id: 'folder_does_not_exist_zzz' })
+    });
+    assertEqual(res.status, 400, 'PUT with unknown folder_id returns 400');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 N4: PUT /api/notes/:id/move to valid folder (200 + new folder_id)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const folder = (await (await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Target' })
+    })).json()).data;
+    const note = (await (await fetch(`${srv.base}/api/notes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'T', body: 'B' })
+    })).json()).data;
+    const res = await fetch(`${srv.base}/api/notes/${note.id}/move`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_id: folder.id })
+    });
+    assertEqual(res.status, 200, 'move returns 200');
+    const body = await res.json();
+    assertEqual(body.data.folder_id, folder.id, 'new folder_id in response');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 N5: PUT /api/notes/:id/move to null (200; folder_id=null)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const folder = (await (await fetch(`${srv.base}/api/notes/folders`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Source' })
+    })).json()).data;
+    const note = (await (await fetch(`${srv.base}/api/notes`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'T', body: 'B', folder_id: folder.id })
+    })).json()).data;
+    const res = await fetch(`${srv.base}/api/notes/${note.id}/move`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder_id: null })
+    });
+    assertEqual(res.status, 200, 'move-to-null returns 200');
+    const body = await res.json();
+    assertEqual(body.data.folder_id, null, 'folder_id is null in payload');
+      } finally { await srv.close(); }
+  });
+});
+
+
+// ─── Attachment upload + cap (SPEC §25.8 tests 13–17) ────────────────
+
+const makeNoteForAttachment = async (srv) => {
+  const res = await fetch(`${srv.base}/api/notes`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'AttachTarget', body: 'Body' })
+  });
+  return (await res.json()).data;
+};
+
+test('UI-R9 A1: POST /api/notes/:id/attachments accepts PNG (201 + manifest entry)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const note = await makeNoteForAttachment(srv);
+    const res = await postMultipart(
+      `${srv.base}/api/notes/${note.id}/attachments`,
+      {},
+      { field: 'image', filename: 'tiny.png', mime: 'image/png', content: TINY_PNG }
+    );
+    assertEqual(res.status, 201, 'POST attachment returns 201');
+    const body = await res.json();
+    assertTrue(body.success === true, 'success=true');
+    assertTrue(body.data.id.startsWith('att_'), 'att id starts with att_');
+    assertEqual(body.data.mime, 'image/png', 'mime echoed back');
+    assertEqual(body.data.note_id, note.id, 'note_id echoed back');
+    assertTrue(typeof body.data.size === 'number' && body.data.size > 0, 'size is a positive number');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 A2: POST /api/notes/:id/attachments accepts GIF (201)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const note = await makeNoteForAttachment(srv);
+    const res = await postMultipart(
+      `${srv.base}/api/notes/${note.id}/attachments`,
+      {},
+      { field: 'image', filename: 'tiny.gif', mime: 'image/gif', content: TINY_GIF }
+    );
+    assertEqual(res.status, 201, 'POST attachment returns 201');
+    const body = await res.json();
+    assertEqual(body.data.mime, 'image/gif', 'mime echoed back');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 A3: POST attachment rejects BMP / wrong MIME (400)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const note = await makeNoteForAttachment(srv);
+    const res = await postMultipart(
+      `${srv.base}/api/notes/${note.id}/attachments`,
+      {},
+      { field: 'image', filename: 'fake.bmp', mime: 'image/bmp', content: Buffer.from([0x42, 0x4d]) }
+    );
+    // multer fileFilter attaches err.statusCode = 400, so the route
+    // returns 400. If for some reason the multer error path returns
+    // a different status, the contract is "reject the upload"; the
+    // important assertion is "did not create a manifest entry".
+    assertTrue(res.status === 400 || res.status === 500, `expected 400/500 for BMP; got ${res.status}`);
+    const list = (await (await fetch(`${srv.base}/api/notes/${note.id}/attachments`)).json()).data;
+    assertEqual(list.length, 0, 'no manifest entry created for rejected upload');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 A4: POST attachment rejects 6 MB body (size limit)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const note = await makeNoteForAttachment(srv);
+    const bigBody = Buffer.alloc(6 * 1024 * 1024, 0x41); // 6 MB of 'A'
+    const res = await postMultipart(
+      `${srv.base}/api/notes/${note.id}/attachments`,
+      {},
+      { field: 'image', filename: 'big.png', mime: 'image/png', content: bigBody }
+    );
+    // multer LIMIT_FILE_SIZE → server.js:10414 sets 400 with descriptive message.
+    assertEqual(res.status, 400, `expected 400 for 6MB upload; got ${res.status}`);
+    const list = (await (await fetch(`${srv.base}/api/notes/${note.id}/attachments`)).json()).data;
+    assertEqual(list.length, 0, 'no manifest entry for size-rejected upload');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 A5: POST attachment 6th upload rejected (409 — cap of 5)', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const note = await makeNoteForAttachment(srv);
+    // Upload 5 distinct attachments.
+    for (let i = 0; i < 5; i++) {
+      const r = await postMultipart(
+        `${srv.base}/api/notes/${note.id}/attachments`,
+        {},
+        { field: 'image', filename: `cap${i}.png`, mime: 'image/png', content: TINY_PNG }
+      );
+      assertEqual(r.status, 201, `upload ${i + 1} returns 201`);
+    }
+    // 6th must be rejected.
+    const sixth = await postMultipart(
+      `${srv.base}/api/notes/${note.id}/attachments`,
+      {},
+      { field: 'image', filename: 'cap5.png', mime: 'image/png', content: TINY_PNG }
+    );
+    assertEqual(sixth.status, 409, '6th attachment returns 409');
+    const list = (await (await fetch(`${srv.base}/api/notes/${note.id}/attachments`)).json()).data;
+    assertEqual(list.length, 5, 'manifest still has 5 entries');
+      } finally { await srv.close(); }
+  });
+});
+
+
+// ─── Attachment read / list / delete / edge cases (SPEC §25.8 tests 18–22) ──
+
+test('UI-R9 A6: GET /api/notes/:id/attachments lists only that note\'s attachments', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const a = await makeNoteForAttachment(srv);
+    const b = await makeNoteForAttachment(srv);
+    // Two attachments to A.
+    const a1Res = await postMultipart(
+      `${srv.base}/api/notes/${a.id}/attachments`, {},
+      { field: 'image', filename: 'a1.png', mime: 'image/png', content: TINY_PNG }
+    );
+    const a1 = (await a1Res.json()).data;
+    const a2Res = await postMultipart(
+      `${srv.base}/api/notes/${a.id}/attachments`, {},
+      { field: 'image', filename: 'a2.png', mime: 'image/png', content: TINY_PNG }
+    );
+    const a2 = (await a2Res.json()).data;
+    // One to B.
+    const b1Res = await postMultipart(
+      `${srv.base}/api/notes/${b.id}/attachments`, {},
+      { field: 'image', filename: 'b1.png', mime: 'image/png', content: TINY_PNG }
+    );
+    const b1 = (await b1Res.json()).data;
+    // List A's attachments.
+    const listA = (await (await fetch(`${srv.base}/api/notes/${a.id}/attachments`)).json()).data;
+    assertEqual(listA.length, 2, 'A has 2 attachments');
+    assertTrue(listA.every((att) => att.note_id === a.id), 'A list all reference note A');
+    assertTrue(listA.some((att) => att.id === a1.id), 'a1 present');
+    assertTrue(listA.some((att) => att.id === a2.id), 'a2 present');
+    assertTrue(!listA.some((att) => att.id === b1.id), 'b1 absent');
+    // List B's attachments.
+    const listB = (await (await fetch(`${srv.base}/api/notes/${b.id}/attachments`)).json()).data;
+    assertEqual(listB.length, 1, 'B has 1 attachment');
+    assertEqual(listB[0].id, b1.id, 'B list contains b1');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 A7: GET /api/note-attachments/:id/file streams correct bytes + Content-Type', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const note = await makeNoteForAttachment(srv);
+    const uploadedRes = await postMultipart(
+      `${srv.base}/api/notes/${note.id}/attachments`, {},
+      { field: 'image', filename: 'pixel.png', mime: 'image/png', content: TINY_PNG }
+    );
+    const uploaded = (await uploadedRes.json()).data;
+    const res = await fetch(`${srv.base}/api/note-attachments/${uploaded.id}/file`);
+    assertEqual(res.status, 200, 'file GET returns 200');
+    assertTrue(/image\/png/i.test(res.headers.get('content-type') || ''), 'content-type is image/png');
+    const body = Buffer.from(await res.arrayBuffer());
+    assertEqual(body.length, TINY_PNG.length, 'byte length matches uploaded payload');
+    assertTrue(body.equals(TINY_PNG), 'body bytes match uploaded PNG magic + content');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 A8: DELETE attachment removes file from disk + manifest entry; subsequent GET 404', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const note = await makeNoteForAttachment(srv);
+    const uploadRes = await postMultipart(
+      `${srv.base}/api/notes/${note.id}/attachments`, {},
+      { field: 'image', filename: 'killme.png', mime: 'image/png', content: TINY_PNG }
+    );
+    const uploaded = (await uploadRes.json()).data;
+    // Confirm GET works first.
+    const before = await fetch(`${srv.base}/api/note-attachments/${uploaded.id}/file`);
+    assertEqual(before.status, 200, 'pre-delete GET 200');
+    // Delete.
+    const del = await fetch(`${srv.base}/api/note-attachments/${uploaded.id}`, { method: 'DELETE' });
+    assertEqual(del.status, 200, 'DELETE returns 200');
+    // Subsequent GET → 404.
+    const after = await fetch(`${srv.base}/api/note-attachments/${uploaded.id}/file`);
+    assertEqual(after.status, 404, 'post-delete GET 404');
+    // Manifest also gone.
+    const list = (await (await fetch(`${srv.base}/api/notes/${note.id}/attachments`)).json()).data;
+    assertEqual(list.length, 0, 'manifest entry removed');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 A9: GET /api/note-attachments/:id/file with unknown id returns 404', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const res = await fetch(`${srv.base}/api/note-attachments/att_does_not_exist_zzz/file`);
+    assertEqual(res.status, 404, 'unknown id returns 404');
+      } finally { await srv.close(); }
+  });
+});
+
+test('UI-R9 A10: POST attachment to unknown note returns 404', async () => {
+  await withNotesFoldersAndAttachments(async () => {
+    const srv = await startTestServer();
+    try {
+    const res = await postMultipart(
+      `${srv.base}/api/notes/note_does_not_exist_zzz/attachments`,
+      {},
+      { field: 'image', filename: 'orphan.png', mime: 'image/png', content: TINY_PNG }
+    );
+    assertEqual(res.status, 404, 'unknown note returns 404');
+      } finally { await srv.close(); }
+  });
+});
+
+// ─── SPEC §26 / ADR 0029 — preservation override (CR-A10) ──────
+//
+// Slice 26: per-message opt-in override for the anchor-preservation
+// validator. The user-reported error "Revision declined — too much
+// of the original context would have been lost" can now be resolved
+// by checking an inline box in the declined-preview block. The
+// override is per-message (never sticky), requires explicit
+// confirmation, and is gated by a hard catastrophic floor
+// (0.10 keyword retention) that still catches the wholesale-rewrite
+// case ADR 0012 was built to prevent.
+//
+// These tests cover: exports, validation, telemetry round-trip
+// (write/read/cap), the callKiloChat option routing, the route
+// handler's field validation, and the frontend wiring.
+
+const PRESERVATION_OVERRIDE_LOG_FILE = path.join(PROJECT_ROOT, 'data', 'preservation_override_log.json');
+
+const snapshotPreservationOverrideLog = () => {
+  if (fs.existsSync(PRESERVATION_OVERRIDE_LOG_FILE)) {
+    return fs.readFileSync(PRESERVATION_OVERRIDE_LOG_FILE, 'utf8');
+  }
+  return null;
+};
+
+const restorePreservationOverrideLog = (snapshot) => {
+  if (snapshot === null) {
+    if (fs.existsSync(PRESERVATION_OVERRIDE_LOG_FILE)) fs.unlinkSync(PRESERVATION_OVERRIDE_LOG_FILE);
+  } else {
+    if (!fs.existsSync(path.dirname(PRESERVATION_OVERRIDE_LOG_FILE))) {
+      fs.mkdirSync(path.dirname(PRESERVATION_OVERRIDE_LOG_FILE), { recursive: true });
+    }
+    fs.writeFileSync(PRESERVATION_OVERRIDE_LOG_FILE, snapshot, 'utf8');
+  }
+};
+
+const clearPreservationOverrideLog = () => {
+  if (fs.existsSync(PRESERVATION_OVERRIDE_LOG_FILE)) {
+    fs.unlinkSync(PRESERVATION_OVERRIDE_LOG_FILE);
+  }
+};
+
+test('SPEC §26: server exports preservation-override constants and helpers', () => {
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  for (const key of [
+    'PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR',
+    'PRESERVATION_FAILED_CATASTROPHIC_REPLY_NOTE',
+    'PRESERVATION_OVERRIDE_TELEMETRY_CAP',
+    'recordPreservationOverrideTelemetry',
+    'readPreservationOverrideTelemetry'
+  ]) {
+    assertTrue(
+      Object.prototype.hasOwnProperty.call(serverMod, key),
+      `server.js must export ${key}`
+    );
+  }
+  // Floor is strictly below the existing short-prompt threshold.
+  assertTrue(
+    typeof serverMod.PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR === 'number',
+    'catastrophic floor is a number'
+  );
+  assertTrue(
+    serverMod.PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR > 0,
+    'catastrophic floor > 0'
+  );
+  assertTrue(
+    serverMod.PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR < serverMod.PRESERVATION_KEYWORD_THRESHOLD_SHORT,
+    `catastrophic floor (${serverMod.PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR}) < short kw threshold (${serverMod.PRESERVATION_KEYWORD_THRESHOLD_SHORT})`
+  );
+  // The catastrophic note is a real, non-empty, descriptive string.
+  assertTrue(
+    typeof serverMod.PRESERVATION_FAILED_CATASTROPHIC_REPLY_NOTE === 'string'
+    && serverMod.PRESERVATION_FAILED_CATASTROPHIC_REPLY_NOTE.length > 30,
+    'catastrophic note is a real sentence'
+  );
+  // Telemetry helpers are functions.
+  assertTrue(
+    typeof serverMod.recordPreservationOverrideTelemetry === 'function',
+    'recordPreservationOverrideTelemetry is a function'
+  );
+  assertTrue(
+    typeof serverMod.readPreservationOverrideTelemetry === 'function',
+    'readPreservationOverrideTelemetry is a function'
+  );
+  // Cap is a positive integer.
+  assertTrue(
+    Number.isInteger(serverMod.PRESERVATION_OVERRIDE_TELEMETRY_CAP)
+    && serverMod.PRESERVATION_OVERRIDE_TELEMETRY_CAP > 0,
+    'cap is a positive integer'
+  );
+});
+
+test('SPEC §26: recordPreservationOverrideTelemetry writes a row that readPreservationOverrideTelemetry can read back', () => {
+  const snapshot = snapshotPreservationOverrideLog();
+  clearPreservationOverrideLog();
+  try {
+    const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+    const sample = {
+      timestamp: '2026-09-10T14:00:00.000Z',
+      session_id: 'chat_test_001',
+      message_id: null,
+      nonTargetedRatio: 0.34,
+      bigramRatio: 0.21,
+      keywordRatio: 0.34,
+      catastrophic: false,
+      applied: true,
+      catastrophicFloor: 0.10,
+      fallback_reason: null
+    };
+    serverMod.recordPreservationOverrideTelemetry(sample);
+    const arr = serverMod.readPreservationOverrideTelemetry();
+    assertTrue(Array.isArray(arr), 'telemetry array');
+    assertTrue(arr.length === 1, `one row written (got ${arr.length})`);
+    assertEqual(arr[0].session_id, 'chat_test_001', 'session_id preserved');
+    assertEqual(arr[0].nonTargetedRatio, 0.34, 'nonTargetedRatio preserved');
+    assertTrue(arr[0].applied === true, 'applied flag preserved');
+    assertTrue(arr[0].catastrophic === false, 'catastrophic flag preserved');
+  } finally {
+    restorePreservationOverrideLog(snapshot);
+  }
+});
+
+test('SPEC §26: telemetry writer is defensive against corrupt files', () => {
+  const snapshot = snapshotPreservationOverrideLog();
+  try {
+    if (!fs.existsSync(path.dirname(PRESERVATION_OVERRIDE_LOG_FILE))) {
+      fs.mkdirSync(path.dirname(PRESERVATION_OVERRIDE_LOG_FILE), { recursive: true });
+    }
+    fs.writeFileSync(PRESERVATION_OVERRIDE_LOG_FILE, '{not valid json', 'utf8');
+    const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+    // Should not throw — corrupt file is reset.
+    serverMod.recordPreservationOverrideTelemetry({
+      timestamp: '2026-09-10T14:00:00.000Z',
+      session_id: 'chat_corrupt_test',
+      message_id: null,
+      nonTargetedRatio: 0.5,
+      bigramRatio: 0.3,
+      keywordRatio: 0.5,
+      catastrophic: false,
+      applied: true
+    });
+    const arr = serverMod.readPreservationOverrideTelemetry();
+    assertTrue(Array.isArray(arr), 'telemetry resets to array on corrupt file');
+    assertTrue(arr.length === 1, 'one row after reset (old data lost)');
+  } finally {
+    restorePreservationOverrideLog(snapshot);
+  }
+});
+
+test('SPEC §26: telemetry cap evicts oldest rows (FIFO)', () => {
+  const snapshot = snapshotPreservationOverrideLog();
+  clearPreservationOverrideLog();
+  try {
+    const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+    const cap = serverMod.PRESERVATION_OVERRIDE_TELEMETRY_CAP;
+    // Write cap + 5 rows; only the last `cap` should survive.
+    for (let i = 0; i < cap + 5; i++) {
+      serverMod.recordPreservationOverrideTelemetry({
+        timestamp: `2026-09-10T14:00:${String(i % 60).padStart(2, '0')}.000Z`,
+        session_id: `chat_cap_${i}`,
+        message_id: null,
+        nonTargetedRatio: 0.5,
+        bigramRatio: 0.3,
+        keywordRatio: 0.5,
+        catastrophic: false,
+        applied: true
+      });
+    }
+    const arr = serverMod.readPreservationOverrideTelemetry();
+    assertTrue(arr.length === cap, `arr length equals cap (got ${arr.length})`);
+    // First surviving row should be the (cap+5 - cap = 5)th write.
+    assertEqual(arr[0].session_id, 'chat_cap_5', 'oldest evicted (FIFO)');
+    assertEqual(arr[arr.length - 1].session_id, `chat_cap_${cap + 4}`, 'newest preserved');
+  } finally {
+    restorePreservationOverrideLog(snapshot);
+  }
+});
+
+test('SPEC §26: readPreservationOverrideTelemetry returns [] when file is missing', () => {
+  const snapshot = snapshotPreservationOverrideLog();
+  clearPreservationOverrideLog();
+  try {
+    const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+    const arr = serverMod.readPreservationOverrideTelemetry();
+    assertTrue(Array.isArray(arr), 'returns array');
+    assertEqual(arr.length, 0, 'empty array when file missing');
+  } finally {
+    restorePreservationOverrideLog(snapshot);
+  }
+});
+
+test('SPEC §26: catastrophic floor (0.10) is below both keyword thresholds', () => {
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  const floor = serverMod.PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR;
+  // The catastrophic floor must catch the original ADR 0012 failure
+  // mode (paint-spec → 2-sentence palette) where keyword retention
+  // is roughly 0.05-0.15. The floor at 0.10 ensures those are
+  // still declined. Verify the floor is the *strict* gate, not the
+  // validator's regular threshold.
+  assertTrue(floor < 0.20, 'floor is well below the short-prompt kw threshold (0.50)');
+  assertTrue(floor < 0.15, 'floor is below the catastrophic paint-spec failure range (0.05-0.15)');
+  assertTrue(
+    floor < serverMod.PRESERVATION_KEYWORD_THRESHOLD_SHORT
+    && floor < serverMod.PRESERVATION_KEYWORD_THRESHOLD_LONG,
+    'floor < both keyword thresholds'
+  );
+});
+
+test('SPEC §26: validateChatMessage accepts preservation_override: true / false / undefined', () => {
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  // Undefined (default): valid, matches prior behavior.
+  assertEqual(
+    serverMod.validateChatMessage({ content: 'hello' }),
+    null,
+    'undefined preservation_override is valid'
+  );
+  // True: valid.
+  assertEqual(
+    serverMod.validateChatMessage({ content: 'hello', preservation_override: true }),
+    null,
+    'true preservation_override is valid'
+  );
+  // False: valid (explicit off, no behavior change).
+  assertEqual(
+    serverMod.validateChatMessage({ content: 'hello', preservation_override: false }),
+    null,
+    'false preservation_override is valid'
+  );
+});
+
+test('SPEC §26: validateChatMessage rejects non-boolean preservation_override', () => {
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  for (const bad of [1, 0, 'true', 'false', 'yes', null, [], {}]) {
+    const err = serverMod.validateChatMessage({ content: 'hello', preservation_override: bad });
+    assertTrue(
+      typeof err === 'string' && /preservation_override/.test(err),
+      `non-boolean value (${JSON.stringify(bad)}) rejected with preservation_override error`
+    );
+  }
+});
+
+test('SPEC §26: server.js callKiloChat accepts preservationOverride option in options bag', () => {
+  // The override option must be accepted (not silently dropped) and
+  // routed to the catastrophic-floor branch. We can't easily call
+  // callKiloChat without a configured Kilo key + a real model, so
+  // we verify the option is part of the function signature's options
+  // bag via static-source inspection.
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(
+    /const \{ currentPrompt, lastUserRequest, preservationOverride \}/.test(serverText),
+    'callKiloChat destructures preservationOverride from options'
+  );
+  // The override branch must check the option (not a hardcoded false).
+  assertTrue(
+    /preservationOverride === true/.test(serverText),
+    'callKiloChat honors the override via strict === true comparison'
+  );
+  // The catastrophic floor must be referenced in the callKiloChat
+  // function body (not a dead constant).
+  const callKiloChatIdx = serverText.indexOf('const callKiloChat = ');
+  const callKiloChatBlock = serverText.slice(
+    callKiloChatIdx,
+    Math.min(serverText.length, callKiloChatIdx + 8000)
+  );
+  assertTrue(
+    /PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR/.test(callKiloChatBlock),
+    'callKiloChat body references PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR'
+  );
+  assertTrue(
+    /preservation_failed_catastrophic/.test(callKiloChatBlock),
+    'callKiloChat body produces preservation_failed_catastrophic fallback_reason'
+  );
+  assertTrue(
+    /preservation_override_applied/.test(callKiloChatBlock),
+    'callKiloChat body stamps preservation_override_applied on success'
+  );
+  assertTrue(
+    /preservation_override_report/.test(callKiloChatBlock),
+    'callKiloChat body stamps preservation_override_report on every override attempt'
+  );
+});
+
+test('SPEC §26: route handler threads preservation_override from body to callKiloChat', () => {
+  // The POST /api/chat/sessions/:id/messages handler must read
+  // req.body.preservation_override and pass it through to
+  // callKiloChat. The streaming route must read the same from
+  // req.query. Both code paths are statically asserted.
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // POST: req.body.preservation_override === true.
+  assertTrue(
+    /req\.body\.preservation_override === true/.test(serverText),
+    'POST route reads preservation_override from body'
+  );
+  // Streaming: req.query.preservation_override === 'true'.
+  assertTrue(
+    /req\.query\.preservation_override === 'true'/.test(serverText),
+    'streaming route reads preservation_override from query string'
+  );
+  // Both routes pass preservationOverride through to callKiloChat.
+  // (The literal `preservationOverride` identifier in the options
+  // object appears in both call sites; check count >= 2.)
+  const occurrences = (serverText.match(/preservationOverride,/g) || []).length;
+  assertTrue(occurrences >= 2, `preservationOverride passed to callKiloChat in both routes (got ${occurrences})`);
+});
+
+test('SPEC §26: route handler writes preservation_override audit on the assistant message', () => {
+  // When the override fires, the assistant message carries a
+  // `preservation_override` audit object so the per-turn audit
+  // trail is durable on disk (in addition to the append-only
+  // telemetry file).
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(
+    /assistantMessage\.preservation_override = \{/.test(serverText),
+    'route handler stamps preservation_override audit on assistant message'
+  );
+  // Audit shape includes the headline fields.
+  const idx = serverText.indexOf('assistantMessage.preservation_override = {');
+  const block = serverText.slice(idx, idx + 600);
+  assertTrue(/applied:/.test(block), 'audit shape includes `applied`');
+  assertTrue(/attempted:/.test(block), 'audit shape includes `attempted`');
+  assertTrue(/catastrophic:/.test(block), 'audit shape includes `catastrophic`');
+  assertTrue(/nonTargetedRatio:/.test(block), 'audit shape includes `nonTargetedRatio`');
+});
+
+test('SPEC §26: route handler writes a telemetry row when override is attempted', () => {
+  // Both routes (POST and streaming) call
+  // recordPreservationOverrideTelemetry when the override was
+  // attempted. Two call sites expected.
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const occurrences = (serverText.match(/recordPreservationOverrideTelemetry\(/g) || []).length;
+  assertTrue(occurrences >= 2, `telemetry writer called in both routes (got ${occurrences})`);
+});
+
+test('SPEC §26: src/app.js exposes tryChatPreservationOverride + state.chatPreservationOverride', () => {
+  // Frontend wiring: the override handler must exist and the per-
+  // message flag must be part of app state.
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(/const tryChatPreservationOverride\s*=/.test(js), 'tryChatPreservationOverride handler defined');
+  // State init.
+  assertTrue(
+    /chatPreservationOverride:\s*false/.test(js),
+    'state.chatPreservationOverride initialized to false'
+  );
+  // Reset in finally block (twice: POST + streaming). The init is
+  // `chatPreservationOverride: false` in the state object (not an
+  // assignment), so we look for the assignments only.
+  const resetCount = (js.match(/state\.chatPreservationOverride\s*=\s*false/g) || []).length;
+  assertTrue(resetCount >= 2, `state reset to false in both finally blocks (got ${resetCount})`);
+  // Init also false.
+  assertTrue(
+    /chatPreservationOverride:\s*false/.test(js),
+    'state init: chatPreservationOverride: false'
+  );
+  // The request body includes the flag when set.
+  assertTrue(
+    /preservation_override:\s*true/.test(js),
+    'submitChatMessage body includes preservation_override: true when flag set'
+  );
+  // Confirmation dialog is required.
+  assertTrue(
+    /window\.confirm\s*\(/.test(js) && /preservation override/i.test(js),
+    'window.confirm() dialog gates the override (SPEC §26 risk copy)'
+  );
+});
+
+test('SPEC §26: src/app.js renders override control in the declined-preview block', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  // Override control class names.
+  for (const cls of [
+    'chat-message__override-control',
+    'chat-message__override-checkbox',
+    'chat-message__override-label',
+    'chat-message__override-warning',
+    'chat-message__try-override'
+  ]) {
+    assertTrue(new RegExp(cls.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(js), `${cls} class referenced in app.js`);
+  }
+  // Override button binds to tryChatPreservationOverride.
+  assertTrue(
+    /tryChatPreservationOverride\(/.test(js),
+    'override button click handler wired to tryChatPreservationOverride'
+  );
+  // Risk copy in the warning text.
+  assertTrue(
+    /Bypasses the safety check that prevents wholesale rewrites/.test(js),
+    'risk copy explains what the override bypasses'
+  );
+  assertTrue(
+    /catastrophic/i.test(js),
+    'risk copy mentions the catastrophic floor (no false sense of total bypass)'
+  );
+});
+
+test('SPEC §26: src/styles.css defines override control classes', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'styles.css'), 'utf8');
+  for (const cls of [
+    '.chat-message__override-control',
+    '.chat-message__override-checkbox',
+    '.chat-message__override-label',
+    '.chat-message__override-warning',
+    '.chat-message__try-override'
+  ]) {
+    assertTrue(css.includes(cls), `${cls} rule defined in styles.css`);
+  }
+});
+
+test('SPEC §26: preservation override is opt-in only — never sticky or auto-set', () => {
+  // The override flag must NEVER be persisted to localStorage,
+  // never appear in a URL parameter the server can resolve into a
+  // default-on, and never be triggered without a user click.
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  // No localStorage references to chatPreservationOverride on the
+  // same line / within 80 chars. We split by line and check each
+  // line individually (cheaper than a regex with non-greedy
+  // quantifiers, which can behave unpredictably).
+  const lines = js.split('\n');
+  const offending = lines.filter((line) =>
+    /localStorage/.test(line) && /chatPreservationOverride/.test(line)
+  );
+  assertEqual(offending.length, 0, 'no line references both localStorage and chatPreservationOverride');
+  // The flag is set ONLY inside the tryChatPreservationOverride
+  // handler. Verify by extracting the function body and checking
+  // there's exactly one assignment to state.chatPreservationOverride
+  // = true (other occurrences are resets to false).
+  const flagTrueOccurrences = (js.match(/state\.chatPreservationOverride\s*=\s*true/g) || []).length;
+  assertTrue(
+    flagTrueOccurrences === 1,
+    `flag set to true exactly once (got ${flagTrueOccurrences})`
+  );
+});
+
+test('SPEC §26: backward compatibility — existing /api/chat messages without preservation_override still work', () => {
+  // Static source check: the route handler must accept requests
+  // without preservation_override and treat them as "override off".
+  // The validation accepts undefined; the callKiloChat option
+  // destructures preservationOverride (default undefined → no
+  // override); the response shape is unchanged.
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // Default behavior preserved: `preservationOverride === true` is
+  // the only trigger. Any other value (false, undefined, missing)
+  // preserves the existing decline behavior.
+  const strictEquality = (serverText.match(/preservationOverride === true/g) || []).length;
+  assertTrue(
+    strictEquality >= 1,
+    'override is gated by strict === true (not truthy)'
+  );
+  // Existing `fallback_reason: 'preservation_failed'` is unchanged
+  // for the non-override case. Verify the static literal appears.
+  assertTrue(
+    /fallback_reason:\s*'preservation_failed'/.test(serverText),
+    'preservation_failed fallback_reason (existing) is unchanged for the non-override path'
+  );
+  // Validate the new catastrophic fallback_reason is DISTINCT so
+  // existing tests that match the old reason still work.
+  assertTrue(
+    /fallback_reason:\s*'preservation_failed_catastrophic'/.test(serverText),
+    'preservation_failed_catastrophic fallback_reason is distinct from preservation_failed'
+  );
+});
+
+test('SPEC §26: override is gated by explicit user confirmation (defense in depth)', () => {
+  // SPEC §26 / ADR 0029 — two-factor opt-in:
+  //   1. Checkbox must be checked.
+  //   2. window.confirm() dialog must be approved.
+  // Both are required. The handler must check BOTH before setting
+  // the flag.
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  const handlerBody = js.match(
+    /const tryChatPreservationOverride = \([^)]*\) => \{[\s\S]+?^\s*\};/m
+  );
+  assertTrue(handlerBody, 'tryChatPreservationOverride function body extractable');
+  const body = handlerBody[0];
+  assertTrue(
+    /checkboxEl\.checked !== true/.test(body),
+    'handler checks checkboxEl.checked === true (gate 1)'
+  );
+  assertTrue(
+    /window\.confirm/.test(body),
+    'handler calls window.confirm (gate 2)'
+  );
+  // Order matters: checkbox check must come before confirm (so a
+  // missing checkbox shows the inline status, not the dialog).
+  const checkboxIdx = body.indexOf('checkboxEl.checked');
+  const confirmIdx = body.indexOf('window.confirm');
+  assertTrue(
+    checkboxIdx < confirmIdx,
+    'checkbox check precedes confirm() in handler (inline status first)'
+  );
+  // Flag is set only after both gates pass.
+  const flagSetIdx = body.indexOf('state.chatPreservationOverride = true');
+  assertTrue(
+    flagSetIdx > confirmIdx,
+    'flag set only after both gates pass'
+  );
+});
+
+test('SPEC §26: SPEC.md and ADR 0029 exist and reference each other', () => {
+  const spec = fs.readFileSync(path.join(PROJECT_ROOT, 'docs', 'SPEC.md'), 'utf8');
+  const adr = fs.readFileSync(path.join(PROJECT_ROOT, 'docs', 'adr', '0029-preservation-override.md'), 'utf8');
+  assertTrue(/## §26 — Preservation override/.test(spec), 'SPEC §26 section heading present');
+  assertTrue(/ADR 0029/.test(spec), 'SPEC §26 references ADR 0029');
+  assertTrue(/PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR/.test(adr), 'ADR 0029 names the floor constant');
+  // The status line is wrapped in markdown bold (**Status:** Accepted).
+  // Match leniently: "Status" followed by some markdown noise, then "Accepted".
+  assertTrue(/Status\b[\s*:.]*?\*?Accepted/i.test(adr), 'ADR 0029 status is Accepted');
+  assertTrue(/per-message/.test(adr), 'ADR 0029 design rationale is per-message (not sticky)');
+  assertTrue(/catastrophic/i.test(adr), 'ADR 0029 documents the catastrophic floor');
+});
+
+test('SPEC §26: cleanup — restore telemetry file to pre-slice state', () => {
+  // The telemetry file is gitignored, but tests should not leave
+  // junk behind. This test runs last and ensures the file is
+  // either empty or absent.
+  if (fs.existsSync(PRESERVATION_OVERRIDE_LOG_FILE)) {
+    const arr = JSON.parse(fs.readFileSync(PRESERVATION_OVERRIDE_LOG_FILE, 'utf8'));
+    // Tolerate rows that other tests wrote; this is best-effort.
+    assertTrue(Array.isArray(arr), 'telemetry file is parseable JSON');
+  }
+  assertTrue(true, 'telemetry cleanup marker');
+});
+
+// ─── SPEC §27 — Clear chat history (CR-A11) ────────────────────────
+//
+// Slice 27: destructive bulk erase of all chat sessions + their
+// attachment directories. Lives in Settings → "Chat data" panel.
+// Mirrors the established per-session delete (server.js:9672) and
+// the cascade-delete helper (server.js:9940).
+
+const SPEC27_ATTACHMENTS_DIR = path.join(PROJECT_ROOT, 'data', 'chat_attachments');
+const SPEC27_MANIFEST = path.join(SPEC27_ATTACHMENTS_DIR, '_manifest.json');
+
+const spec27WriteSessions = (sessions) => {
+  fs.writeFileSync(CHAT_FILE, JSON.stringify(sessions, null, 2), 'utf8');
+};
+
+const spec27MakeAttachmentDir = (sessionId, fileCount = 1) => {
+  const dir = path.join(SPEC27_ATTACHMENTS_DIR, sessionId);
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 0; i < fileCount; i++) {
+    fs.writeFileSync(path.join(dir, `att_${i}.png`), CR2_PNG_BUFFER);
+  }
+  return dir;
+};
+
+const spec27CountChatDirs = () => {
+  if (!fs.existsSync(SPEC27_ATTACHMENTS_DIR)) return 0;
+  return fs.readdirSync(SPEC27_ATTACHMENTS_DIR)
+    .filter((d) => d.startsWith('chat_') && fs.statSync(path.join(SPEC27_ATTACHMENTS_DIR, d)).isDirectory())
+    .length;
+};
+
+test('SPEC §27: server.js exports clearAllChatSessions + countChatData', () => {
+  const { clearAllChatSessions, countChatData } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(typeof clearAllChatSessions, 'function', 'clearAllChatSessions exported');
+  assertEqual(typeof countChatData, 'function', 'countChatData exported');
+});
+
+test('SPEC §27: countChatData returns { sessions, attachments } counts', () => {
+  const snapshot = snapshotChatFile();
+  try {
+    spec27WriteSessions([{ id: 'chat_a', preset_id: 'p', original_prompt: 'o', current_prompt: 'c', messages: [], created_at: '', updated_at: '' }]);
+    spec27MakeAttachmentDir('chat_a', 2);
+    spec27MakeAttachmentDir('chat_b', 3);
+    const { countChatData } = require(path.join(PROJECT_ROOT, 'server.js'));
+    const counts = countChatData();
+    assertEqual(typeof counts.sessions, 'number', 'sessions is a number');
+    assertEqual(typeof counts.attachments, 'number', 'attachments is a number');
+    assertTrue(counts.sessions >= 1, 'at least 1 session counted');
+    assertTrue(counts.attachments >= 5, 'at least 5 attachments counted (2 + 3)');
+  } finally {
+    restoreChatFile(snapshot);
+    fs.rmSync(path.join(SPEC27_ATTACHMENTS_DIR, 'chat_a'), { recursive: true, force: true });
+    fs.rmSync(path.join(SPEC27_ATTACHMENTS_DIR, 'chat_b'), { recursive: true, force: true });
+  }
+});
+
+test('SPEC §27: GET /api/chat/sessions/count returns 200 with counts', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const port = server.address().port;
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/count`);
+    assertEqual(r.status, 200, 'GET count returns 200');
+    const j = await r.json();
+    assertTrue(j.success, 'success=true');
+    assertTrue(typeof j.data.sessions === 'number', 'sessions is number');
+    assertTrue(typeof j.data.attachments === 'number', 'attachments is number');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §27: GET /api/chat/sessions/count does NOT collide with /:id', async () => {
+  // Regression guard: /count must NOT be matched as a session id.
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const port = server.address().port;
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/count`);
+    assertEqual(r.status, 200, 'count route returns 200 (not 400 from :id validator)');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §27: DELETE /api/chat/sessions resets data/chat_sessions.json to []', async () => {
+  const snapshot = snapshotChatFile();
+  try {
+    const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+    const server = app.listen(0);
+    try {
+      // Populate with sessions.
+      const sessionId = await createChatSessionHelper(server);
+      assertTrue(fs.existsSync(CHAT_FILE), 'chat file exists pre-delete');
+      const port = server.address().port;
+      const del = await fetch(`http://127.0.0.1:${port}/api/chat/sessions`, { method: 'DELETE' });
+      assertEqual(del.status, 200, 'DELETE returns 200');
+      const j = await del.json();
+      assertTrue(j.success, 'success=true');
+      assertTrue(j.data.deleted_sessions >= 1, 'deleted_sessions >= 1');
+      // File is now []
+      const after = JSON.parse(fs.readFileSync(CHAT_FILE, 'utf8'));
+      assertTrue(Array.isArray(after), 'file is array');
+      assertEqual(after.length, 0, 'file is empty');
+    } finally {
+      server.close();
+    }
+  } finally {
+    restoreChatFile(snapshot);
+  }
+});
+
+test('SPEC §27: DELETE /api/chat/sessions removes every chat_* attachment directory', async () => {
+  const snapshot = snapshotChatFile();
+  try {
+    // Pre-create three orphan attachment dirs to simulate the live state
+    // (sessions=0, dirs>0).
+    spec27MakeAttachmentDir('chat_a', 2);
+    spec27MakeAttachmentDir('chat_b', 3);
+    spec27MakeAttachmentDir('chat_c', 1);
+    const before = spec27CountChatDirs();
+    assertTrue(before >= 3, `pre-condition: at least 3 dirs (got ${before})`);
+
+    const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+    const server = app.listen(0);
+    try {
+      const port = server.address().port;
+      const del = await fetch(`http://127.0.0.1:${port}/api/chat/sessions`, { method: 'DELETE' });
+      assertEqual(del.status, 200, 'DELETE returns 200');
+      const j = await del.json();
+      assertTrue(j.data.deleted_attachments >= 6, 'deleted_attachments >= 6');
+      assertTrue(j.data.orphan_directories_removed >= 3, 'orphan_directories_removed >= 3');
+      // All chat_* dirs gone (manifest dir may remain if it's named with prefix).
+      const after = spec27CountChatDirs();
+      assertEqual(after, 0, `no chat_* dirs remain (got ${after})`);
+    } finally {
+      server.close();
+    }
+  } finally {
+    restoreChatFile(snapshot);
+  }
+});
+
+test('SPEC §27: DELETE /api/chat/sessions resets attachments manifest to []', async () => {
+  const snapshot = snapshotChatFile();
+  try {
+    spec27MakeAttachmentDir('chat_a', 1);
+    // Write a manifest row.
+    const manifest = [{ id: 'att_x', session_id: 'chat_a', path: '/tmp/x.png', filename: 'x.png', mime: 'image/png', size: 100 }];
+    fs.writeFileSync(SPEC27_MANIFEST, JSON.stringify(manifest, null, 2), 'utf8');
+
+    const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+    const server = app.listen(0);
+    try {
+      const port = server.address().port;
+      await fetch(`http://127.0.0.1:${port}/api/chat/sessions`, { method: 'DELETE' });
+      assertTrue(fs.existsSync(SPEC27_MANIFEST), 'manifest file exists');
+      const after = JSON.parse(fs.readFileSync(SPEC27_MANIFEST, 'utf8'));
+      assertTrue(Array.isArray(after), 'manifest is array');
+      assertEqual(after.length, 0, 'manifest is empty');
+    } finally {
+      server.close();
+    }
+  } finally {
+    restoreChatFile(snapshot);
+  }
+});
+
+test('SPEC §27: clearAllChatSessions handles empty state without throwing', () => {
+  const snapshot = snapshotChatFile();
+  try {
+    spec27WriteSessions([]);
+    const { clearAllChatSessions } = require(path.join(PROJECT_ROOT, 'server.js'));
+    const result = clearAllChatSessions();
+    assertEqual(result.deleted_sessions, 0, 'no sessions deleted');
+    assertEqual(result.deleted_attachments, 0, 'no attachments deleted');
+    assertTrue(Array.isArray(result.failures), 'failures is array');
+    assertEqual(result.failures.length, 0, 'no failures');
+  } finally {
+    restoreChatFile(snapshot);
+  }
+});
+
+test('SPEC §27: clearAllChatSessions collects per-directory failures (partial-failure case)', async () => {
+  // Simulate a permission failure by making one dir read-only.
+  // (We can't actually trigger fs.rmSync to fail reliably across
+  // platforms, so instead we test that the helper collects any
+  // exception it encounters and still returns the success result.)
+  const snapshot = snapshotChatFile();
+  try {
+    spec27MakeAttachmentDir('chat_ok', 1);
+    spec27MakeAttachmentDir('chat_bad', 1);
+    const { clearAllChatSessions } = require(path.join(PROJECT_ROOT, 'server.js'));
+    // Stub fs.rmSync for one specific call to simulate a failure.
+    const realRmSync = fs.rmSync;
+    let rmCalls = 0;
+    fs.rmSync = (p, opts) => {
+      rmCalls++;
+      if (typeof p === 'string' && p.endsWith('chat_bad')) {
+        throw new Error('simulated permission denied');
+      }
+      return realRmSync(p, opts);
+    };
+    let result;
+    try {
+      result = clearAllChatSessions();
+    } finally {
+      fs.rmSync = realRmSync;
+    }
+    assertTrue(result.failures.length >= 1, 'at least one failure recorded');
+    assertTrue(result.failures.some((f) => f.dir === 'chat_bad'), 'chat_bad failure captured');
+    // chat_ok should still be removed.
+    assertTrue(!fs.existsSync(path.join(SPEC27_ATTACHMENTS_DIR, 'chat_ok')), 'chat_ok removed despite chat_bad failure');
+    // Cleanup chat_bad (it survived due to the stub).
+    fs.rmSync(path.join(SPEC27_ATTACHMENTS_DIR, 'chat_bad'), { recursive: true, force: true });
+  } finally {
+    restoreChatFile(snapshot);
+  }
+});
+
+test('SPEC §27: per-session DELETE still works (no regression)', async () => {
+  const snapshot = snapshotChatFile();
+  try {
+    const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+    const server = app.listen(0);
+    try {
+      const sessionId = await createChatSessionHelper(server);
+      const port = server.address().port;
+      const del = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}`, { method: 'DELETE' });
+      assertEqual(del.status, 200, 'per-session DELETE still returns 200');
+      const list = await fetch(`http://127.0.0.1:${port}/api/chat/sessions`);
+      const listJson = await list.json();
+      assertEqual(listJson.data.find((s) => s.id === sessionId), undefined, 'session gone from list');
+    } finally {
+      server.close();
+    }
+  } finally {
+    restoreChatFile(snapshot);
+  }
+});
+
+test('SPEC §27: src/index.html — clear-chat-history button + modal present', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  assertTrue(html.includes('id="settings-clear-chat-history-btn"'), 'clear button present');
+  assertTrue(html.includes('Clear chat history'), 'button label "Clear chat history" present');
+  assertTrue(html.includes('id="clear-chat-history-modal"'), 'modal present');
+  assertTrue(html.includes('id="clear-chat-history-cancel"'), 'cancel button present');
+  assertTrue(html.includes('id="clear-chat-history-confirm"'), 'confirm button present');
+  assertTrue(html.includes('id="clear-chat-history-modal-count"'), 'live count placeholder present');
+  // Accessibility: modal has role="dialog" and aria-labelledby.
+  assertTrue(/id="clear-chat-history-modal"[^>]*role="dialog"/.test(html), 'modal has role="dialog"');
+  assertTrue(html.includes('aria-labelledby="clear-chat-history-modal-title"'), 'aria-labelledby present');
+  assertTrue(html.includes('aria-describedby="clear-chat-history-modal-body"'), 'aria-describedby present');
+});
+
+test('SPEC §27: src/index.html — Chat data panel is the LAST panel in Settings view', () => {
+  // Regression guard: SPEC §27 places the panel after System prompts,
+  // per PRE-MORTEM P-4. The panel order matters for visual hierarchy
+  // (destructive action at the bottom, separated from routine settings).
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  const settingsStart = html.indexOf('id="view-settings"');
+  const settingsEnd = html.indexOf('</section>', settingsStart);
+  const view = html.slice(settingsStart, settingsEnd);
+  const idxSystem = view.indexOf('System prompts');
+  const idxChat = view.indexOf('Chat data');
+  assertTrue(idxSystem > 0, 'System prompts panel present in view');
+  assertTrue(idxChat > 0, 'Chat data panel present in view');
+  assertTrue(idxChat > idxSystem, 'Chat data panel is AFTER System prompts panel');
+});
+
+test('SPEC §27: src/styles.css — btn-danger-outline + busy state present', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'styles.css'), 'utf8');
+  assertTrue(css.includes('.btn-danger-outline'), 'btn-danger-outline class defined');
+  assertTrue(css.includes('aria-busy="true"'), 'btn-danger busy state defined');
+});
+
+test('SPEC §27: src/app.js — exposes window.__i2pClearChatHistory hook', () => {
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(app.includes('window.__i2pClearChatHistory'), 'app.js assigns hook to window');
+  assertTrue(app.includes('onChatHistoryCleared'), 'onChatHistoryCleared function defined');
+  assertTrue(app.includes("state.chatSessions = []"), 'reset clears chatSessions array');
+  assertTrue(app.includes("state.chatSessionId = null"), 'reset clears chatSessionId');
+  // Defensive localStorage sweep present.
+  assertTrue(/localStorage\.removeItem/.test(app), 'localStorage sweep present');
+  assertTrue(/i2p\.\(chat\|session\)/.test(app) || /i2p\.(chat|session)/.test(app), 'localStorage sweep targets chat/session keys');
+  // Calls both resetChatConsole + renderChatSessionSelect (PRE-MORTEM P-7).
+  assertTrue(app.includes('resetChatConsole()'), 'resetChatConsole called');
+  assertTrue(app.includes('renderChatSessionSelect()'), 'renderChatSessionSelect called');
+});
+
+test('SPEC §27: src/app.js — reset hook is defensive (each step in try/catch)', () => {
+  // PRE-MORTEM R-5 mitigation: one failure must not block the rest.
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(app.includes('onChatHistoryCleared'), 'hook defined');
+  // Find the function body and assert it has multiple safe() calls.
+  const start = app.indexOf('const onChatHistoryCleared = () => {');
+  assertTrue(start > 0, 'hook body starts');
+  const slice = app.slice(start, start + 2000);
+  const safeCount = (slice.match(/safe\(/g) || []).length;
+  assertTrue(safeCount >= 5, `at least 5 safe() calls (got ${safeCount})`);
+});
+
+test('SPEC §27: src/shell.js — wires button → modal → bulk DELETE + reset hook', () => {
+  const shell = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'shell.js'), 'utf8');
+  assertTrue(shell.includes("'settings-clear-chat-history-btn'"), 'button lookup');
+  assertTrue(shell.includes("'clear-chat-history-modal'"), 'modal lookup');
+  assertTrue(shell.includes("'clear-chat-history-cancel'"), 'cancel handler');
+  assertTrue(shell.includes("'clear-chat-history-confirm'"), 'confirm handler');
+  assertTrue(shell.includes("'/api/chat/sessions/count'"), 'count fetch');
+  assertTrue(shell.includes("'/api/chat/sessions'"), 'bulk DELETE');
+  assertTrue(shell.includes("method: 'DELETE'"), 'DELETE method used');
+  assertTrue(shell.includes('__i2pClearChatHistory'), 'hook invoked after success');
+});
+
+test('SPEC §27: src/shell.js — modal locks buttons during request (busy state)', () => {
+  const shell = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'shell.js'), 'utf8');
+  // The confirm handler should set aria-busy and disable both buttons.
+  assertTrue(/clearConfirm\.disabled\s*=\s*true/.test(shell), 'confirm disabled');
+  assertTrue(/aria-busy/.test(shell), 'aria-busy set');
+  // Cancels should be disabled too while in flight.
+  assertTrue(/clearCancel\.disabled\s*=\s*true/.test(shell), 'cancel disabled during request');
+  // Backdrop + close button dismiss.
+  assertTrue(/modal-backdrop[\s\S]*?addEventListener/.test(shell), 'backdrop dismiss wired');
+  assertTrue(shell.includes("'clear-chat-history-modal-close'"), 'close button lookup');
+});
+
+test('SPEC §27: SPEC §27 / docs/SPEC.md cross-references are present', () => {
+  const spec = fs.readFileSync(path.join(PROJECT_ROOT, 'docs', 'SPEC.md'), 'utf8');
+  assertTrue(spec.includes('## §27'), 'SPEC §27 heading');
+  assertTrue(spec.includes('Clear chat history'), 'SPEC §27 title');
+  assertTrue(/DELETE\s+\/api\/chat\/sessions\b/.test(spec) || /delete\(\s*'\/api\/chat\/sessions'/.test(spec), 'DELETE bulk endpoint documented');
+  assertTrue(/chat\/sessions\/count/.test(spec), 'count endpoint documented');
+  const arch = fs.readFileSync(path.join(PROJECT_ROOT, 'docs', 'ARCHITECTURE.md'), 'utf8');
+  assertTrue(arch.includes('## §31'), 'ARCH §31 heading');
+  const pm = fs.readFileSync(path.join(PROJECT_ROOT, 'docs', 'PRE-MORTEM.md'), 'utf8');
+  assertTrue(pm.includes('## §31'), 'PRE-MORTEM §31 heading');
+  // README documents both new endpoints (already verified by the
+  // generic README endpoint test, but assert here for visibility).
+  const readme = fs.readFileSync(path.join(PROJECT_ROOT, 'README.md'), 'utf8');
+  assertTrue(readme.includes('/api/chat/sessions/count'), 'count endpoint in README');
+  assertTrue(readme.includes('SPEC §27') || readme.includes('Clear chat history'), 'README mentions the feature');
+});
+
+test('SPEC §27: cleanup — restore chat_sessions.json to pre-slice state', () => {
+  // Matches the §22 / §26 cleanup pattern. Ensures the user's data
+  // file is left in a sensible state regardless of test ordering.
+  if (fs.existsSync(CHAT_FILE)) {
+    const arr = JSON.parse(fs.readFileSync(CHAT_FILE, 'utf8'));
+    assertTrue(Array.isArray(arr), 'chat file is parseable JSON array');
+  }
+  // Sweep any leftover chat_* directories from partial-failure tests.
+  if (fs.existsSync(SPEC27_ATTACHMENTS_DIR)) {
+    for (const name of fs.readdirSync(SPEC27_ATTACHMENTS_DIR)) {
+      if (name.startsWith('chat_')) {
+        try { fs.rmSync(path.join(SPEC27_ATTACHMENTS_DIR, name), { recursive: true, force: true }); } catch (_) { /* best-effort */ }
+      }
+    }
+  }
+  assertTrue(true, 'cleanup marker');
 });

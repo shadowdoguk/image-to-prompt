@@ -1,6 +1,6 @@
 # SESSION-STATE.md — image-to-prompt
 
-**Last updated:** 2026-09-04 after slice UI-R7 (model enablement manager + always-on dropdown enforcement, direct user directive)
+**Last updated:** 2026-09-09 after slice UI-R8 (Notes tab — personal notes for prompts, direct user directive)
 
 ---
 
@@ -9,18 +9,18 @@
 | Field | Value |
 |---|---|
 | **Workflow** | Existing (continue mode) |
-| **Current phase** | **🚢 SHIPPED — UI redesign series (UI-R0…UI-R5) complete; Slice 1 also shipped** |
-| **Last completed slice** | UI-R7 (model enablement manager + dropdown enforcement) — review in `docs/CODE-REVIEW-UI-R7-model-enablement.md`, verdict `pass` |
+| **Current phase** | **🚢 SHIPPED — UI redesign series (UI-R0…UI-R5), Slice 1, UI-R6 (provider editability), UI-R7 (model enablement), UI-R8 (Notes tab) all complete** |
+| **Last completed slice** | UI-R8 (Notes tab — personal notes for prompts) — review in `docs/CODE-REVIEW-UI-R8-notes.md`, verdict `pass` |
 | **Currently in** | Frontier open — see §2 |
 | **Open questions** | 0 |
-| **Kill criteria status** | 0 of 3 triggered (server.js grew ~300 lines for ADR 0024; still far under kill criterion) |
+| **Kill criteria status** | 0 of 3 triggered (server.js grew ~270 lines for UI-R8 Notes module; 9,745 lines / 444KB total; project source as a whole remains under any reasonable "too big" threshold) |
 | **Next action** | Pick next slice from frontier (§2) or work BACKLOG |
 
 ---
 
 ## 1. Project summary (one paragraph for cold start)
 
-Image-to-prompt generator for AI artists: upload image → 14-field structured prompt optimised for SD / Midjourney / DALL-E / Flux, powered by MiniMax M3. Node/Express + vanilla-JS frontend, JSON-file state, 44 API endpoints, 22 ADRs of design history. Mid-life, healthy, low drift. **Mode: continue**, not heal. See `docs/PROJECT-README.md` for the full overview.
+Image-to-prompt generator for AI artists: upload image → 14-field structured prompt optimised for SD / Midjourney / DALL-E / Flux, powered by MiniMax M3. Node/Express + vanilla-JS frontend, JSON-file state, 65 API endpoints, 22 ADRs of design history. Mid-life, healthy, low drift. **Mode: continue**, not heal. See `docs/PROJECT-README.md` for the full overview.
 
 ## 2. Slice tracker
 
@@ -35,6 +35,7 @@ Image-to-prompt generator for AI artists: upload image → 14-field structured p
 | UI-R5 | Identity + a11y close-out | UI-R1…4 | ✅ SHIPPED | this session | pass | `CODE-REVIEW-UI-R5-identity-a11y.md` |
 | UI-R6 | Provider settings full editability + always-on test buttons | — | ✅ SHIPPED | 2026-09-04 | pass | `CODE-REVIEW-UI-R6-provider-editability.md` | direct user directive |
 | UI-R7 | Model enablement manager + dropdown enforcement | — | ✅ SHIPPED | 2026-09-04 | pass | `CODE-REVIEW-UI-R7-model-enablement.md` | direct user directive |
+| UI-R8 | Notes tab (personal notes for prompts) | — | ✅ SHIPPED | 2026-09-09 | pass | `CODE-REVIEW-UI-R8-notes.md` | direct user directive |
 
 **Frontier:** open. The UI redesign series shipped the five-view shell, the Providers & keys module (ADR 0024), and closed polish findings A1–A3 + V1. Candidate next slices: (a) BACKLOG items re-parked from POLISH-AUDIT (P1 compression, P2 asset caching), (b) chat session rail upgrade, (c) Slice 2 (Phase C re-entry).
 
@@ -43,6 +44,8 @@ Image-to-prompt generator for AI artists: upload image → 14-field structured p
 Open — pick from §2 candidates. No blockers.
 
 ## 3. Decisions since last session
+
+**UI-R8 landed (2026-09-09, direct user directive).** New `#/notes` view inserted directly between Models and Settings in the primary nav (`Create / Library / Chat / Providers & keys / Models / Notes / Settings`). New endpoints `GET /api/notes`, `GET /api/notes/:id`, `POST /api/notes`, `PUT /api/notes/:id`, `DELETE /api/notes/:id` with persistent `data/notes.json` store (atomic write, mirrors the directives/presets pattern). Each note carries `title` (1..120 chars), `body` (1..50000 chars), optional `job_id` (free-form string or null — informational only, not validated against any job registry), and ISO8601 `created_at` / `updated_at`. **Auto-save UX**: shell.js wires a 600ms debounce on every keystroke against title/body/job_id, plus an explicit `Save now` button that bypasses the debounce; the server's PUT response is patched straight back into the in-memory list so the timestamp / meta line refreshes without a re-fetch. List-side filter searches title / body / job_id case-insensitively; the count line reports `N of M`. **Validation parity with the rest of the project**: empty title → 400, empty body → 400, oversize → 400 (limit value embedded in the error message); whitespace-only job_id normalises to null on PUT. **No ADR filed**: the data model is intentionally simpler than directives (no history / no version restore / no import-export envelope / no tags / no usage_count) because notes are free-form scratch space — folding them into the directives schema would have meant dragging in machinery that doesn't apply. Decision documented inline in `server.js` §Notes block + this file + the code review. 569/569 tests green (11 new UI-R8 tests + 558 prior); full E2E verified in the browser (create → edit title → edit body → set job_id → filter → delete → empty state); review `docs/CODE-REVIEW-UI-R8-notes.md` (verdict pass). Notes file pre-existing on the user's machine is preserved by the test snapshot/restore helpers (no overwrite risk during `node tests/run-all.js`).
 
 **UI-R7 landed (2026-09-04, direct user directive).** New `#/models` view with one card per provider: per-model checkbox toggles, custom-model add/remove, persistent `data/model_config.json` store (0600, mirrored from `provider_keys.json` pattern). New endpoints `GET /api/models` and `PUT /api/providers/:id/models` enforce three rules: (1) only enabled models are routable through `resolveProviderAndModel` and surfaced in `GET /api/providers`; (2) every model dropdown (Create `#llm-model-selector`, Settings `#settings-llm-model`) is rebuilt from the enabled set on every change via `window.__i2pEnabledModelsByProvider`; (3) per-provider last-model guard returns 409 with a clear message — verified live in the browser. `addedAt`-style effective default falls back to first enabled model when the hardcoded default is disabled. Full E2E verified (4 browser scenarios: disable / add custom / remove custom / guard); review `docs/CODE-REVIEW-UI-R7-model-enablement.md` (verdict pass). **ADR candidate:** per-provider last-model guard (hard to reverse + surprising + real trade-off) — to be filed as `docs/adr/0025-…` in a follow-up; decision is documented inline in SPEC and this file for now.
 
@@ -119,10 +122,11 @@ Bundle these into one housekeeping slice (~30 lines code, ~2 hours) or triage in
 
 - `docs/CODE-REVIEW-1-texture-ai-button.md` — Slice 1 Gate G4 review (130 lines, two-axis, **pass+minor**). 0 hard findings across both axes. Inline review (Goose direct) because the `general-purpose` sub-agent source is not registered in this goose installation; output shape mirrors what the sub-agent would have produced per `docs/PRINCIPLES.md` §6.5.
 - `docs/POLISH-AUDIT.md` — Slice 1 Gate G5 polish audit (286 lines, 7 sections + sign-off, **PASS**). 14 findings total across accessibility (3), visual (3), prose (1), copy (3), performance (2), discipline (2) — **0 blocking**. Inline audit (Goose direct) for the same `general-purpose` reason as G4.
+- `docs/CODE-REVIEW-UI-R8-notes.md` — Slice UI-R8 Gate G4 review (110 lines, two-axis, **pass**). 0 hard findings across both axes. Standards: single source of truth (`readNotes` validator), atomic write (POSIX-rename), forgiving reads (corrupt-JSON test), validation symmetry (POST vs PUT), `job_id` normalisation. Spec: every directive point covered (tab adjacent to Settings asserted in code, auto-save debounced, persistent on disk verified live, optional job_id round-trips, responsive at 600px confirmed, 11 new tests green, visual parity with sibling tabs via shared `.nav-link` class).
 
 ## 7. Mood / risk flag
 
-> Slice 1 is fully shipped through Gate G5. Methodology proven end-to-end on a real feature slice: spec → arch → pre-mortem → impl → code-review → commit → polish-audit. All 3-image manual demos passed; uploads/ stayed clean; kill criterion #3 not triggered. 319/319 tests green; 10/10 V-checks; node --check clean. server.js well under the 290KB kill criterion (6675 lines). 3 MiniMax credits spent on demo. POLISH-AUDIT verdict: PASS (0 blocking, 14 findings all classified as project-level polish debt or Slice 1 nice-to-haves). **No blockers; awaiting Slice 2 direction or follow-up polish-triage slice.**
+> UI-R8 (Notes tab) shipped clean through Gate G4. 569/569 tests green (11 new UI-R8 + 558 prior); no regressions. Server.js well under the 290KB kill criterion (9,745 lines, 444KB). 0 MiniMax credits spent on this slice (Notes is purely client-server CRUD with no LLM calls). Lighthouse desktop snapshot: a11y 96 / BP 100 / SEO 100 / agentic 100 — the single a11y fail is the pre-existing `--text-muted` token reuse (`#6b7280`), which the Library view and several other secondary-text spots also use. No new dependencies, no stack changes, no symbol renames. Pure additive slice: 5 new HTTP routes, one new view, one new CSS section. Notes file on the user's machine is preserved by the test snapshot/restore helpers (safe to run `node tests/run-all.js` with real notes on disk). **No blockers; awaiting next slice direction.**
 
 ---
 

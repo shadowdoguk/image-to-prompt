@@ -871,6 +871,8 @@ const ensureDataFileExists = () => {
   if (!fs.existsSync(DIRECTIVES_FILE)) fs.writeFileSync(DIRECTIVES_FILE, '[]', 'utf8');
   if (!fs.existsSync(CHAT_SESSIONS_FILE)) fs.writeFileSync(CHAT_SESSIONS_FILE, '[]', 'utf8');
   if (!fs.existsSync(PALETTE_RUNS_FILE)) fs.writeFileSync(PALETTE_RUNS_FILE, '[]', 'utf8');
+  // NOTES_FOLDERS_FILE + NOTE_ATTACHMENTS_MANIFEST are ensured by
+  // ensureNotesFileExists() (defined later, in the Notes module).
 };
 
 const readPresets = () => {
@@ -6175,6 +6177,934 @@ app.post('/api/directives/import', (req, res) => {
     const merged = existing.concat(toAdd);
     writeDirectives(merged);
     res.status(201).json({ success: true, data: { imported: toAdd.length, total: merged.length } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Notes (UI-R8) — personal notes for prompts, with optional job_id link
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Storage shape (per note):
+//   {
+//     id:        "note_<random>",
+//     title:     string (1..MAX_NOTE_TITLE_LENGTH, trimmed non-empty),
+//     body:      string (1..MAX_NOTE_BODY_LENGTH),
+//     job_id:    string | null (optional link to a generation job;
+//                 not validated against job_id registry — notes are
+//                 free-form; the field is informational only),
+//     created_at: ISO8601,
+//     updated_at: ISO8601
+//   }
+//
+// Why a separate top-level section rather than piggy-backing on the
+// directives schema? Notes are 1) much simpler (no history, no tags,
+// no usage_count), 2) optimised for fast typing / short-form edits
+// (auto-save model), 3) optionally linked to a job. Mirroring the
+// directives schema would have meant dragging all of ADR 0009's
+// machinery (history, version restore, import/export envelope) that
+// doesn't apply here. A small dedicated module is cheaper to read.
+
+const NOTES_FILE = path.join(DATA_DIR, 'notes.json');
+const MAX_NOTE_TITLE_LENGTH = 120;
+const MAX_NOTE_BODY_LENGTH = 50000;
+const NOTE_ID_PREFIX = 'note_';
+
+// ─── UI-R9 — Notes folders + image attachments (SPEC §25, ADR 0028) ─────────
+//
+// Folders are flat (no nesting). Each note has an optional `folder_id`
+// pointing at a folder record. Folders live in their own JSON file so
+// they can be listed/sorted independently of note reads.
+//
+// Attachments are stored on disk under data/note_attachments/<note_id>/
+// and tracked in a manifest. The pattern mirrors the chat-attachments
+// flow (server.js CR-2 block) but scoped per-note.
+
+const NOTES_FOLDERS_FILE = path.join(DATA_DIR, 'notes_folders.json');
+const MAX_NOTE_FOLDER_NAME_LENGTH = 60;
+const NOTE_FOLDER_ID_PREFIX = 'folder_';
+const generateNoteFolderId = () =>
+  `${NOTE_FOLDER_ID_PREFIX}${crypto.randomBytes(8).toString('hex')}`;
+
+const NOTE_ATTACHMENTS_DIR = path.join(DATA_DIR, 'note_attachments');
+const NOTE_ATTACHMENTS_MANIFEST = path.join(NOTE_ATTACHMENTS_DIR, '_manifest.json');
+const NOTE_ATTACHMENT_ID_PREFIX = 'att_';
+const NOTE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB
+const NOTE_ATTACHMENT_MAX_COUNT = 5;
+const NOTE_ATTACHMENT_ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/gif']);
+const NOTE_ATTACHMENT_EXT_BY_MIME = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif'
+};
+const generateNoteAttachmentId = () =>
+  `${NOTE_ATTACHMENT_ID_PREFIX}${crypto.randomBytes(8).toString('hex')}`;
+
+const generateNoteId = () => `${NOTE_ID_PREFIX}${crypto.randomBytes(8).toString('hex')}`;
+
+const ensureNotesFileExists = () => {
+  ensureDataFileExists();
+  if (!fs.existsSync(NOTES_FILE)) fs.writeFileSync(NOTES_FILE, '[]', 'utf8');
+  if (!fs.existsSync(NOTES_FOLDERS_FILE)) fs.writeFileSync(NOTES_FOLDERS_FILE, '[]', 'utf8');
+  if (!fs.existsSync(NOTE_ATTACHMENTS_DIR)) fs.mkdirSync(NOTE_ATTACHMENTS_DIR, { recursive: true });
+  if (!fs.existsSync(NOTE_ATTACHMENTS_MANIFEST)) fs.writeFileSync(NOTE_ATTACHMENTS_MANIFEST, '[]', 'utf8');
+};
+
+const readNotes = () => {
+  ensureNotesFileExists();
+  let raw;
+  try {
+    raw = fs.readFileSync(NOTES_FILE, 'utf8');
+  } catch (e) {
+    console.error('Failed to read notes file:', e.message);
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.error('Notes file is corrupt JSON; returning empty list:', e.message);
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    console.warn('Notes file is not an array; returning empty list');
+    return [];
+  }
+  return parsed.filter((n) => {
+    if (!n || typeof n !== 'object') return false;
+    if (typeof n.id !== 'string' || !n.id.startsWith(NOTE_ID_PREFIX)) return false;
+    if (typeof n.title !== 'string' || n.title.trim().length === 0) return false;
+    if (typeof n.body !== 'string' || n.body.length === 0) return false;
+    if (typeof n.created_at !== 'string') return false;
+    if (typeof n.updated_at !== 'string') return false;
+    // job_id: optional; only validate shape when present
+    if (n.job_id !== null && n.job_id !== undefined && typeof n.job_id !== 'string') return false;
+    // folder_id: optional; only validate shape when present (UI-R9)
+    if (n.folder_id !== null && n.folder_id !== undefined) {
+      if (typeof n.folder_id !== 'string' || !n.folder_id.startsWith(NOTE_FOLDER_ID_PREFIX)) {
+        return false;
+      }
+    }
+    return true;
+  });
+};
+
+const writeNotes = (notes) => {
+  ensureNotesFileExists();
+  // Atomic-ish: write to sibling temp file, then rename over the target.
+  const tmpFile = `${NOTES_FILE}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(notes, null, 2), 'utf8');
+  fs.renameSync(tmpFile, NOTES_FILE);
+};
+
+/**
+ * Validate the body of a POST /api/notes request.
+ * Returns null on success, or an error string explaining the failure.
+ */
+const validateNoteBody = (body, opts = {}) => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return 'Request body must be a JSON object.';
+  }
+  const { partial = false } = opts;
+
+  if (!partial) {
+    // POST: title and body are required
+    if (typeof body.title !== 'string') return 'title is required and must be a string.';
+    const title = body.title.trim();
+    if (title.length === 0) return 'title must not be empty.';
+    if (title.length > MAX_NOTE_TITLE_LENGTH) {
+      return `title must be ${MAX_NOTE_TITLE_LENGTH} characters or fewer (got ${title.length}).`;
+    }
+    if (typeof body.body !== 'string') return 'body is required and must be a string.';
+    if (body.body.trim().length === 0) return 'body must not be empty.';
+    if (body.body.length > MAX_NOTE_BODY_LENGTH) {
+      return `body must be ${MAX_NOTE_BODY_LENGTH} characters or fewer (got ${body.body.length}).`;
+    }
+  } else {
+    // PUT: each present field validated independently
+    if (body.title !== undefined) {
+      if (typeof body.title !== 'string') return 'title must be a string.';
+      const title = body.title.trim();
+      if (title.length === 0) return 'title must not be empty.';
+      if (title.length > MAX_NOTE_TITLE_LENGTH) {
+        return `title must be ${MAX_NOTE_TITLE_LENGTH} characters or fewer (got ${title.length}).`;
+      }
+    }
+    if (body.body !== undefined) {
+      if (typeof body.body !== 'string') return 'body must be a string.';
+      if (body.body.trim().length === 0) return 'body must not be empty.';
+      if (body.body.length > MAX_NOTE_BODY_LENGTH) {
+        return `body must be ${MAX_NOTE_BODY_LENGTH} characters or fewer (got ${body.body.length}).`;
+      }
+    }
+  }
+
+  if (body.job_id !== undefined && body.job_id !== null && typeof body.job_id !== 'string') {
+    return 'job_id must be a string or null.';
+  }
+  if (typeof body.job_id === 'string' && body.job_id.length > 200) {
+    return 'job_id must be 200 characters or fewer.';
+  }
+
+  // UI-R9 — folder_id: optional; when present must be either null or
+  // a string matching the folder id pattern.
+  if (body.folder_id !== undefined && body.folder_id !== null) {
+    if (typeof body.folder_id !== 'string') return 'folder_id must be a string or null.';
+    if (!body.folder_id.startsWith(NOTE_FOLDER_ID_PREFIX)) {
+      return `folder_id must start with "${NOTE_FOLDER_ID_PREFIX}".`;
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Normalise a free-text job_id into the canonical storage shape.
+ * Empty / whitespace-only strings collapse to null so the in-memory
+ * payload always has job_id === string | null (no empty strings).
+ */
+const normalizeNoteJobId = (raw) => {
+  if (raw === undefined) return undefined; // field not present — caller decides
+  if (raw === null) return null;
+  if (typeof raw !== 'string') return undefined; // type guard; validateNoteBody catches the error
+  const trimmed = raw.trim();
+  return trimmed.length === 0 ? null : trimmed;
+};
+
+// ─── UI-R9 — Notes folder helpers ───────────────────────────────────────────
+
+const readNoteFolders = () => {
+  ensureNotesFileExists();
+  let raw;
+  try {
+    raw = fs.readFileSync(NOTES_FOLDERS_FILE, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return [];
+    console.error('Failed to read note folders file:', e.message);
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.warn('Notes folders file is corrupt JSON; returning empty list:', e.message);
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    console.warn('Notes folders file is not an array; returning empty list');
+    return [];
+  }
+  return parsed.filter((f) => {
+    if (!f || typeof f !== 'object') return false;
+    if (typeof f.id !== 'string' || !f.id.startsWith(NOTE_FOLDER_ID_PREFIX)) return false;
+    if (typeof f.name !== 'string' || f.name.trim().length === 0) return false;
+    if (typeof f.created_at !== 'string') return false;
+    if (typeof f.sort_order !== 'number' || !Number.isFinite(f.sort_order)) return false;
+    return true;
+  });
+};
+
+const writeNoteFolders = (folders) => {
+  ensureNotesFileExists();
+  const tmpFile = `${NOTES_FOLDERS_FILE}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(folders, null, 2), 'utf8');
+  fs.renameSync(tmpFile, NOTES_FOLDERS_FILE);
+};
+
+/**
+ * handleListNoteFolders — GET /api/notes/folders handler body.
+ * Extracted so the route can be registered BEFORE the /:id wildcard
+ * (Express matches routes in registration order; without this, GET
+ * /api/notes/folders is shadowed and returns 404). See CR-A11
+ * (notes-folders-routing-fix).
+ */
+const handleListNoteFolders = (req, res) => {
+  try {
+    let folders = readNoteFolders();
+    folders.sort((a, b) => {
+      if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order;
+      return a.created_at < b.created_at ? -1 : 1;
+    });
+    res.json({ success: true, data: folders });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+};
+
+
+/**
+ * `computeFolderSortOrders` — assign sequential sort_order values to a
+ * folder list. Idempotent; pass the list in the desired order.
+ */
+const computeFolderSortOrders = (folders) => folders.map((f, i) => ({ ...f, sort_order: i }));
+
+const folderNameExists = (folders, name, excludeId = null) =>
+  folders.some((f) => f.id !== excludeId && f.name.trim().toLowerCase() === name.trim().toLowerCase());
+
+/**
+ * `validateNoteFolderBody` — shared validator for POST/PUT on folders.
+ */
+const validateNoteFolderBody = (body, opts = {}) => {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return 'Request body must be a JSON object.';
+  }
+  const { partial = false } = opts;
+  if (!partial) {
+    if (typeof body.name !== 'string') return 'name is required and must be a string.';
+    const name = body.name.trim();
+    if (name.length === 0) return 'name must not be empty.';
+    if (name.length > MAX_NOTE_FOLDER_NAME_LENGTH) {
+      return `name must be ${MAX_NOTE_FOLDER_NAME_LENGTH} characters or fewer (got ${name.length}).`;
+    }
+  } else {
+    if (body.name !== undefined) {
+      if (typeof body.name !== 'string') return 'name must be a string.';
+      const name = body.name.trim();
+      if (name.length === 0) return 'name must not be empty.';
+      if (name.length > MAX_NOTE_FOLDER_NAME_LENGTH) {
+        return `name must be ${MAX_NOTE_FOLDER_NAME_LENGTH} characters or fewer (got ${name.length}).`;
+      }
+    }
+    if (body.sort_order !== undefined) {
+      if (typeof body.sort_order !== 'number' || !Number.isInteger(body.sort_order) || body.sort_order < 0) {
+        return 'sort_order must be a non-negative integer.';
+      }
+    }
+  }
+  return null;
+};
+
+// ─── UI-R9 — Notes attachment helpers ───────────────────────────────────────
+
+const readNoteAttachmentsManifest = () => {
+  ensureNotesFileExists();
+  let raw;
+  try {
+    raw = fs.readFileSync(NOTE_ATTACHMENTS_MANIFEST, 'utf8');
+  } catch (e) {
+    if (e.code === 'ENOENT') return [];
+    console.error('Failed to read note attachments manifest:', e.message);
+    return [];
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.warn('Note attachments manifest is corrupt JSON; returning empty list:', e.message);
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    console.warn('Note attachments manifest is not an array; returning empty list');
+    return [];
+  }
+  return parsed.filter((a) => {
+    if (!a || typeof a !== 'object') return false;
+    if (typeof a.id !== 'string' || !a.id.startsWith(NOTE_ATTACHMENT_ID_PREFIX)) return false;
+    if (typeof a.note_id !== 'string' || !a.note_id.startsWith(NOTE_ID_PREFIX)) return false;
+    if (typeof a.filename !== 'string') return false;
+    if (typeof a.stored_name !== 'string') return false;
+    if (typeof a.mime !== 'string') return false;
+    if (typeof a.size !== 'number' || a.size < 0) return false;
+    if (typeof a.created_at !== 'string') return false;
+    return true;
+  });
+};
+
+const writeNoteAttachmentsManifest = (manifest) => {
+  ensureNotesFileExists();
+  const tmpFile = `${NOTE_ATTACHMENTS_MANIFEST}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(manifest, null, 2), 'utf8');
+  fs.renameSync(tmpFile, NOTE_ATTACHMENTS_MANIFEST);
+};
+
+/**
+ * Sanitise a user-supplied filename to a safe form for headers and
+ * manifest storage. Strips path components, control chars, quotes,
+ * backslashes; clamps to 200 chars.
+ */
+const sanitiseFilename = (raw) => {
+  if (typeof raw !== 'string') return 'attachment';
+  let name = raw.split(/[\\/]/).pop() || 'attachment';
+  name = name.replace(/[\x00-\x1f\x7f"\\]/g, '_');
+  name = name.replace(/\.\.+/g, '.');
+  name = name.trim();
+  if (name.length === 0) name = 'attachment';
+  if (name.length > 200) name = name.slice(0, 200);
+  return name;
+};
+
+const findNoteById = (notes, id) => notes.findIndex((n) => n.id === id);
+
+/**
+ * `cascadeDeleteNoteAttachments` — best-effort cleanup of all
+ * attachments (manifest entries + on-disk files) for a deleted note.
+ * Idempotent: running on a note that has no attachments is a no-op.
+ */
+const cascadeDeleteNoteAttachments = (noteId) => {
+  const manifest = readNoteAttachmentsManifest();
+  const remaining = [];
+  const toRemove = [];
+  for (const entry of manifest) {
+    if (entry.note_id === noteId) toRemove.push(entry);
+    else remaining.push(entry);
+  }
+  for (const entry of toRemove) {
+    const filePath = path.join(NOTE_ATTACHMENTS_DIR, noteId, entry.stored_name);
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {
+      console.error(`cascadeDeleteNoteAttachments: failed to unlink ${filePath}:`, e.message);
+    }
+  }
+  // Best-effort: remove the now-empty per-note directory.
+  const dirPath = path.join(NOTE_ATTACHMENTS_DIR, noteId);
+  try {
+    if (fs.existsSync(dirPath)) fs.rmdirSync(dirPath);
+  } catch (e) {
+    // Not empty (other files) or already gone — both fine.
+  }
+  if (toRemove.length > 0) writeNoteAttachmentsManifest(remaining);
+};
+
+// ─── UI-R9 — Note attachment multer config ──────────────────────────────────
+//
+// Per-note disk storage under data/note_attachments/<note_id>/. The
+// route wrapper validates note existence + count BEFORE accepting
+// the upload; this fileFilter / limits / diskStorage handle the actual
+// write.
+
+const noteAttachmentStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const noteId = req.params.id;
+    if (typeof noteId !== 'string' || !noteId.startsWith(NOTE_ID_PREFIX)) {
+      return cb(new Error('Invalid note id.'));
+    }
+    const dir = path.join(NOTE_ATTACHMENTS_DIR, noteId);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch (e) {
+      return cb(e);
+    }
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase() || NOTE_ATTACHMENT_EXT_BY_MIME[file.mimetype] || '';
+    const storedName = `${crypto.randomBytes(12).toString('hex')}${ext}`;
+    cb(null, storedName);
+  }
+});
+
+const noteAttachmentUpload = multer({
+  storage: noteAttachmentStorage,
+  limits: { fileSize: NOTE_ATTACHMENT_MAX_BYTES },
+  fileFilter: (req, file, cb) => {
+    if (NOTE_ATTACHMENT_ALLOWED_MIME.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      const err = new Error(`Invalid file type: ${file.mimetype}. Allowed: JPG, PNG, GIF (max ${NOTE_ATTACHMENT_MAX_BYTES / 1024 / 1024}MB).`);
+      err.statusCode = 400;
+      cb(err);
+    }
+  }
+});
+
+/**
+ * `GET /api/notes` — list notes. Newest first by updated_at, with
+ * created_at as a stable tiebreaker. The full payload is small
+ * (title + body), so the whole list is returned without pagination.
+ *
+ * Query parameters (UI-R9):
+ *   ?folder=<id>          — return only notes with folder_id = <id>
+ *   ?folder=unfiled       — return only notes with folder_id = null
+ *   (no param)            — return all notes (default)
+ */
+app.get('/api/notes', (req, res) => {
+  try {
+    let notes = readNotes();
+    const folderParam = req.query.folder;
+    if (typeof folderParam === 'string' && folderParam.length > 0) {
+      if (folderParam === 'unfiled') {
+        notes = notes.filter((n) => n.folder_id == null);
+      } else if (folderParam.startsWith(NOTE_FOLDER_ID_PREFIX)) {
+        notes = notes.filter((n) => n.folder_id === folderParam);
+      } else {
+        return res.status(400).json({ success: false, error: `folder query must start with "${NOTE_FOLDER_ID_PREFIX}" or be "unfiled".` });
+      }
+    }
+    notes.sort((a, b) => {
+      const ua = a.updated_at || a.created_at || '';
+      const ub = b.updated_at || b.created_at || '';
+      if (ua < ub) return 1;
+      if (ua > ub) return -1;
+      return (a.created_at < b.created_at) ? 1 : -1;
+    });
+    res.json({ success: true, data: notes });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// CR-A11 (notes-folders-routing-fix): register the literal `folders`
+// route BEFORE the `:id` wildcard so GET /api/notes/folders is not
+// shadowed. The handler body is handleListNoteFolders.
+app.get('/api/notes/folders', handleListNoteFolders);
+
+/**
+ * `GET /api/notes/:id` — get one note. 404 if missing.
+ */
+app.get('/api/notes/:id', (req, res) => {
+  try {
+    const notes = readNotes();
+    const note = notes.find((n) => n.id === req.params.id);
+    if (!note) {
+      return res.status(404).json({ success: false, error: `Note "${req.params.id}" not found.` });
+    }
+    res.json({ success: true, data: note });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `POST /api/notes` — create a new note.
+ * Body: `{ title, body, job_id? }`. job_id is optional and informational.
+ * 400 on validation failure, 201 on success.
+ */
+app.post('/api/notes', (req, res) => {
+  try {
+    const body = req.body || {};
+    const validationError = validateNoteBody(body);
+    if (validationError) return res.status(400).json({ success: false, error: validationError });
+
+    // UI-R9 — folder_id: must reference an existing folder if present.
+    let folderId = null;
+    if (body.folder_id !== undefined && body.folder_id !== null) {
+      const folders = readNoteFolders();
+      if (!folders.some((f) => f.id === body.folder_id)) {
+        return res.status(400).json({ success: false, error: `Folder "${body.folder_id}" not found.` });
+      }
+      folderId = body.folder_id;
+    }
+
+    const now = new Date().toISOString();
+    const jobId = normalizeNoteJobId(body.job_id);
+    const newNote = {
+      id: generateNoteId(),
+      title: body.title.trim(),
+      body: body.body,
+      job_id: jobId === undefined ? null : jobId,
+      folder_id: folderId,
+      created_at: now,
+      updated_at: now
+    };
+    const notes = readNotes();
+    notes.push(newNote);
+    writeNotes(notes);
+    res.status(201).json({ success: true, data: newNote });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `PUT /api/notes/:id` — update an existing note.
+ * Body (partial): `{ title?, body?, job_id? }`. Each present field is
+ * validated; the merged state is written and `updated_at` is bumped.
+ * 400 if no updatable fields are present; 404 if id unknown.
+ */
+app.put('/api/notes/:id', (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ success: false, error: 'Request body must be a JSON object.' });
+    }
+    const hasField =
+      Object.prototype.hasOwnProperty.call(body, 'title') ||
+      Object.prototype.hasOwnProperty.call(body, 'body') ||
+      Object.prototype.hasOwnProperty.call(body, 'job_id') ||
+      Object.prototype.hasOwnProperty.call(body, 'folder_id');
+    if (!hasField) {
+      return res.status(400).json({ success: false, error: 'Request body must include title, body, job_id, or folder_id.' });
+    }
+
+    const validationError = validateNoteBody(body, { partial: true });
+    if (validationError) return res.status(400).json({ success: false, error: validationError });
+
+    const notes = readNotes();
+    const idx = notes.findIndex((n) => n.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Note "${req.params.id}" not found.` });
+    }
+
+    if (typeof body.title === 'string') notes[idx].title = body.title.trim();
+    if (typeof body.body === 'string') notes[idx].body = body.body;
+    if (Object.prototype.hasOwnProperty.call(body, 'job_id')) {
+      const jobId = normalizeNoteJobId(body.job_id);
+      notes[idx].job_id = jobId === undefined ? notes[idx].job_id : jobId;
+    }
+    // UI-R9 — folder_id: validate against the live folder list when present.
+    if (Object.prototype.hasOwnProperty.call(body, 'folder_id')) {
+      if (body.folder_id === null) {
+        notes[idx].folder_id = null;
+      } else {
+        const folders = readNoteFolders();
+        if (!folders.some((f) => f.id === body.folder_id)) {
+          return res.status(400).json({ success: false, error: `Folder "${body.folder_id}" not found.` });
+        }
+        notes[idx].folder_id = body.folder_id;
+      }
+    }
+    notes[idx].updated_at = new Date().toISOString();
+
+    writeNotes(notes);
+    res.json({ success: true, data: notes[idx] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `DELETE /api/notes/:id` — hard-delete a note. Cascades to
+ * attachments: removes the manifest entries and the per-note directory
+ * under `data/note_attachments/<note_id>/`. Returns the deleted id.
+ */
+app.delete('/api/notes/:id', (req, res) => {
+  try {
+    const notes = readNotes();
+    const idx = notes.findIndex((n) => n.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Note "${req.params.id}" not found.` });
+    }
+    const [removed] = notes.splice(idx, 1);
+    writeNotes(notes);
+    // UI-R9 — cascade delete attachments. Best-effort; idempotent.
+    try {
+      cascadeDeleteNoteAttachments(removed.id);
+    } catch (e) {
+      console.error(`cascadeDeleteNoteAttachments(${removed.id}) failed:`, e.message);
+    }
+    res.json({ success: true, data: { id: removed.id, deleted: true } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─── UI-R9 — Note folders CRUD (SPEC §25.4) ─────────────────────────────────
+//
+// Four routes for managing folders: list, create, rename/reorder, delete.
+// Sort order is server-assigned; the client may send `sort_order` on
+// PUT but the server's write-time sort is the source of truth.
+
+// CR-A11 (notes-folders-routing-fix): the route handler is registered
+// EARLIER (before the `app.get('/api/notes/:id', ...)` wildcard at
+// ~line 6755). Express matches in registration order; if the wildcard
+// is registered first, `app.get('/api/notes/folders')` is shadowed and
+// returns 404. The handler body lives at handleListNoteFolders.
+
+
+/**
+ * `POST /api/notes/folders` — create a folder. Body `{ name }`.
+ * 201 with the new folder; 400 on validation failure or duplicate name.
+ */
+app.post('/api/notes/folders', (req, res) => {
+  try {
+    const body = req.body || {};
+    const validationError = validateNoteFolderBody(body);
+    if (validationError) return res.status(400).json({ success: false, error: validationError });
+
+    const folders = readNoteFolders();
+    const name = body.name.trim();
+    if (folderNameExists(folders, name)) {
+      return res.status(400).json({ success: false, error: `Folder name "${name}" already exists.` });
+    }
+    const sortOrder = folders.length; // append to end
+    const newFolder = {
+      id: generateNoteFolderId(),
+      name,
+      sort_order: sortOrder,
+      created_at: new Date().toISOString()
+    };
+    folders.push(newFolder);
+    writeNoteFolders(folders);
+    res.status(201).json({ success: true, data: newFolder });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `PUT /api/notes/folders/:id` — rename and/or reorder a folder.
+ * Body (partial): `{ name?, sort_order? }`.
+ */
+app.put('/api/notes/folders/:id', (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ success: false, error: 'Request body must be a JSON object.' });
+    }
+    const hasField =
+      Object.prototype.hasOwnProperty.call(body, 'name') ||
+      Object.prototype.hasOwnProperty.call(body, 'sort_order');
+    if (!hasField) {
+      return res.status(400).json({ success: false, error: 'Request body must include name or sort_order.' });
+    }
+    const validationError = validateNoteFolderBody(body, { partial: true });
+    if (validationError) return res.status(400).json({ success: false, error: validationError });
+
+    const folders = readNoteFolders();
+    const idx = folders.findIndex((f) => f.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Folder "${req.params.id}" not found.` });
+    }
+
+    if (typeof body.name === 'string') {
+      const newName = body.name.trim();
+      if (folderNameExists(folders, newName, req.params.id)) {
+        return res.status(400).json({ success: false, error: `Folder name "${newName}" already exists.` });
+      }
+      folders[idx].name = newName;
+    }
+    if (typeof body.sort_order === 'number') {
+      // Move the folder to the requested sort_order and re-shuffle the
+      // affected neighbours to keep the list gap-free.
+      const target = Math.max(0, Math.min(body.sort_order, folders.length - 1));
+      const [moved] = folders.splice(idx, 1);
+      folders.splice(target, 0, moved);
+      const reordered = computeFolderSortOrders(folders);
+      writeNoteFolders(reordered);
+      return res.json({ success: true, data: reordered[target] });
+    }
+    folders[idx].updated_at = new Date().toISOString();
+    writeNoteFolders(folders);
+    res.json({ success: true, data: folders[idx] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `DELETE /api/notes/folders/:id` — hard-delete a folder.
+ * Notes that referenced it are reset to `folder_id: null` (Unfiled).
+ * Their attachments are preserved.
+ */
+app.delete('/api/notes/folders/:id', (req, res) => {
+  try {
+    const folders = readNoteFolders();
+    const idx = folders.findIndex((f) => f.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Folder "${req.params.id}" not found.` });
+    }
+    const [removed] = folders.splice(idx, 1);
+    const reordered = computeFolderSortOrders(folders);
+    writeNoteFolders(reordered);
+
+    // Cascade: reset folder_id on any notes that referenced this folder.
+    const notes = readNotes();
+    let reset = 0;
+    notes.forEach((n) => {
+      if (n.folder_id === removed.id) {
+        n.folder_id = null;
+        n.updated_at = new Date().toISOString();
+        reset += 1;
+      }
+    });
+    if (reset > 0) writeNotes(notes);
+
+    res.json({ success: true, data: { id: removed.id, deleted: true, notes_reset: reset } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─── UI-R9 — Note move (SPEC §25.4) ─────────────────────────────────────────
+
+/**
+ * `PUT /api/notes/:id/move` — move a note to a different folder (or
+ * back to Unfiled via `folder_id: null`). Body `{ folder_id: string | null }`.
+ * 200 with the updated note; 400 on invalid folder_id; 404 if note unknown.
+ */
+app.put('/api/notes/:id/move', (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      return res.status(400).json({ success: false, error: 'Request body must be a JSON object.' });
+    }
+    if (!Object.prototype.hasOwnProperty.call(body, 'folder_id')) {
+      return res.status(400).json({ success: false, error: 'Request body must include folder_id.' });
+    }
+    const folderIdRaw = body.folder_id;
+    let folderId = null;
+    if (folderIdRaw !== null) {
+      if (typeof folderIdRaw !== 'string' || !folderIdRaw.startsWith(NOTE_FOLDER_ID_PREFIX)) {
+        return res.status(400).json({ success: false, error: `folder_id must start with "${NOTE_FOLDER_ID_PREFIX}" or be null.` });
+      }
+      const folders = readNoteFolders();
+      if (!folders.some((f) => f.id === folderIdRaw)) {
+        return res.status(400).json({ success: false, error: `Folder "${folderIdRaw}" not found.` });
+      }
+      folderId = folderIdRaw;
+    }
+
+    const notes = readNotes();
+    const idx = notes.findIndex((n) => n.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Note "${req.params.id}" not found.` });
+    }
+    notes[idx].folder_id = folderId;
+    notes[idx].updated_at = new Date().toISOString();
+    writeNotes(notes);
+    res.json({ success: true, data: notes[idx] });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─── UI-R9 — Note attachments (SPEC §25.4) ─────────────────────────────────
+
+/**
+ * `GET /api/notes/:id/attachments` — list attachments for a note,
+ * ordered by created_at asc. 404 if the note doesn't exist.
+ */
+app.get('/api/notes/:id/attachments', (req, res) => {
+  try {
+    const notes = readNotes();
+    if (!notes.some((n) => n.id === req.params.id)) {
+      return res.status(404).json({ success: false, error: `Note "${req.params.id}" not found.` });
+    }
+    const manifest = readNoteAttachmentsManifest()
+      .filter((a) => a.note_id === req.params.id)
+      .sort((a, b) => (a.created_at < b.created_at ? -1 : 1))
+      .map((a) => ({
+        id: a.id,
+        note_id: a.note_id,
+        filename: a.filename,
+        mime: a.mime,
+        size: a.size,
+        created_at: a.created_at
+      }));
+    res.json({ success: true, data: manifest });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `POST /api/notes/:id/attachments` — multer upload. Single file field
+ * "image". JPG/PNG/GIF only, max 5 MB. Reject if note already has 5
+ * attachments (return 409). 201 with the new attachment.
+ */
+app.post('/api/notes/:id/attachments', (req, res, next) => {
+  // Pre-check the note exists + count is under cap BEFORE accepting the
+  // upload. This prevents orphan files on disk when the request is
+  // rejected before multer runs.
+  try {
+    const notes = readNotes();
+    if (!notes.some((n) => n.id === req.params.id)) {
+      return res.status(404).json({ success: false, error: `Note "${req.params.id}" not found.` });
+    }
+    const manifest = readNoteAttachmentsManifest();
+    const existing = manifest.filter((a) => a.note_id === req.params.id);
+    if (existing.length >= NOTE_ATTACHMENT_MAX_COUNT) {
+      return res.status(409).json({ success: false, error: `Maximum ${NOTE_ATTACHMENT_MAX_COUNT} attachments per note.` });
+    }
+    next();
+  } catch (e) {
+    res.status(500).json({ success: false, error: sanitizeError(e.message) });
+  }
+}, noteAttachmentUpload.single('image'), (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded (field name must be "image").' });
+    }
+    const attId = generateNoteAttachmentId();
+    const safeFilename = sanitiseFilename(req.file.originalname);
+    const manifest = readNoteAttachmentsManifest();
+    manifest.push({
+      id: attId,
+      note_id: req.params.id,
+      filename: safeFilename,
+      stored_name: req.file.filename,
+      mime: req.file.mimetype,
+      size: req.file.size,
+      created_at: new Date().toISOString()
+    });
+    writeNoteAttachmentsManifest(manifest);
+    res.status(201).json({
+      success: true,
+      data: {
+        id: attId,
+        note_id: req.params.id,
+        filename: safeFilename,
+        mime: req.file.mimetype,
+        size: req.file.size,
+        created_at: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    // Best-effort cleanup on unexpected failure.
+    if (req.file && req.file.path) {
+      try { fs.unlinkSync(req.file.path); } catch (_) { /* best-effort */ }
+    }
+    const statusCode = typeof error?.statusCode === 'number' ? error.statusCode : 500;
+    res.status(statusCode).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `GET /api/note-attachments/:id/file` — stream the file bytes.
+ * Resolves path from manifest, not URL. 404 if missing.
+ * Auto-prunes manifest entry if file is missing on disk.
+ */
+app.get('/api/note-attachments/:id/file', (req, res) => {
+  try {
+    const attId = req.params.id;
+    const manifest = readNoteAttachmentsManifest();
+    const entry = manifest.find((m) => m.id === attId);
+    if (!entry) {
+      return res.status(404).json({ success: false, error: `Attachment "${attId}" not found.` });
+    }
+    const filePath = path.join(NOTE_ATTACHMENTS_DIR, entry.note_id, entry.stored_name);
+    if (!fs.existsSync(filePath)) {
+      // Auto-prune manifest entry to avoid drift.
+      const remaining = manifest.filter((m) => m.id !== attId);
+      writeNoteAttachmentsManifest(remaining);
+      return res.status(404).json({ success: false, error: 'Attachment file missing on disk; manifest entry pruned.' });
+    }
+    res.setHeader('Content-Type', entry.mime || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${entry.filename || attId}"`);
+    res.sendFile(path.resolve(filePath));
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * `DELETE /api/note-attachments/:id` — hard-delete an attachment.
+ * Removes the file from disk + manifest entry. Idempotent.
+ */
+app.delete('/api/note-attachments/:id', (req, res) => {
+  try {
+    const attId = req.params.id;
+    const manifest = readNoteAttachmentsManifest();
+    const entry = manifest.find((m) => m.id === attId);
+    if (!entry) {
+      return res.status(404).json({ success: false, error: `Attachment "${attId}" not found.` });
+    }
+    const filePath = path.join(NOTE_ATTACHMENTS_DIR, entry.note_id, entry.stored_name);
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (e) {
+      console.error(`DELETE attachment ${attId}: failed to unlink ${filePath}:`, e.message);
+    }
+    // Best-effort: try to remove the per-note dir if it's now empty.
+    const dirPath = path.join(NOTE_ATTACHMENTS_DIR, entry.note_id);
+    try {
+      if (fs.existsSync(dirPath)) fs.rmdirSync(dirPath);
+    } catch (_) { /* not empty or already gone */ }
+    const remaining = manifest.filter((m) => m.id !== attId);
+    writeNoteAttachmentsManifest(remaining);
+    res.json({ success: true, data: { id: attId, deleted: true } });
   } catch (error) {
     res.status(500).json({ success: false, error: sanitizeError(error.message) });
   }
