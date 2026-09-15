@@ -503,3 +503,73 @@ Kill the sub-slice if:
 - **K-1:** If the streaming endpoint can't complete a single round-trip in under 200ms (excluding the model's response time), the streaming pipeline is too heavyweight. Revert to non-streaming.
 - **K-2:** If the upstream provider rejects streaming requests, the streaming endpoint falls back to non-streaming (calls the upstream without `stream: true` and emits the full reply as one chunk). The endpoint still works; the client just sees the existing non-streaming UX.
 - **K-3:** If memory grows unboundedly on a 1000-chunk test fixture, the backpressure path is broken. Revert the slice.
+
+## §30 — Notes folders + image attachments (UI-R9)
+
+Companion to SPEC §25 and ARCH §30.
+
+### Top risks
+
+- **R-1 (HIGH):** Orphaned attachment files. If a note is deleted, its attachment files must be removed from disk. If the process crashes mid-delete, files leak. *Mitigation:* cascade-delete is best-effort but idempotent (re-running on the same note is a no-op). A test asserts that `DELETE /api/notes/:id` removes both the note entry AND its attachments folder.
+- **R-2 (HIGH):** Upload size DoS. A malicious client sends a 10 GB request claiming `Content-Length: 5 MB`. *Mitigation:* multer's `limits.fileSize` is enforced before the file lands on disk; the server returns 413 with a clean error. A test asserts 5 MB + 1 byte → 413.
+- **R-3 (MEDIUM):** Manifest drift. If a file is removed on disk out-of-band (user `rm`'s it), the manifest entry stays and `/file` returns 404. *Mitigation:* the `/file` route auto-prunes the manifest entry on 404. Test asserts that calling `/file` for a missing file removes its manifest entry.
+- **R-4 (MEDIUM):** Sort-order races. Two tabs reorder folders simultaneously; the last write wins. *Mitigation:* the server sorts on read by `(sort_order, created_at)` as a tiebreaker; reordering converges on next GET. Documented as "last write wins on ties; otherwise sort_order drives order."
+- **R-5 (MEDIUM):** Folder rename → notes that reference it are unaffected (folder id is the FK, not the name). Good — but the sidebar must reflect the rename immediately. *Mitigation:* PUT returns the updated folder; the client patches in place without a full re-fetch.
+- **R-6 (LOW):** Drag-and-drop on a touch device without keyboard support. *Mitigation:* sortablejs supports touch + keyboard reorder; explicit "Move to…" menu is the keyboard-only fallback.
+- **R-7 (LOW):** Client opens 6 attachments on a 50 MB note → tab blows up on memory. *Mitigation:* each thumbnail is `<img loading="lazy">`; full image only loads on click. Max 5 attachments caps the worst case.
+- **R-8 (LOW):** Filename spoofing. User uploads `evil.jpg.exe` claiming `image/jpeg`. *Mitigation:* multer uses the extension from the original filename, but the file is served with `Content-Type` from the **manifest**, not from the request. The filename is sanitised (alphanum + dot + dash + underscore) before storage.
+
+### Pre-commitments
+
+- **P-1:** Cascade-delete MUST remove both the manifest entries AND the on-disk files for the deleted note. A test asserts the directory is gone after delete.
+- **P-2:** Upload errors (wrong MIME, too large, too many) MUST return clear, distinct HTTP codes: 400 / 413 / 409 respectively. A test asserts each.
+- **P-3:** Folder delete MUST move all referencing notes to `folder_id: null` (Unfiled). A test asserts the cascade.
+- **P-4:** The server MUST reject note PUT/MOVE requests that supply an unknown `folder_id` with 400. A test asserts this.
+- **P-5:** Attachment downloads MUST set `Content-Disposition: inline` with the sanitised filename. A test asserts the header.
+- **P-6:** All new endpoints MUST appear in `README.md` endpoint tables. A test asserts this.
+
+### Kill criteria
+
+- **K-1:** If multer can't be configured to cap file size before disk write, fall back to a manual `Content-Length` check on the raw `req`. (Should not happen — multer has had this since v1.)
+- **K-2:** If sortablejs keyboard support proves unusable in our sidebar layout, drop the drag-and-drop and keep the explicit "Move to…" menu only.
+- **K-3:** If the manifest pattern causes more than 1% of test runs to flake (timing issue with fs.renameSync), switch to a write-then-rename pattern with a per-note lock.
+
+
+## §31 — Clear chat history (SPEC §27 / CR-A11)
+
+### Top risks
+
+- **R-1 (HIGH):** Partial failure leaves a torn state. Server clears the session file but a few `fs.rmSync` calls throw (permission denied, file busy on Windows, etc.), so some attachment directories linger. *Mitigation:* the bulk endpoint collects per-directory failures, still returns 500 (or 200 with a per-failure breakdown in the body), and the response message tells the user "Chat sessions cleared, but N attachment directories could not be removed." Idempotency: the user can retry; the session-write is already done so a retry is a no-op for sessions and just re-attempts the directory sweep. A test asserts the partial-failure case.
+
+- **R-2 (HIGH):** Accidental data loss. User clicks the button without reading the modal, confirms without reading the count, and loses weeks of chat history. *Mitigation:* the modal shows "This will permanently delete all N chat sessions and M attachment files. This action cannot be undone." — explicit count + explicit "permanently" + explicit "cannot be undone". The confirm button is `class="btn-danger"` (the project's strongest visual danger style). The Cancel button is the default-focus target so Enter on the keyboard dismisses rather than confirms. The modal is dismissible by Cancel, Escape, and backdrop click.
+
+- **R-3 (MEDIUM):** `data/chat_sessions.json` is gitignored (project convention for runtime state), so a cleared file is GONE — no undo from git. *Mitigation:* the SPEC explicitly accepts this; users who want backups copy the file before clearing. This is consistent with how `data/palettes.json`, `data/presets.json`, etc. are handled — the project is local-first, single-user, and trusts the user.
+
+- **R-4 (MEDIUM):** Concurrent chat sessions in flight when the user clicks clear. User has Chat tab open in two browser tabs; tab A sends a message just as tab B clicks Clear. The new message may land between `readChatSessions()` and `writeChatSessions([])`, getting silently dropped. *Mitigation:* `writeChatSessions` uses the same atomic-rename pattern as every other write; the dropped-message window is the same as for any concurrent write (a few milliseconds). The user's other tab will see the chat view reset on its next GET, and any in-flight POST will return 404 (session not found) which the frontend handles gracefully. Documented in the test for the route, not blocked.
+
+- **R-5 (MEDIUM):** Frontend `onChatHistoryCleared` throws partway through (e.g., a DOM element is missing because Settings was never opened). The chat view stays in a partially-reset state. *Mitigation:* the hook wraps its body in `try/finally` so each reset line runs even if a prior line throws; final state is re-established via `renderChatSessionSelect()` regardless. Test asserts the hook is defensive (calls `resetChatConsole` and `renderChatSessionSelect` in a finally block).
+
+- **R-6 (LOW):** Modal can be opened twice rapidly (double-click on the button). User sees two stacked modals. *Mitigation:* the button is `disabled` between click and modal-open (cheap debounce via `setTimeout(…, 100)` in shell.js). Acceptable — even if two modals open, the trap infrastructure handles the stacking correctly (top-most modal traps focus).
+
+- **R-7 (LOW):** `preservation_override_log.json` is NOT cleared (per G1 user direction). If the user expects it to be, they'll be confused. *Mitigation:* documented in SPEC §27 "Out of scope" and in the Settings panel's hint text ("This removes all chat sessions and their attachments. It does not affect preset overrides, palettes, directives, notes, or model settings.").
+
+- **R-8 (LOW):** Cross-browser modal styling quirks (Safari backdrop-filter, Firefox scroll-lock). *Mitigation:* the modal reuses the existing patterns from the preset editor and notes-modal which are already exercised across browsers. No new CSS that diverges from the established `.modal` / `.modal-backdrop` / `.modal-content` classes.
+
+### Pre-commitments
+
+- **P-1:** The bulk endpoint MUST atomically rewrite `data/chat_sessions.json` to `[]` via the existing `writeChatSessions` helper. A test asserts the file is `[]` after a successful call and that the rewrite is atomic (no torn writes under concurrent reads).
+- **P-2:** The bulk endpoint MUST sweep every `data/chat_attachments/chat_*/` directory via `fs.rmSync(..., { recursive: true, force: true })`, regardless of manifest presence. A test asserts orphan directories are removed even when the manifest is empty.
+- **P-3:** The bulk endpoint MUST reset `data/chat_attachments/_manifest.json` to `[]`. A test asserts the manifest is `[]` after a successful call.
+- **P-4:** The Settings "Chat data" panel MUST be the LAST panel in the Settings view (after Defaults, after System prompts). A test asserts the panel order via DOM-position check.
+- **P-5:** The modal MUST show the current session count + attachment count BEFORE the user can confirm. A test asserts the modal text contains the live counts.
+- **P-6:** The confirm button MUST be disabled while the bulk DELETE is in flight, and re-enabled on response. A test asserts this via the rendered button's `disabled` attribute.
+- **P-7:** `onChatHistoryCleared` MUST reset `state.chatSessions = []`, `state.chatSessionId = null`, `state.chatPendingAttachmentIds = []`, `state.chatPendingAttachmentMeta = {}`, then call `resetChatConsole()` and `renderChatSessionSelect()`. A test asserts each.
+- **P-8:** `onChatHistoryCleared` MUST defensively sweep `localStorage` for keys matching `/^i2p\.(chat|session)\b/i`. A test asserts the sweep runs even when no matching keys exist (no-throw).
+- **P-9:** All new endpoints MUST appear in `README.md` endpoint tables OR be documented inline in `server.js` route comments. (Slice 27 adds 2 endpoints: DELETE /api/chat/sessions and GET /api/chat/sessions/count.)
+- **P-10:** No regression in the 589 baseline tests.
+
+### Kill criteria
+
+- **K-1:** If `fs.rmSync` proves unreliable on the user's platform (Windows file locking, network filesystem), fall back to `fs.rmdirSync(dir, { recursive: true })` (the older Node API) or to a recursive unlink loop. Should not happen — `fs.rmSync` is the documented modern API.
+- **K-2:** If the defensive `localStorage` sweep accidentally clears a non-chat key (false-positive regex), narrow the regex to `/^i2p\.chat/i` (chat prefix only). Mitigation is one-character.
+- **K-3:** If the bulk endpoint can't be made idempotent (e.g., concurrent clears race on the manifest write), add a per-file mutex. Should not happen — `writeChatSessions` is already atomic and the manifest write follows the same pattern.

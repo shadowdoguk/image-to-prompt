@@ -1219,3 +1219,349 @@ Today, the user clicks Send and stares at a spinner for 5-30 seconds while the m
 - [ ] `src/styles.css`: typing indicator + Stop button styles.
 - [ ] `tests/run-all.js`: ≥10 tests covering (a) endpoint registered, (b) streaming produces SSE response, (c) abort stops the stream, (d) final message persists, (e) error path emits `error` event, (f) concurrent streams return 409, (g) non-kilo_code providers fall back to non-streaming.
 - [ ] `docs/CODE-REVIEW-31-streaming.md`: verdict `pass` or `pass+minor`.
+
+## §25 — Notes enhancements: folders + image attachments (UI-R9)
+
+**Date:** 2026-09-09
+**Owner:** goose (autonomous, full-ownership per user directive)
+**Predecessors:** §UI-R8 (Notes tab — personal notes for prompts, shipped 2026-09-09, commit pending)
+**Status:** Draft → In Review → Approved (Gate G2)
+
+### 25.1 Reframe
+
+The Notes tab (§UI-R8) currently offers flat CRUD: create / edit / auto-save / filter / delete notes. This slice extends it along two orthogonal axes:
+
+1. **Folders.** Add first-class folder organisation. Users can create, rename, and delete folders; notes belong to zero or one folder; folders can be reordered; notes can be moved between folders via drag-and-drop or an explicit "Move to…" menu.
+2. **Image attachments.** Each note can carry 0..5 image attachments. Images upload via a dedicated endpoint, are stored on disk under `data/note_attachments/<note_id>/`, and render as inline previews in the editor + thumbnails in the list.
+
+The two features share the same shell: the Notes tab gains a left-most **Folders** sidebar (above the existing search/list), and the editor panel grows an **Attachments** section above the meta/actions row.
+
+### 25.2 Storage decision — explicit user ask: "evaluate localStorage / IndexedDB / embedded DB"
+
+**Decision: keep JSON file + new disk directory for images.** Rationale:
+
+- **Consistency.** The app already has six JSON-file stores (`data/*.json`) and two multer-on-disk stores (`uploads/`, `data/chat_attachments/`). Adding a seventh JSON file + a third disk dir is the smallest possible delta.
+- **localStorage caps at ~5 MB per origin.** A single 50 KB body + 5 × 2 MB images already exceeds that on the first note. localStorage is not viable.
+- **IndexedDB would require restructuring.** All existing modules read/write through `fs.readFileSync` + atomic rename. Switching one module to IndexedDB creates a split-brain (some state in browser, some on disk) — every cross-cutting consumer would have to know which is which. That's a project-wide refactor, not a slice.
+- **Embedded DB (better-sqlite3, etc.)** would add a native dependency. The project has zero native deps today. Pulling one in for a single feature violates the project's "smallest possible footprint" stance (see PROJECT-README §1).
+- **Atomic write + manifest pattern matches chat attachments.** `data/chat_attachments/_manifest.json` already proves this scales for a per-record subdir layout; we mirror it for notes.
+
+If a future slice ever needs offline / cross-device sync, IndexedDB is the right answer **at that time**, when the whole project migrates together. Not now.
+
+### 25.3 Data model
+
+**Note (extended — additive only):**
+
+```jsonc
+{
+  "id":        "note_<random>",
+  "title":     "string (1..120)",
+  "body":      "string (1..50000)",
+  "job_id":    "string | null",        // unchanged
+  "folder_id": "string | null",         // NEW: optional, FK to folders[].id or null = "Unfiled"
+  "created_at":"ISO8601",
+  "updated_at":"ISO8601"
+  // attachments are NOT inlined — fetched on demand from /api/notes/:id/attachments
+}
+```
+
+**Folder (new file `data/notes_folders.json`):**
+
+```jsonc
+{
+  "id":         "folder_<random>",
+  "name":       "string (1..60, trimmed non-empty)",
+  "created_at": "ISO8601",
+  "sort_order": "integer (0..N-1, used to order the sidebar)",
+  "notes_count": "integer (denormalised cache; recomputed on every move / delete)"
+}
+```
+
+Notes → folders relationship is one-to-many (one folder, many notes; one note, zero or one folder). No nesting in v1. Two notes are never forced into the same folder.
+
+**Attachment (new directory `data/note_attachments/` + manifest `data/note_attachments/_manifest.json`):**
+
+```jsonc
+{
+  "id":          "att_<random>",
+  "note_id":     "note_<random>",
+  "filename":    "string (sanitised original filename, max 200 chars)",
+  "stored_name": "string (random hex + ext; on disk)",
+  "mime":        "image/jpeg | image/png | image/gif",
+  "size":        "integer (bytes; 1..5*1024*1024)",
+  "created_at":  "ISO8601"
+}
+```
+
+Mirrors the chat-attachments manifest pattern (`_manifest.json` lookup table → never trust URL for fs access).
+
+### 25.4 API surface (additive only — no breaking changes to §UI-R8)
+
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/api/notes/folders` | List folders, ordered by `sort_order` asc, then `created_at` asc. |
+| POST | `/api/notes/folders` | Create folder. Body `{ name }`. 201 with the new folder. |
+| PUT | `/api/notes/folders/:id` | Rename folder. Body `{ name?, sort_order? }`. 200 with updated folder. |
+| DELETE | `/api/notes/folders/:id` | Hard-delete folder. All notes with `folder_id === id` are reset to `folder_id: null` (move to "Unfiled"). |
+| GET | `/api/notes/:id/attachments` | List attachments for a note, ordered by `created_at` asc. |
+| POST | `/api/notes/:id/attachments` | Multipart upload. Single file field `"image"`. JPG/PNG/GIF only, max 5 MB. Reject if note already has 5 attachments (return 409). 201 with the new attachment. |
+| GET | `/api/note-attachments/:id/file` | Stream the file bytes. Sets `Content-Type` from manifest, `Content-Disposition: inline` with sanitised filename. |
+| DELETE | `/api/note-attachments/:id` | Hard-delete attachment: removes file + manifest entry. 200 with `{ id, deleted: true }`. |
+| PUT | `/api/notes/:id/move` | Move note to folder. Body `{ folder_id: "folder_…" \| null }`. Validates folder exists (when non-null). 200 with updated note. |
+| GET | `/api/notes` | **Extended**: optional `?folder=<id\|null\|unfiled>` filter. Default (no param) returns all notes. |
+| POST | `/api/notes` | **Extended**: optional `folder_id` field in body. Validated. |
+| PUT | `/api/notes/:id` | **Extended**: optional `folder_id` field. Validated (must exist or be null). |
+
+New endpoints total: **10**. Updated endpoints: **3**. Total after this slice: **65 + 10 = 75** API endpoints.
+
+### 25.5 Validation rules
+
+| Field | Rule |
+|---|---|
+| Folder `name` | 1..60 chars after trim; non-empty. No HTML/control chars (sanitised for display). |
+| Note `folder_id` | When present: must be a string matching `^folder_[a-f0-9]{16}$` AND must reference an existing folder, OR null. |
+| Attachment `mime` | Whitelist: `image/jpeg`, `image/png`, `image/gif`. Mismatch → 400. |
+| Attachment size | ≤ 5 MB. Mismatch → 413. |
+| Attachment count per note | ≤ 5. Mismatch → 409 with `error: "Maximum 5 attachments per note"`. |
+| Note delete cascade | When a note is deleted, its attachments folder + manifest entries are removed. |
+| Folder delete cascade | Notes reset to `folder_id: null` (Unfiled). Their attachments are preserved. |
+
+### 25.6 Frontend behaviour
+
+**Layout** (rendered when `view === 'notes'`):
+
+```
+┌─ Sidebar ──────┐  ┌─ Toolbar (search / count / New) ─┐
+│ 📁 All notes   │  ├──────────────────────────────────┤
+│ 📁 Drafts      │  │ List of notes (filtered)         │
+│ 📁 Reference   │  │   - click to load into editor    │
+│ 📁 ...         │  └──────────────────────────────────┘
+│ ──             │  ┌─ Editor (selected note) ─────────┐
+│ ➕ New folder  │  │ Title                            │
+│                │  │ Body (textarea)                  │
+│                │  │ job_id (optional)                │
+│                │  │ ────────────────────             │
+│                │  │ Attachments                      │
+│                │  │ [thumb][thumb][+]                │
+│                │  │ ────────────────────             │
+│                │  │ Meta · Save · Delete             │
+│                │  └──────────────────────────────────┘
+```
+
+- **Sidebar sort order.** `sort_order` ascending, then `created_at` ascending. The "Unfiled" pseudo-folder is always shown first (above the user-created list) and is **not deletable**.
+- **Drag-and-drop.** Two operations: (a) reorder folders in the sidebar, (b) drag a note onto a folder name in the sidebar to move it. Both use the existing `sortablejs` dependency (already in `package.json`; used by the Library view).
+- **Folder empty / Unfiled empty.** When the selected folder is empty, the list region shows a placeholder ("No notes in this folder yet.").
+- **Attachment thumbnail grid.** Up to 5 thumbnails in a CSS grid; the "+" tile opens a file picker. Click thumbnail → opens the file in a new tab (`/api/note-attachments/:id/file`). Hover shows a delete button.
+- **Upload progress.** A `aria-busy` flag on the attachments region + a "Uploading…" live-region announcement. No progress bar (no XHR upload progress event; fetch with FormData is opaque).
+- **Responsive.** Below 900px the sidebar stacks above the list (mirrors §UI-R8). Below 600px the attachment grid drops to 3 columns.
+- **Keyboard / a11y.** All buttons focusable; sortablejs supports keyboard out-of-the-box for reorder. Folder list uses `role="listbox"`; folder items use `role="option"`; selected folder has `aria-selected="true"`. Attachment grid is a `role="list"` with `role="listitem"` per thumb.
+
+### 25.7 Error handling
+
+| Scenario | UX |
+|---|---|
+| Folder name conflict | 400 from server → toast: "Folder name required." (mirrors existing notes pattern). |
+| Folder delete while notes still reference it | Cascade auto-runs server-side; UI re-fetches notes list; sidebar count updates. |
+| Attachment upload wrong MIME | Toast: "Only JPG, PNG, GIF allowed." |
+| Attachment upload too large | Toast: "Image must be 5 MB or smaller." |
+| Note already has 5 attachments | Toast: "Maximum 5 attachments per note." |
+| Attachment file deleted on disk out-of-band | GET /file returns 404 + manifest entry is auto-pruned on next read. |
+| Server down | Existing 500 / network-error handling (live-region announcement). |
+| Corrupt `notes_folders.json` | Forgiving read (return `[]`); `console.warn` like §UI-R8. |
+
+### 25.8 Testing (≥15 new tests)
+
+| # | Test |
+|---|---|
+| 1 | GET `/api/notes/folders` returns `[]` on a fresh install. |
+| 2 | POST creates folder; 201 + folder_<hex> id. |
+| 3 | POST rejects empty name; 400. |
+| 4 | POST rejects name >60 chars; 400. |
+| 5 | PUT renames folder; 200 + updated payload. |
+| 6 | PUT updates `sort_order`; sidebar order reflects change after GET. |
+| 7 | DELETE folder → notes with that folder_id reset to null. |
+| 8 | GET `/api/notes?folder=<id>` filters correctly; `?folder=unfiled` returns folder_id=null only. |
+| 9 | POST `/api/notes` accepts `folder_id`; persisted. |
+| 10 | PUT `/api/notes/:id` rejects unknown `folder_id`; 400. |
+| 11 | PUT `/api/notes/:id/move` to valid folder; 200; new folder_id in payload. |
+| 12 | PUT `/api/notes/:id/move` to null ("Unfiled"); 200. |
+| 13 | POST attachment: JPG accepted (binary, valid magic bytes); 201 + manifest entry. |
+| 14 | POST attachment: BMP rejected (wrong MIME); 400. |
+| 15 | POST attachment: 6 MB JPG rejected; 413. |
+| 16 | POST attachment: 6th attachment rejected; 409. |
+| 17 | GET `/api/notes/:id/attachments` lists only that note's attachments. |
+| 18 | GET `/api/note-attachments/:id/file` streams correct bytes + Content-Type. |
+| 19 | DELETE attachment removes file from disk + manifest entry. |
+| 20 | Static: nav-bar still has 7 tabs; sidebar role=listbox; attachment grid role=list. |
+| 21 | Static: 10 new routes registered (regex match + handler count). |
+| 22 | Endpoint count: 75 (65 + 10). |
+
+Existing UI-R8 tests stay green; total ≥ 591 tests after slice.
+
+### 25.9 Out of scope (deferred to BACKLOG)
+
+- Nested folders (tree-of-folders).
+- Folder colours / icons.
+- Bulk-move (multi-select + drag).
+- Image thumbnails (server-side resize) — currently we render full-size and rely on `max-width: 100%` CSS scaling.
+- Re-ordering notes within a folder (notes are ordered by `updated_at desc`).
+- Cross-device sync (see §25.2 — IndexedDB migration deferred).
+- Image OCR / vision caption (existing `/api/texture`-style per-field AI buttons could later be wired in).
+- Folder import/export (mirrors §UI-R8: notes deliberately simpler than directives).
+
+### 25.10 DoD
+
+- [ ] `server.js`: §Notes module extended with folders, attachments, and move endpoints. Multer config for note attachments (5 MB cap, JPG/PNG/GIF whitelist, max 5 per note).
+- [ ] `src/index.html`: Notes view gains sidebar + attachment grid markup.
+- [ ] `src/styles.css`: sidebar styles, attachment grid, drag/drop visual feedback.
+- [ ] `src/shell.js`: `§11 Notes folders + attachments` block; sortablejs wiring for sidebar reorder + drag-to-folder; upload + delete attachment handlers; cascade-delete handling.
+- [ ] `data/notes_folders.json` + `data/note_attachments/` + `data/note_attachments/_manifest.json` created lazily on first use.
+- [ ] `tests/run-all.js`: ≥22 new tests as listed in §25.8.
+- [ ] `docs/CODE-REVIEW-UI-R9-notes-folders-attachments.md`: verdict `pass`.
+- [ ] `README.md`: endpoint tables for folders, attachments, move.
+- [ ] `docs/PROJECT-README.md`: 65 → 75 endpoints; mention folders + attachments.
+- [ ] `docs/SESSION-STATE.md`: slice outcome, decisions log entry.
+- [ ] `.gitignore`: ignore `data/notes_folders.json` and `data/note_attachments/` (per-user state, mirrors `data/notes.json`).
+- [ ] No new ADRs (3-criteria test: §25.2's storage decision IS interesting enough to file as ADR 0028 → counted in §25.2).
+
+### 25.11 ADR candidate
+
+Filing **ADR 0028 — Notes persistence model: JSON file + disk manifest** to record:
+1. The localStorage/IndexedDB evaluation rejected (reasons in §25.2).
+2. The decision to mirror the chat-attachments pattern (`_manifest.json` + per-record subdir).
+3. The "no native deps" constraint that drove the choice.
+
+3-criteria test:
+- Hard to reverse? **Yes** — once user notes + images are on disk in this layout, changing it means a one-time migration.
+- Surprising? **Moderately** — developers often reach for IndexedDB without considering the migration cost; documenting the reasoning here is high-leverage.
+- Trade-off / scope? **Yes** — explicitly chooses "no native deps" over "simpler API." That trade-off should be on record.
+
+→ **Will file ADR 0028 in this slice.**
+
+---
+
+## §26 — Preservation override (CR-A10 / ADR 0029)
+
+**Context.** The chat revision flow's anchor-preservation validator (ADR 0012) intentionally declines revisions that drop too much of the original context — the failure mode ADR 0012 was created to prevent is the wholesale rewrite that loses paint-application context, production requirements, and pre-defined values (hex codes, dimensions, technical parameters). The validator is binary: if the rewrite drops below the keyword/bigram retention threshold, the *entire* revision is declined with no Apply button and a "too much of the original context would have been lost" message.
+
+In practice, users sometimes **intentionally** want a more permissive revision — "rewrite this in a punchier voice", "give me a fresh take that uses none of the same adjectives", "shorter and more dramatic". These requests legitimately want to drop anchor terms that the user explicitly doesn't want preserved. The current flow forces the user to either (a) rephrase with the existing "Try as rewrite" affordance that prefixes `REWRITE FROM SCRATCH — anchor set is empty` (which the validator then runs against and sometimes still rejects), or (b) abandon the chat and manually edit. Neither is great when the user knows what they're asking for.
+
+This slice adds a **user-controlled override** that bypasses the validator for the targeted-revision case, while keeping a hard-floor safety against the catastrophic-total-rewrite case (where production requirements vanish with no warning). The override is opt-in, per-message, and requires explicit confirmation — it is not a sticky global setting, deliberately, because the most common accidental case ("I clicked the wrong button") produces the exact failure mode ADR 0012 was built to prevent.
+
+**Decision.** Add a single new boolean request field `preservation_override` on the chat message body. When `true`, the server skips the `validatePromptPreservation` rejection path for that single message and returns the model's `suggested_prompt` directly, but only if the revision still passes a hard catastrophic-floor check. The hard floor is `PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR = 0.10` keyword retention — strictly below the existing 0.70 long / 0.50 short threshold, so it only catches the case where 90%+ of the original content tokens are gone. The override does NOT bypass the catastrophic floor; the catastrophic case still produces a decline with `fallback_reason: 'preservation_failed_catastrophic'`.
+
+The override is **per-message, opt-in, with explicit confirmation** on the frontend. The UI shows a checkbox labeled "Allow revision with reduced preservation check" inside the existing declined-revision preview block (`chat-message__declined-actions`), positioned next to the existing "Try as rewrite" affordance. The checkbox must be checked AND a `window.confirm()` dialog must be approved before the user can resubmit. State is held in `state.chatPreservationOverride` and reset to `false` after each submission. There is no persistent or global setting; the user opts in every time.
+
+Telemetry: each bypass appends a row to `data/preservation_override_log.json` with `{ timestamp, session_id, message_id, nonTargetedRatio, bigramRatio, missing_count, applied: true|false }`. The file is append-only, capped at 1000 rows (oldest are dropped when the cap is hit). Telemetry lets the project observe override usage frequency so future threshold tuning is data-driven rather than anecdote-driven.
+
+**DoD.**
+
+- [ ] `server.js` exports `PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR`, `recordPreservationOverrideTelemetry`, `readPreservationOverrideTelemetry`.
+- [ ] `server.js` `callKiloChat` accepts `options.preservationOverride` and routes the override branch.
+- [ ] `server.js` chat message route accepts `preservation_override` in the body and threads it through to `callKiloChat`.
+- [ ] `server.js` streaming chat route accepts `preservation_override` (query param) and threads it through.
+- [ ] `server.js` writes a telemetry row on every override (applied OR catastrophic-decline).
+- [ ] `src/app.js` adds the override checkbox + label + confirmation prompt to the declined-revision block.
+- [ ] `src/app.js` threads `preservation_override: state.chatPreservationOverride` into the request body.
+- [ ] `src/app.js` resets `state.chatPreservationOverride` after each submission.
+- [ ] `src/styles.css` styles the override control (`chat-message__override-control`, `chat-message__override-checkbox`, `chat-message__override-warning`).
+- [ ] `tests/run-all.js`: ≥12 new tests covering the override's exports, hard-floor behavior, telemetry, full flow.
+- [ ] `docs/CODE-REVIEW-34-preservation-override.md` verdict `pass`.
+- [ ] `docs/SESSION-STATE.md`: slice outcome, decisions log entry.
+- [ ] `README.md`: chat-flow notes mention override; mention telemetry file.
+- [ ] No regression in the 569 baseline tests.
+- [ ] ADR 0029 filed.
+
+**Out of scope (deferred to BACKLOG).**
+
+- Per-session or per-model override settings (explicitly NOT in scope per design rationale).
+- UI-driven threshold tuning (the user would have to see the validator report and choose; far more complex than per-message override).
+- Override for the partial-apply path (`POST /api/chat/sessions/:id/apply/:messageId` with `partial_prompt`); the override is message-time only.
+
+
+
+## §27 — Clear chat history (global erase, CR-A11)
+
+**Context.** The existing chat flow has a per-session delete (`DELETE /api/chat/sessions/:id`, CR-2) that removes one conversation at a time, but no global "clear all" affordance. The Settings tab currently scopes itself to "defaults + system prompts; resists accretion" (UI-R4 §Deviations); this slice is a deliberate, user-approved accretion that adds a destructive-data panel for a one-time, irreversible cleanup action. The placement in Settings (rather than inside the Chat view) follows the platform convention every chat app uses: destructive bulk actions live in settings, not in the primary workflow surface.
+
+The chat history is server-authoritative. All sessions live in `data/chat_sessions.json` (currently 50 sessions at the cap from CR-21); all attachment files live in `data/chat_attachments/<session_id>/<random-filename>` (currently 503 directories on disk, with 7 referenced attachment_ids in active sessions — many orphans from past deletes). There is **no client-side chat cache** — `localStorage` holds only model/variant/llmModel/provider keys (`i2p.state.model`, `i2p.state.animaVariant`, `i2p.state.llmModel`, `i2p.state.provider`); no `i2p.chat.*`, no `i2p.session*`, no IndexedDB, no ServiceWorker.
+
+**Decision.** Add a **global clear** that permanently deletes every chat session, every attachment directory, and the attachments manifest — server-side — then resets the client's in-memory chat state, repaints the chat view, and clears any defensive `localStorage` keys matching `i2p.chat*` / `i2p.session*` (none today, but the sweep is included so a future client-cache addition won't accidentally leave data behind). The bulk endpoint `DELETE /api/chat/sessions` is a sibling of the per-session `DELETE /api/chat/sessions/:id`; both share the same cascade-delete helper. The Settings tab gains one new panel "Chat data" with one danger-styled button labeled "Clear chat history". The button opens a modal that shows the current session count + attachment count, requires the user to click a second "Erase all" button to confirm, and is dismissible by Cancel / Escape / backdrop click. After success, the chat view resets to its empty state and the chat session dropdown returns to "— No conversations yet —".
+
+**Scope.**
+
+- **Server (server.js):**
+  - New endpoint `DELETE /api/chat/sessions` (no path params). Behavior: read all sessions, capture counts, atomically write `[]` to `CHAT_SESSIONS_FILE`, sweep every directory under `CHAT_ATTACHMENTS_DIR` whose name starts with `CHAT_SESSION_ID_PREFIX` (handling both the manifest-tracked and orphan cases by using a directory-list-based sweep rather than relying on the manifest), reset the attachments manifest to `[]`. Returns `{ success: true, data: { deleted_sessions, deleted_attachments, orphan_directories_removed } }`. 500 on partial failure with sanitized error.
+  - New exported helper `clearAllChatSessions()` that encapsulates the read-clear-write-unlink-sweep sequence and returns the counts. Mirrors the shape of `cascadeDeleteChatSessionAttachments`.
+  - The sweep uses `fs.readdirSync(CHAT_ATTACHMENTS_DIR)` and `fs.rmSync(dir, { recursive: true, force: true })` for each `chat_*` directory; failures are collected and reported but do not abort the rest of the sweep.
+
+- **Settings UI (src/index.html):**
+  - New panel `<div class="panel settings-panel">` with title "Chat data" and a single danger-styled `<button id="settings-clear-chat-history-btn" type="button" class="btn-danger-outline">Clear chat history</button>`. A short `<p class="settings-hint">` warns that the action is irreversible and what it removes.
+  - New modal `<div id="clear-chat-history-modal" class="modal" hidden role="dialog" aria-labelledby="clear-chat-history-modal-title">` containing: heading, warning paragraph with live session count + attachment count, two buttons (`#clear-chat-history-cancel`, `#clear-chat-history-confirm`).
+  - The Settings panel sits **after** the existing "System prompts" panel, as the third and final panel in the view.
+
+- **Frontend (src/shell.js + src/app.js):**
+  - `shell.js` wires the button to: GET counts (via existing `/api/chat/sessions` and a new `GET /api/chat/attachments/count` endpoint, OR by fetching the full session list and counting `attachments` directories on the server), populate the modal text, open the modal. On confirm: POST/DELETE the bulk endpoint, then call a new `onChatHistoryCleared()` exported by `app.js` that resets `state.chatSessions = []`, `state.chatSessionId = null`, `state.chatPendingAttachmentIds = []`, `state.chatPendingAttachmentMeta = {}`, calls `resetChatConsole()`, and calls `renderChatSessionSelect()`.
+  - Defensive `localStorage` sweep: iterate `Object.keys(localStorage)` and remove any key matching `/^i2p\.(chat|session)\b/i`. The slice asserts in a test that the sweep runs.
+  - Error UX: on 500 or network failure, show inline error in the Settings panel via the existing `#settings-status` line, with a "Try again" hint. On success, announce "All chat history cleared" via the existing `announce()` helper (screen-reader live region).
+  - Loading state: while the bulk DELETE is in flight, disable both modal buttons + show a spinner glyph on the confirm button. Re-enable on response (success OR failure).
+
+- **Accessibility (a11y):**
+  - The button uses `class="btn-danger-outline"` (the existing project danger style from `chat-session-delete-btn`), which has `:focus-visible` and `:hover` states already styled.
+  - The modal inherits the existing focus-trap infrastructure (`bindModalTraps` in shell.js), so Tab cycling and Escape-to-dismiss work for free.
+  - On confirm, focus returns to the invoker button (already handled by the trap infrastructure's `MutationObserver`).
+  - The warning paragraph names the consequence and the count, so screen-reader users hear "This will permanently delete all 50 chat sessions and 503 attachment files." before they confirm.
+
+**Out of scope (deliberately).**
+
+- `data/preservation_override_log.json` — usage telemetry from §26's override feature, NOT user-visible chat history. The user explicitly excluded this at G1 ("preserve_override_log NOT cleared"). The bulk endpoint does NOT touch it.
+- `data/rag_corpus/`, `data/rag_index.json` — the curated RAG index, not chat content.
+- `data/palettes.json`, `data/presets.json`, `data/directives.json`, `data/notes.json`, `data/provider_keys.json`, `data/model_config.json`, `data/subject_prompt.json`, `data/stage2_overrides.json` — none of these are chat history.
+- A typed-phrase confirmation gate (e.g. "type ERASE to confirm"). The modal + explicit count is sufficient. If the user later wants a stronger gate, that's a separate slice.
+- A bulk-undo or staging buffer. The action is irreversible by design.
+- A keyboard shortcut for clearing. Discoverability via Settings is enough; keyboard shortcuts are a separate concern.
+- Selective deletion (e.g. "delete only sessions older than 30 days"). Single global erase only.
+
+**Implementation decisions (locked at G1).**
+
+1. Placement: Settings tab, after "System prompts" panel.
+2. Confirmation: two-factor via modal — Cancel button + Erase button (no typed phrase).
+3. `preservation_override_log.json`: NOT cleared.
+4. ADR: NOT filed (additive, follows the established pattern, no architectural change).
+
+**DoD.**
+
+- [ ] `server.js` exports `clearAllChatSessions` (returns `{ deleted_sessions, deleted_attachments, orphan_directories_removed }`).
+- [ ] `server.js` route `app.delete('/api/chat/sessions', …)` registered, validates method-not-allowed for non-DELETE, returns 200 with counts.
+- [ ] `server.js` route `app.get('/api/chat/sessions/count', …)` (or equivalent) returns `{ sessions, attachments }` for modal text population.
+- [ ] `data/chat_sessions.json` is atomically rewritten to `[]` after clear.
+- [ ] All `data/chat_attachments/chat_*/` directories are removed (manifest-tracked + orphans).
+- [ ] `data/chat_attachments/_manifest.json` is reset to `[]`.
+- [ ] `src/index.html` adds the Settings "Chat data" panel (`#settings-clear-chat-history-btn`).
+- [ ] `src/index.html` adds the confirmation modal (`#clear-chat-history-modal` with cancel/confirm buttons).
+- [ ] `src/shell.js` wires the button → fetch counts → open modal → on confirm call bulk endpoint + `app.onChatHistoryCleared()`.
+- [ ] `src/app.js` exports `onChatHistoryCleared` that resets `state.chatSessions`, `state.chatSessionId`, `state.chatPendingAttachmentIds`, `state.chatPendingAttachmentMeta`, calls `resetChatConsole()`, `renderChatSessionSelect()`, and sweeps `localStorage` for `i2p.chat*` / `i2p.session*`.
+- [ ] `src/styles.css` adds minimal styles for the new panel + modal (if not covered by existing modal classes).
+- [ ] `tests/run-all.js`: ≥12 new tests covering: route returns 200 with counts; `data/chat_sessions.json` becomes `[]`; every attachment directory removed; manifest reset; counts are accurate; orphan-only case (sessions=0 but attachments present); empty case (sessions=0, attachments=0); partial-failure case (one bad attachment dir, others removed, response reports the failure); per-session delete still works (no regression); frontend wiring (`onChatHistoryCleared`, modal handlers, localStorage sweep); SPEC §27 cross-references in tests.
+- [ ] `docs/CODE-REVIEW-27-clear-chat-history.md` verdict `pass`.
+- [ ] `docs/SESSION-STATE.md`: slice outcome, decisions log entry, slice tracker row.
+- [ ] `docs/BACKLOG.md`: append slice-outcome entry (append-only; if any out-of-scope items surface during implementation, append them as backlog items too).
+- [ ] `README.md`: optional — brief mention in the chat section is nice but not blocking.
+- [ ] No regression in the 589 baseline tests.
+- [ ] Manual browser demo: open Settings tab, click "Clear chat history", confirm modal shows correct counts, click Cancel → nothing changes; click Clear chat history again, confirm → modal closes, chat view resets, server file is `[]`, attachment dir is empty (or only contains `_manifest.json`), reload page → still empty.
+
+**Glossary.**
+
+- **Bulk clear** — the irreversible deletion of all chat sessions, their message histories, and their attachment files, initiated from the Settings tab. Distinguished from the per-session delete (`DELETE /api/chat/sessions/:id`), which removes one session.
+- **Orphan directory** — a `data/chat_attachments/chat_*/` directory that is not referenced by any active session in `data/chat_sessions.json` and not present in `_manifest.json`. May exist due to prior crashes, manual filesystem manipulation, or incomplete prior deletes. The bulk clear sweeps these too.
+
+**References.**
+
+- `server.js` lines 9672–9692 — the existing per-session `DELETE /api/chat/sessions/:id` route, whose pattern this slice mirrors.
+- `server.js` lines 9940–9958 — the existing `cascadeDeleteChatSessionAttachments` helper.
+- `src/app.js` lines 6516–6530 — the existing per-session `deleteChatSession` frontend handler.
+- `src/app.js` lines 4672–4691 — the existing `resetChatConsole` helper.
+- `src/app.js` lines 5717–5750 — the existing `renderChatSessionSelect` helper.
+- `src/index.html` lines 513–580 — the existing Settings view layout (panel order: Defaults, System prompts).
+- `src/shell.js` lines 320–367 — the existing focus-trap infrastructure (modals are auto-trapped).
+- `docs/CODE-REVIEW-UI-R4-chat-settings.md` §Deviations — the prior decision on Settings scope ("resists accretion") that this slice deliberately overrides per G1.

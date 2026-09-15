@@ -8,7 +8,7 @@
 
 ## What this is (one paragraph)
 
-An AI-powered web application that transforms uploaded images into refined, detailed text prompts optimized for AI image generation models (Stable Diffusion, Midjourney, DALL-E, Flux). Powered by MiniMax M3 (`MiniMax-Text-01`). Five-view hash-routed vanilla-JS frontend (Create / Library / Chat / Providers & keys / Settings — see `docs/UI-REDESIGN-SPEC.md`), Express backend, JSON-file state, 48 API endpoints, 24 ADRs of design history.
+An AI-powered web application that transforms uploaded images into refined, detailed text prompts optimized for AI image generation models (Stable Diffusion, Midjourney, DALL-E, Flux). Powered by MiniMax M3 (`MiniMax-Text-01`). Seven-tab hash-routed vanilla-JS frontend (Create / Library / Chat / Providers & keys / Models / Notes / Settings — see `docs/UI-REDESIGN-SPEC.md`), Express backend, JSON-file state, 76 API endpoints, 31 ADRs of design history.
 
 ## Why it exists (the problem it solves)
 

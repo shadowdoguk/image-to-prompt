@@ -1169,3 +1169,218 @@ Three failure modes:
 3. **Concurrent stream.** Server's session-level mutex rejects a second concurrent stream with 409. Client falls back to non-streaming `POST` and shows "another stream is already in progress" status.
 
 The session-level mutex is a simple `Set<sessionId>` of active streams, cleared when the stream completes or errors.
+
+## §30 — Notes folders + image attachments (UI-R9)
+
+Companion to SPEC §25. The architecture reuses two existing patterns: (1) **JSON-file + atomic-write** for tiny state (mirrors `notes.json`, `presets.json`, `directives.json`), and (2) **multer-disk + `_manifest.json` lookup** for binary blobs (mirrors `data/chat_attachments/`).
+
+### A1 — Module boundaries
+
+Three new sub-modules live inside the existing `Notes (UI-R8)` section of `server.js`:
+
+```
+server.js
+└── §Notes (UI-R8) ─────────────────────────────
+    ├── (existing) CRUD on data/notes.json
+    ├── (NEW) Folders      — data/notes_folders.json
+    │     ├── readNoteFolders()
+    │     ├── writeNoteFolders()
+    │     ├── validateNoteFolderBody()
+    │     └── 4 routes: GET / POST / PUT / DELETE
+    │
+    └── (NEW) Attachments  — data/note_attachments/
+          ├── readAttachmentsManifest()
+          ├── writeAttachmentsManifest()
+          ├── noteAttachmentStorage (multer.diskStorage)
+          ├── noteAttachmentUpload  (multer)
+          ├── resolveNoteAttachment(id)
+          ├── cascadeDeleteNoteAttachments(noteId)
+          └── 4 routes:
+                GET  /api/notes/:id/attachments
+                POST /api/notes/:id/attachments
+                GET  /api/note-attachments/:id/file
+                DELETE /api/note-attachments/:id
+```
+
+The existing 5 note-CRUD routes gain 1 new field (`folder_id`) and 1 new endpoint (`PUT /api/notes/:id/move`). The schema change is purely additive — existing payloads continue to parse.
+
+### A2 — Filesystem layout
+
+```
+data/
+├── notes.json                   (existing, extended)
+├── notes_folders.json           (NEW — list of { id, name, sort_order, created_at })
+└── note_attachments/
+    ├── _manifest.json           (NEW — list of { id, note_id, filename, stored_name, mime, size, created_at })
+    ├── <note_id_1>/
+    │   ├── <random>.jpg
+    │   └── <random>.png
+    ├── <note_id_2>/
+    │   └── <random>.gif
+    └── ...
+```
+
+The `data/note_attachments/<note_id>/` subdirectory mirrors `data/chat_attachments/<session_id>/`. Cascade-delete a note → `rm -rf data/note_attachments/<note_id>/` + prune manifest.
+
+### A3 — Folder model
+
+Flat list, ordered by `sort_order` (server-side managed; client sends the new sort_order on PUT). The "Unfiled" pseudo-folder is a **client-only construct**: notes with `folder_id === null` are surfaced under "Unfiled" in the sidebar, but no folder record exists for it. This keeps the server source-of-truth minimal (no special-casing "Unfiled" in folders.json).
+
+Sidebar order:
+
+1. **All notes** (always first; pseudo; non-deletable; sums across folders).
+2. **Unfiled** (always second; pseudo; non-deletable; notes with folder_id=null).
+3. User-created folders, ordered by `sort_order` asc, then `created_at` asc.
+
+### A4 — Attachment upload pipeline
+
+Mirrors `chatAttachmentUpload` (`server.js:830+`) but scoped per note:
+
+```js
+const NOTE_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;       // 5 MB
+const NOTE_ATTACHMENT_MAX_COUNT = 5;                     // per note
+const NOTE_ATTACHMENT_ALLOWED_MIME = new Set(['image/jpeg', 'image/png', 'image/gif']);
+
+const noteAttachmentStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const noteId = req.params.id;
+    if (!noteId || !noteId.startsWith('note_')) {
+      return cb(new Error('Invalid note id.'));
+    }
+    const dir = path.join(NOTE_ATTACHMENTS_DIR, noteId);
+    fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase() || mimeToExt(file.mimetype);
+    const storedName = `${crypto.randomBytes(12).toString('hex')}${ext}`;
+    cb(null, storedName);
+  }
+});
+
+const noteAttachmentUpload = multer({
+  storage: noteAttachmentStorage,
+  limits: { fileSize: NOTE_ATTACHMENT_MAX_BYTES },
+  fileFilter: (req, file, cb) => {
+    if (NOTE_ATTACHMENT_ALLOWED_MIME.has(file.mimetype)) cb(null, true);
+    else cb(new Error(`Invalid file type: ${file.mimetype}. Allowed: JPG, PNG, GIF.`));
+  }
+});
+```
+
+Pre-upload count check: server reads manifest, counts entries where `note_id === req.params.id`, rejects with 409 if `>= NOTE_ATTACHMENT_MAX_COUNT`.
+
+Pre-upload note-existence check: server reads `notes.json`, returns 404 if the note doesn't exist (prevents orphaned attachment dirs).
+
+Post-upload manifest append with a single entry. The file is already on disk before the manifest is written; if the manifest write fails, the file is unlinked (`fs.unlink`) — best-effort cleanup.
+
+### A5 — Folder drag-and-drop
+
+The sidebar's user-created folders list is wrapped in a `<ul>` with `sortablejs` (already in `package.json`). On reorder, the client:
+
+1. Optimistically updates the in-memory folder list.
+2. Sends `PUT /api/notes/folders/:id` with the new `sort_order` for each affected folder.
+3. Re-fetches to reconcile on failure.
+
+Dragging a **note onto a folder name** in the sidebar fires `PUT /api/notes/:id/move` with `folder_id: <that_folder.id>`. This is the same call used by the explicit "Move to…" menu, so there's exactly one server endpoint per move operation.
+
+### A6 — Attachments UI lifecycle
+
+State machine (per note, per attachment slot):
+
+```
+       [empty slot] ──pick file──► [uploading] ──201──► [rendered]
+                            │
+                            └──400/413/409──► [error toast] ──► [empty slot]
+```
+
+The attachments region holds an `aria-busy` flag that's `true` only while a request is in flight. After completion, the thumbnails re-render and `aria-busy` resets. No spinner animation — just a CSS class that dims the slot.
+
+### A7 — Concurrent upload guard
+
+Two tabs opening the same note and uploading simultaneously: the server enforces `NOTE_ATTACHMENT_MAX_COUNT` per request, so the worst case is one upload gets through and the other gets 409. Both client tabs re-fetch after their PUT resolves; the manifest is the source of truth.
+
+### A8 — Why this is small
+
+- **Reuses `multer.diskStorage`** — same pattern as `chatAttachmentStorage`.
+- **Reuses `sortablejs`** — already a dep; used by the Library view.
+- **Reuses atomic JSON write** — `writeNotes()` pattern extended to `writeNoteFolders()`.
+- **Reuses manifest pattern** — same shape as `data/chat_attachments/_manifest.json`.
+- **Reuses the Notes CRUD helper** — `readNotes()` extended with a `folder_id` filter and `findById()` returns the raw note.
+
+The server.js delta is ~250 lines. The frontend delta is ~280 lines. Total new tests: 22. No new dependencies.
+
+
+## §31 — Clear chat history (SPEC §27 / CR-A11)
+
+Additive slice to `server.js` + Settings UI. No architectural shift; mirrors the per-session delete (server.js:9672) and the cascade-delete helper (server.js:9940).
+
+### A1 — Endpoint shape
+
+Two new routes on the existing Express app:
+
+```
+DELETE /api/chat/sessions            → 200 { data: { deleted_sessions, deleted_attachments, orphan_directories_removed } }
+GET    /api/chat/sessions/count      → 200 { data: { sessions, attachments } }
+```
+
+Both follow the project's `{ success, data, error }` envelope (already in use everywhere). 405 for non-DELETE/non-GET. 500 on partial failure with `sanitizeError`.
+
+The bulk DELETE writes `[]` atomically via `writeChatSessions([])` (server.js:7554 — the existing atomic rename helper). No new write helper needed.
+
+### A2 — Sweep strategy (the orphan problem)
+
+Live state at slice start: `data/chat_attachments/` contains 503 directories, but `data/chat_sessions.json` references only 7 attachment_ids. The 496-directory delta is orphans from prior partial deletes and crashes.
+
+The bulk endpoint therefore uses a **directory-list sweep**, not a manifest walk:
+
+```
+1. readChatSessions()      → capture count
+2. writeChatSessions([])    → atomic rewrite to empty
+3. fs.readdirSync(CHAT_ATTACHMENTS_DIR)
+   filter: name.startsWith(CHAT_SESSION_ID_PREFIX)
+   for each: fs.rmSync(dir, { recursive: true, force: true })
+4. writeChatAttachmentsManifest([])   → reset manifest
+5. return counts
+```
+
+The manifest-reset is the "trust the directory list, not the manifest" move — the manifest is rebuilt lazily by future uploads, not by a reconciliation pass. This is the same pattern the existing `cascadeDeleteChatSessionAttachments` uses (best-effort, log + continue on per-entry failure), but lifted to the bulk level.
+
+### A3 — Frontend seam (`app.js` ↔ `shell.js`)
+
+`shell.js` already owns the Settings-view wiring. The new panel needs three things from `app.js`:
+
+1. A live count of sessions + attachments — fetched lazily on button click via the new count endpoint (not preloaded on Settings-tab open, since Settings is opened frequently and the counts would be stale immediately).
+2. A reset hook — exported as `window.app.onChatHistoryCleared = () => {…}` after the bulk DELETE resolves. The hook resets `state.chatSessions`, `state.chatSessionId`, `state.chatPendingAttachmentIds`, `state.chatPendingAttachmentMeta`, calls `resetChatConsole()` (existing, server.js:4672), and calls `renderChatSessionSelect()` (existing, server.js:5717).
+3. The defensive `localStorage` sweep — runs inside `onChatHistoryCleared`, iterates `Object.keys(localStorage)` and removes keys matching `/^i2p\.(chat|session)\b/i`. Today this is a no-op (confirmed via grep on app.js:2027+); the sweep is included so a future client-cache addition doesn't accidentally persist data across a clear.
+
+### A4 — Modal lifecycle
+
+Reuses `bindModalTraps` (shell.js:333) — every `<div class="modal">` element is auto-trapped, Esc-to-dismiss, focus-return-on-close. The new modal just needs the correct class + ids for the dismiss buttons (`#clear-chat-history-cancel` matches the `[id$="-cancel"]` selector in the trap).
+
+### A5 — Error UX
+
+Failure paths:
+
+| Failure | Server returns | Client behavior |
+|---|---|---|
+| Partial attachment sweep failure (one `fs.rmSync` throws) | 500 `{ error: "Chat sessions cleared, but N attachment directories could not be removed. …" }` | Settings panel shows the error inline via `#settings-status`. The chat file IS still `[]` (the session write succeeds first). The user can retry; the bulk endpoint is idempotent. |
+| Network failure | `fetch` throws | Inline error: "Could not clear chat history. Try again." |
+| Server returns 200 but client state reset fails | n/a (defensive `try/catch` around `onChatHistoryCleared`) | Logs `console.error`, still reloads the chat view to its empty state via `renderChatSessionSelect()`. The server is the source of truth; a reload would fix any client drift. |
+
+### A6 — Why this is small
+
+- **Reuses `cascadeDeleteChatSessionAttachments`** — same per-session pattern, lifted to a loop.
+- **Reuses `writeChatSessions`** — the atomic-rename helper (server.js:7554).
+- **Reuses `bindModalTraps`** — the global modal focus trap (shell.js:333).
+- **Reuses `resetChatConsole`** + `renderChatSessionSelect` — existing chat reset helpers.
+- **Reuses `#settings-status`** — the existing Settings error/success inline status line.
+
+Total server.js delta: ~80 LOC. Total frontend delta: ~100 LOC (HTML 25, CSS 5, shell.js 30, app.js 40). Total tests: ≥12.
+
+### A7 — Privacy / data-handling notes
+
+- No chat content leaves the user's machine. The bulk DELETE is purely local.
+- No telemetry / no audit log for clears. The action is reversible only by the user restoring from a manual backup of `data/chat_sessions.json` (the file is gitignored, so backups are the user's responsibility).
+- `data/preservation_override_log.json` (SPEC §26 telemetry) is intentionally NOT cleared — it's aggregate usage analytics, not user-visible chat content. This is documented in SPEC §27 "Out of scope".
+- The Settings panel surfaces the bulk action but does NOT auto-prompt the user on first visit, on every Nth session, or via any other nudge. Discovery is via Settings → Chat data → button, matching the platform convention.
