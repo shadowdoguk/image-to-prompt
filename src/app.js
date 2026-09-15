@@ -4692,6 +4692,63 @@
     updateChatSendButton();
   };
 
+  /**
+   * SPEC §27 — Clear chat history: post-server-wipe client reset.
+   *
+   * Called by shell.js after `DELETE /api/chat/sessions` succeeds.
+   * Resets all chat-related in-memory state, repaints the chat view,
+   * and defensively sweeps `localStorage` for any chat/session keys
+   * (none today, but the sweep guards against future client-cache
+   * additions leaving data behind).
+   *
+   * Defensive: each reset step runs in its own try/catch so one
+   * failure doesn't block the rest. The final state is the empty
+   * chat view regardless of which step throws.
+   */
+  const onChatHistoryCleared = () => {
+    const failures = [];
+    const safe = (label, fn) => {
+      try { fn(); } catch (err) { failures.push({ label, err }); }
+    };
+    safe('reset-state', () => {
+      state.chatSessions = [];
+      state.chatSessionId = null;
+      state.chatPendingAttachmentIds = [];
+      state.chatPendingAttachmentMeta = {};
+    });
+    safe('reset-chat-console', () => resetChatConsole());
+    safe('render-session-select', () => renderChatSessionSelect());
+    safe('render-pending-attachments', () => renderChatPendingAttachments());
+    safe('update-send-button', () => updateChatSendButton());
+    safe('localStorage-sweep', () => {
+      // Defensive: today no `i2p.chat*` / `i2p.session*` keys exist
+      // (grep confirmed — only `i2p.state.model` etc.). The sweep is
+      // included so future client-cache additions don't accidentally
+      // persist data across a clear (SPEC §27 A3 + PRE-MORTEM P-8).
+      if (typeof localStorage === 'undefined') return;
+      const removed = [];
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (/^i2p\.(chat|session)\b/i.test(key)) {
+          removed.push(key);
+          localStorage.removeItem(key);
+        }
+      }
+      if (removed.length > 0) {
+        console.info('[clear-chat-history] swept localStorage keys:', removed);
+      }
+    });
+    if (failures.length > 0) {
+      console.warn('[clear-chat-history] defensive reset had failures:', failures);
+    }
+  };
+
+  // Expose for shell.js (Settings "Clear chat history" modal).
+  // The app is an IIFE; this is the single public surface for the
+  // destructive bulk action. SPEC §27 A3.
+  window.__i2pClearChatHistory = onChatHistoryCleared;
+
   // ─── CR-2 — chat attachment helpers ────────────────────────────────
 
   /**

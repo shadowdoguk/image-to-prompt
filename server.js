@@ -8847,6 +8847,24 @@ app.get('/api/chat/sessions', (req, res) => {
 });
 
 /**
+ * `GET /api/chat/sessions/count` — return `{ sessions, attachments }`
+ * for the Settings "Clear chat history" modal. Both counts are
+ * computed from disk on every call so the modal text is accurate
+ * even if state changed since the Settings tab was opened.
+ *
+ * SPEC §27 — registered before `/api/chat/sessions/:id` so the
+ * literal `count` path doesn't get captured as a session id.
+ */
+app.get('/api/chat/sessions/count', (req, res) => {
+  try {
+    const counts = countChatData();
+    res.json({ success: true, data: counts });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
  * `GET /api/chat/sessions/:id` — fetch one session with its full
  * message history.
  */
@@ -9709,6 +9727,58 @@ app.delete('/api/chat/sessions/:id', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CR-A11 — Clear chat history (SPEC §27)
+//
+// Two additive endpoints:
+//   GET    /api/chat/sessions/count   — live counts for the Settings modal
+//   DELETE /api/chat/sessions         — bulk erase: all sessions + all attachments
+//
+// The per-session delete (above) is unchanged. These routes are a
+// destructive, irreversible global wipe triggered from the Settings tab.
+//
+// Implementation is delegated to `clearAllChatSessions()` / `countChatData()`
+// (defined further down alongside `cascadeDeleteChatSessionAttachments`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// `GET /api/chat/sessions/count` is registered earlier (next to the
+// other GET handlers) so the literal `count` path is matched before
+// the `:id` pattern route. SPEC §27.
+
+/**
+ * `DELETE /api/chat/sessions` — bulk erase all chat history.
+ *
+ * Atomically:
+ *   1. rewrites `data/chat_sessions.json` to `[]`
+ *   2. sweeps every chat attachment directory under
+ *      `data/chat_attachments/` (names start with `chat_`)
+ *      (handles both manifest-tracked and orphan dirs)
+ *   3. resets the attachments manifest to `[]`
+ *
+ * Returns 200 with a counts object (deleted_sessions,
+ * deleted_attachments, orphan_directories_removed, failures).
+ * On a partial failure (some directories unremovable), still
+ * returns 200 with the failures enumerated — the session file is
+ * the source of truth and it is already cleared. The client
+ * surfaces this in the Settings panel.
+ *
+ * SPEC §27 R-1 mitigation: a complete failure to rewrite the
+ * sessions file returns 500 with no side effects on disk.
+ */
+app.delete('/api/chat/sessions', (req, res) => {
+  try {
+    const result = clearAllChatSessions();
+    const message = result.failures.length === 0
+      ? 'All chat history cleared.'
+      : `Chat sessions cleared, but ${result.failures.length} attachment ` +
+        `director${result.failures.length === 1 ? 'y' : 'ies'} could not be removed. ` +
+        'Try again, or remove them manually from data/chat_attachments/.';
+    res.json({ success: true, data: { ...result, message } });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CR-1 — RAG foundation (SPEC §17 / ADR 0025 / ARCHITECTURE CR-A1)
 //
 // Three read-only endpoints expose the curated corpus + retrieval;
@@ -9969,6 +10039,111 @@ const cascadeDeleteChatSessionAttachments = (sessionId) => {
   } catch (err) {
     console.warn(`[chat-attachment] cascade delete failed for ${sessionId}: ${err.message}`);
   }
+};
+
+/**
+ * SPEC §27 — Clear all chat history.
+ *
+ * Atomically:
+ *   1. count current sessions
+ *   2. rewrite `data/chat_sessions.json` to `[]` via the existing
+ *      atomic `writeChatSessions` helper
+ *   3. sweep every chat attachment directory under
+ *      `data/chat_attachments/` (names start with `chat_`) via
+ *      `fs.rmSync` with recursive and force options — the
+ *      directory-list walk handles both manifest-tracked attachments
+ *      AND orphan directories left by prior partial deletes
+ *   4. reset the attachments manifest to `[]`
+ *
+ * Returns `{ deleted_sessions, deleted_attachments, orphan_directories_removed, failures }`.
+ * Failures are collected per-directory but do NOT abort the sweep;
+ * the worst case is the user retries and the remaining dirs go away.
+ *
+ * Defensive against: corrupt/missing manifest, missing CHAT_ATTACHMENTS_DIR,
+ * individual directory permission errors.
+ */
+const clearAllChatSessions = () => {
+  const result = {
+    deleted_sessions: 0,
+    deleted_attachments: 0,
+    orphan_directories_removed: 0,
+    failures: []
+  };
+  try {
+    const sessions = readChatSessions();
+    result.deleted_sessions = sessions.length;
+    writeChatSessions([]);
+  } catch (err) {
+    result.failures.push({ stage: 'write_chat_sessions', error: err.message });
+    // If we couldn't rewrite the sessions file, abort — the sweep
+    // would race against whatever's still on disk.
+    return result;
+  }
+
+  // Sweep every chat_* directory under CHAT_ATTACHMENTS_DIR.
+  // Directory-list based so orphan dirs (manifest drift, prior
+  // crashes) are removed even when the manifest doesn't list them.
+  try {
+    if (fs.existsSync(CHAT_ATTACHMENTS_DIR)) {
+      const entries = fs.readdirSync(CHAT_ATTACHMENTS_DIR, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (!entry.name.startsWith(CHAT_SESSION_ID_PREFIX)) continue;
+        const dir = path.join(CHAT_ATTACHMENTS_DIR, entry.name);
+        try {
+          // Count files before removal so we can report the attachment count.
+          let fileCount = 0;
+          try {
+            fileCount = fs.readdirSync(dir).filter((f) => f !== '_manifest.json').length;
+          } catch (_) { /* dir unreadable, count = 0 */ }
+          fs.rmSync(dir, { recursive: true, force: true });
+          result.deleted_attachments += fileCount;
+          result.orphan_directories_removed += 1;
+        } catch (err) {
+          result.failures.push({ stage: 'rm_dir', dir: entry.name, error: err.message });
+        }
+      }
+    }
+  } catch (err) {
+    result.failures.push({ stage: 'read_attachments_dir', error: err.message });
+  }
+
+  // Reset the manifest last so a partial sweep doesn't leave a
+  // dangling manifest referencing deleted files.
+  try {
+    writeChatAttachmentsManifest([]);
+  } catch (err) {
+    result.failures.push({ stage: 'write_attachments_manifest', error: err.message });
+  }
+
+  return result;
+};
+
+/**
+ * SPEC §27 — Count chat sessions and attachment directories.
+ * Used by the Settings "Clear chat history" modal to populate the
+ * live count before the user confirms.
+ */
+const countChatData = () => {
+  let sessions = 0;
+  let attachments = 0;
+  try {
+    sessions = readChatSessions().length;
+  } catch (_) { /* tolerate corrupt file — surface 0 */ }
+  try {
+    if (fs.existsSync(CHAT_ATTACHMENTS_DIR)) {
+      const entries = fs.readdirSync(CHAT_ATTACHMENTS_DIR, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (!entry.name.startsWith(CHAT_SESSION_ID_PREFIX)) continue;
+        try {
+          attachments += fs.readdirSync(path.join(CHAT_ATTACHMENTS_DIR, entry.name))
+            .filter((f) => f !== '_manifest.json').length;
+        } catch (_) { /* unreadable dir contributes 0 */ }
+      }
+    }
+  } catch (_) { /* tolerate */ }
+  return { sessions, attachments };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

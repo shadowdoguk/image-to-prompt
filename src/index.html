@@ -572,6 +572,25 @@
           </p>
         </div>
       </div>
+
+      <!-- SPEC §27 — Chat data panel. Destructive bulk action lives in Settings
+           (rather than inside the Chat view) because every chat app with a
+           clear-history puts it in settings. The action is irreversible; the
+           modal handles confirmation. -->
+      <div class="panel settings-panel">
+        <h2 class="panel-title">Chat data</h2>
+        <div class="panel-body">
+          <p class="settings-hint">
+            Permanently delete every chat session and every uploaded image
+            attached to one. This cannot be undone. Palettes, directives,
+            presets, notes, and provider keys are not affected.
+          </p>
+          <button type="button" id="settings-clear-chat-history-btn" class="btn-danger-outline">
+            Clear chat history
+          </button>
+          <p id="settings-clear-chat-history-status" class="settings-status" role="status" aria-live="polite"></p>
+        </div>
+      </div>
     </section>
 
   </main>
@@ -586,6 +605,33 @@
   <div id="a11y-announcer" class="visually-hidden" aria-live="polite" role="status"></div>
 
   <!-- ─── Quick-action dialogs (retained per spec §4.2) ─────────────── -->
+
+  <!-- SPEC §27 — Clear chat history confirmation modal.
+       Two-factor: Cancel + Erase. Inherits the global focus trap from
+       shell.js bindModalTraps (Escape to dismiss). -->
+  <div id="clear-chat-history-modal" class="modal" hidden role="dialog" aria-labelledby="clear-chat-history-modal-title" aria-describedby="clear-chat-history-modal-body">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <header class="modal-header">
+        <h3 id="clear-chat-history-modal-title">Clear chat history?</h3>
+        <button type="button" id="clear-chat-history-modal-close" class="btn-dismiss" aria-label="Close">×</button>
+      </header>
+      <div class="modal-body">
+        <p id="clear-chat-history-modal-body">
+          This will permanently delete <strong id="clear-chat-history-modal-count">all chat sessions and attachments</strong>.
+          This action cannot be undone.
+        </p>
+        <p class="settings-hint">
+          Chat sessions, working prompts, and uploaded images will all be removed.
+          Palettes, directives, presets, notes, and provider keys are not affected.
+        </p>
+        <div class="modal-actions">
+          <button type="button" id="clear-chat-history-cancel" class="btn-secondary">Cancel</button>
+          <button type="button" id="clear-chat-history-confirm" class="btn-danger">Erase all</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Preset editor modal -->
   <div id="preset-modal" class="modal" hidden role="dialog" aria-labelledby="preset-modal-title">

@@ -752,6 +752,39 @@ body {
 }
 .btn-danger:hover { background: var(--error-bg); }
 
+/* SPEC §27 — danger outline button. Used for destructive actions in
+   primary workflow (chat session delete, clear chat history). Stronger
+   than .btn-secondary's neutral hover, lighter than .btn-danger's
+   filled-on-hover — a middle ground that says "this will delete
+   something" without screaming. */
+.btn-danger-outline {
+  color: var(--error);
+  border-color: var(--error-border, var(--error));
+  background: transparent;
+}
+.btn-danger-outline:hover:not(:disabled) {
+  background: var(--error-bg);
+  border-color: var(--error);
+}
+.btn-danger-outline:focus-visible {
+  outline: 2px solid var(--error);
+  outline-offset: 2px;
+}
+.btn-danger-outline:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* SPEC §27 — Clear-chat-history confirm button busy state.
+   Used while the bulk DELETE is in flight; CSS-only via aria-busy. */
+.btn-danger[aria-busy="true"] {
+  opacity: 0.6;
+  cursor: progress;
+}
+.btn-danger[aria-busy="true"]::after {
+  content: " …";
+}
+
 .btn-spinner {
   width: 14px;
   height: 14px;

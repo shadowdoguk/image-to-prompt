@@ -1023,6 +1023,94 @@
         }
       });
     }
+
+    // SPEC §27 — "Clear chat history" button → confirmation modal →
+    // bulk DELETE → app-side state reset. The button is disabled
+    // briefly after click to prevent double-modal stacking.
+    const clearBtn = $('settings-clear-chat-history-btn');
+    const clearModal = $('clear-chat-history-modal');
+    const clearCancel = $('clear-chat-history-cancel');
+    const clearConfirm = $('clear-chat-history-confirm');
+    const clearClose = $('clear-chat-history-modal-close');
+    const clearCount = $('clear-chat-history-modal-count');
+    const clearStatus = $('settings-clear-chat-history-status');
+    if (clearBtn && clearModal) {
+      clearBtn.addEventListener('click', async () => {
+        // Prevent double-click from opening the modal twice.
+        clearBtn.disabled = true;
+        try {
+          const body = await api('/api/chat/sessions/count');
+          const counts = body.data || { sessions: 0, attachments: 0 };
+          if (clearCount) {
+            const sessLabel = `${counts.sessions} chat session${counts.sessions === 1 ? '' : 's'}`;
+            const attLabel = `${counts.attachments} attachment file${counts.attachments === 1 ? '' : 's'}`;
+            clearCount.textContent = `${sessLabel} and ${attLabel}`;
+          }
+          clearModal.hidden = false;
+        } catch (err) {
+          if (clearStatus) {
+            clearStatus.textContent = `Could not load chat counts: ${err.message}`;
+            clearStatus.classList.add('is-error');
+          }
+          announce(`Could not open clear chat history: ${err.message}`);
+        } finally {
+          // Re-enable after a tick so the user can retry if the
+          // count fetch failed.
+          window.setTimeout(() => { clearBtn.disabled = false; }, 200);
+        }
+      });
+
+      const closeClearModal = () => { clearModal.hidden = true; };
+      if (clearCancel) clearCancel.addEventListener('click', closeClearModal);
+      if (clearClose) clearClose.addEventListener('click', closeClearModal);
+      // Backdrop click also dismisses (mirrors other modals).
+      const backdrop = clearModal.querySelector('.modal-backdrop');
+      if (backdrop) backdrop.addEventListener('click', closeClearModal);
+
+      if (clearConfirm) {
+        clearConfirm.addEventListener('click', async () => {
+          // Lock the modal: disable both buttons + set busy state.
+          clearConfirm.disabled = true;
+          clearConfirm.setAttribute('aria-busy', 'true');
+          if (clearCancel) clearCancel.disabled = true;
+          try {
+            const body = await api('/api/chat/sessions', { method: 'DELETE' });
+            const data = body.data || {};
+            const message = data.message || 'All chat history cleared.';
+            // Close modal first so the user sees the cleared chat view.
+            clearModal.hidden = true;
+            // Reset client state via the app's exported hook.
+            try {
+              if (typeof window.__i2pClearChatHistory === 'function') {
+                window.__i2pClearChatHistory();
+              } else {
+                console.warn('[clear-chat-history] window.__i2pClearChatHistory is not a function');
+              }
+            } catch (resetErr) {
+              console.error('[clear-chat-history] client reset failed:', resetErr);
+            }
+            // Inline status in the Settings panel + screen-reader announcement.
+            if (clearStatus) {
+              clearStatus.textContent = message;
+              clearStatus.classList.remove('is-error');
+            }
+            announce(message);
+            window.setTimeout(() => { if (clearStatus) clearStatus.textContent = ''; }, 5000);
+          } catch (err) {
+            // Keep modal open on failure so the user can retry.
+            if (clearStatus) {
+              clearStatus.textContent = `Could not clear chat history: ${err.message}`;
+              clearStatus.classList.add('is-error');
+            }
+            announce(`Clear chat history failed: ${err.message}`);
+          } finally {
+            clearConfirm.disabled = false;
+            clearConfirm.removeAttribute('aria-busy');
+            if (clearCancel) clearCancel.disabled = false;
+          }
+        });
+      }
+    }
   };
 
   // ─── §9 Create-view extras ───────────────────────────────────────────────
