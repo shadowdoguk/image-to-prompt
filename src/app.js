@@ -50,6 +50,7 @@
     chatStreamAbortController: null, // SPEC §24 — AbortController for the active stream
     chatPendingAttachmentIds: [], // CR-2 — attachment ids queued for the next send
     chatPendingAttachmentMeta: {}, // CR-2 — map id → { filename, mime, size } for the preview UI
+    chatPreservationOverride: false, // SPEC §26 / ADR 0029 — per-message override flag. Set true by the declined-preview block when the user opts in; reset to false after each submission. Never sticky.
     selectedAspectRatio: '',    // ADR 0019 Issue #15 — '' means "auto / no preference"
     // Slice 2.1 — ADR 0021 — the model-fork. Pre-Generate model picker
     // chooses which contract runs (Z-Image Turbo or Anima). Anima mode
@@ -293,6 +294,7 @@
     // CR-3 — inline working-prompt editor
     chatWorkingPrompt: $('chat-working-prompt'),
     chatWorkingPromptText: $('chat-working-prompt-text'),
+    chatCopyCurrentBtn: $('chat-copy-current-btn'),
     chatEditCurrentBtn: $('chat-edit-current-btn'),
     chatEditCurrentInput: $('chat-edit-current-input'),
     chatEditCurrentCancel: $('chat-edit-current-cancel'),
@@ -5595,6 +5597,57 @@
       tryRewrite.addEventListener('click', () => tryChatRewrite(m.id));
       declinedActions.appendChild(tryRewrite);
 
+      // SPEC §26 / ADR 0029 — preservation override control.
+      // Renders a checkbox + label inside the declined-revision
+      // preview block, next to the "Try as rewrite" affordance.
+      // The user must check the box AND approve a `window.confirm()`
+      // dialog before the override is honored. The control is
+      // per-message: state resets after each submission, no sticky
+      // or global setting. The override does NOT bypass the
+      // catastrophic floor on the server (>90% content loss still
+      // gets declined); that's documented in the inline warning
+      // text.
+      const overrideControl = document.createElement('label');
+      overrideControl.className = 'chat-message__override-control';
+
+      const overrideCheckbox = document.createElement('input');
+      overrideCheckbox.type = 'checkbox';
+      overrideCheckbox.className = 'chat-message__override-checkbox';
+      overrideCheckbox.id = `preservation-override-${m.id || ''}`;
+      overrideCheckbox.setAttribute(
+        'aria-label',
+        'Allow revision with reduced preservation check. Bypasses the safety check that prevents wholesale rewrites.'
+      );
+
+      const overrideLabel = document.createElement('span');
+      overrideLabel.className = 'chat-message__override-label';
+      overrideLabel.textContent = 'Allow revision with reduced preservation check';
+
+      overrideControl.appendChild(overrideCheckbox);
+      overrideControl.appendChild(overrideLabel);
+      declinedActions.appendChild(overrideControl);
+
+      const overrideWarning = document.createElement('div');
+      overrideWarning.className = 'chat-message__override-warning';
+      overrideWarning.textContent =
+        'Bypasses the safety check that prevents wholesale rewrites. ' +
+        'The model may drop production requirements, named values, or ' +
+        'application context. The catastrophic case (>90% content loss) ' +
+        'is still declined automatically.';
+      declinedActions.appendChild(overrideWarning);
+
+      const tryOverride = document.createElement('button');
+      tryOverride.type = 'button';
+      tryOverride.className = 'chat-message__try-override btn-warning';
+      tryOverride.textContent = 'Resend with override';
+      tryOverride.setAttribute(
+        'aria-label',
+        'Resend the last request with the preservation override enabled'
+      );
+      tryOverride.dataset.messageId = m.id || '';
+      tryOverride.addEventListener('click', () => tryChatPreservationOverride(m.id, overrideCheckbox));
+      declinedActions.appendChild(tryOverride);
+
       declined.appendChild(declinedActions);
       node.appendChild(declined);
     }
@@ -5939,7 +5992,16 @@
         provider: state.provider,
         // CR-2 — include any pending attachment ids. The server validates
         // that each id belongs to this session.
-        attachment_ids: Array.isArray(state.chatPendingAttachmentIds) ? [...state.chatPendingAttachmentIds] : []
+        attachment_ids: Array.isArray(state.chatPendingAttachmentIds) ? [...state.chatPendingAttachmentIds] : [],
+        // SPEC §26 / ADR 0029 — preservation override (per-message,
+        // opt-in). The server honors `preservation_override: true` by
+        // bypassing the anchor-preservation validator for this one
+        // turn, subject to a hard catastrophic floor. The flag is
+        // reset in the finally block below so the next submission
+        // falls back to the safe default.
+        ...(state.chatPreservationOverride === true
+          ? { preservation_override: true }
+          : {})
       })
       });
       const prevSession = state.chatSessions.find((s) => s.id === updated.id);
@@ -5989,6 +6051,11 @@
         updateChatInputCount();
         setChatFormStatus('', false);
       }
+      // SPEC §26 / ADR 0029 — always reset the per-message override
+      // flag after each submission (success OR failure). The flag is
+      // never sticky; if the user wants to override again, they
+      // re-check the box on the next declined preview.
+      state.chatPreservationOverride = false;
       updateChatSendButton();
     }
   };
@@ -6068,7 +6135,14 @@
       llmModel: state.llmModel || '',
       attachment_ids: Array.isArray(state.chatPendingAttachmentIds)
         ? state.chatPendingAttachmentIds.join(',')
-        : ''
+        : '',
+      // SPEC §26 / ADR 0029 — preservation override on the
+      // streaming path. Only included when the user opted in
+      // (state.chatPreservationOverride === true). The flag
+      // resets to false in the finally block below.
+      ...(state.chatPreservationOverride === true
+        ? { preservation_override: 'true' }
+        : {})
     });
     const url = `/api/chat/sessions/${encodeURIComponent(state.chatSessionId)}/messages/stream?${params.toString()}`;
 
@@ -6168,6 +6242,12 @@
         updateChatInputCount();
         setChatFormStatus('Reply received.', false);
       }
+      // SPEC §26 / ADR 0029 — reset the per-message override flag
+      // after each streaming submission. The streaming endpoint
+      // also accepts `preservation_override=true` on the query
+      // string (set by the same client-side flag); the reset
+      // mirrors the POST path.
+      state.chatPreservationOverride = false;
       updateChatSendButton();
     }
   };
@@ -6346,6 +6426,88 @@
   };
 
   /**
+   * SPEC §26 / ADR 0029 — preservation override handler.
+   *
+   * Resends the user's most recent chat message with the
+   * `preservation_override` flag set to true on the request body.
+   * The server's `callKiloChat` honors the flag (per ADR 0029)
+   * and bypasses the anchor-preservation validator for this one
+   * turn, with a hard catastrophic floor (0.10 keyword retention)
+   * that still catches the wholesale-rewrite case.
+   *
+   * Safety UX: the user must (a) check the override checkbox and
+   * (b) confirm via `window.confirm()`. Both are required — the
+   * checkbox alone is too easy to click through by accident; the
+   * confirm alone is too easy to muscle-memory through. Together
+   * they make the override a deliberate, informed choice.
+   *
+   * The original user message is preserved on disk; the
+   * `preservation_override` flag is a request-time field, not a
+   * persistent message property.
+   *
+   * @param {string} declinedMessageId — the assistant message id
+   *   that was declined (used to find the user message immediately
+   *   before it).
+   * @param {HTMLInputElement} checkboxEl — the override checkbox
+   *   element from the declined-preview block. Must be `.checked`
+   *   for the override to fire.
+   */
+  const tryChatPreservationOverride = (declinedMessageId, checkboxEl) => {
+    if (!state.chatSessionId || !declinedMessageId) return;
+    if (!checkboxEl || checkboxEl.checked !== true) {
+      setChatFormStatus(
+        'Check the "Allow revision with reduced preservation check" box first, then click Resend with override.',
+        true
+      );
+      return;
+    }
+    const session = state.chatSessions.find((s) => s.id === state.chatSessionId);
+    if (!session || !Array.isArray(session.messages)) return;
+    const idx = session.messages.findIndex((m) => m.id === declinedMessageId);
+    if (idx === -1) return;
+    let userText = null;
+    for (let i = idx - 1; i >= 0; i--) {
+      if (session.messages[i].role === 'user' && typeof session.messages[i].content === 'string') {
+        userText = session.messages[i].content;
+        break;
+      }
+    }
+    if (!userText) {
+      setChatFormStatus('Could not find your original request to resend.', true);
+      return;
+    }
+    if (typeof userText !== 'string' || userText.length > 2000) {
+      setChatFormStatus('Original request is too long to resend with override.', true);
+      return;
+    }
+    // SPEC §26 / ADR 0029 — explicit confirmation. The dialog text
+    // restates the risk in plain language so the user knows what
+    // they're opting into. Cancel is the default for muscle-memory
+    // safety.
+    const confirmed = window.confirm(
+      'Send this revision with the preservation override enabled?\n\n' +
+      'The model may drop production requirements, named values, or ' +
+      'application context. If the revision loses more than 90% of the ' +
+      'original content, the override will still be declined automatically.\n\n' +
+      'Original request: "' + userText + '"'
+    );
+    if (!confirmed) {
+      setChatFormStatus('Override cancelled.', false);
+      return;
+    }
+    // Set the per-message override flag. Resets to false after
+    // submission in the finally block of submitChatMessage.
+    state.chatPreservationOverride = true;
+    if (dom.chatInput) {
+      dom.chatInput.value = userText;
+      updateChatInputCount();
+      updateChatSendButton();
+    }
+    setChatFormStatus('Resending with preservation override…', false);
+    submitChatMessage();
+  };
+
+  /**
    * Delete the active session. Confirmation prompt prevents accidental
    * loss of long threads. After deletion, the console is hidden (no
    * session to attach to); the result prompt stays as it was last
@@ -6436,6 +6598,34 @@
           // eslint-disable-next-line no-await-in-loop -- sequential uploads preserve order
           await uploadChatAttachment(file);
           if (state.chatPendingAttachmentIds.length >= 4) break;
+        }
+      });
+    }
+
+    // Copy the current working prompt to the clipboard. Mirrors the
+    // existing "Copy" affordance in dom.copyBtn (see stripSectionMarkers
+    // block above) — but for chat we don't strip anything, since the
+    // working prompt is the artist's own baseline text with no
+    // section markers or audit metadata to scrub.
+    if (dom.chatCopyCurrentBtn) {
+      dom.chatCopyCurrentBtn.addEventListener('click', async () => {
+        if (!state.chatSessionId) return;
+        const session = state.chatSessions.find((s) => s.id === state.chatSessionId);
+        const text = (session && session.current_prompt) || '';
+        if (!text) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          const btn = dom.chatCopyCurrentBtn;
+          const original = btn.textContent;
+          btn.textContent = 'Copied!';
+          btn.disabled = true;
+          setTimeout(() => {
+            btn.textContent = original;
+            btn.disabled = false;
+          }, 1500);
+        } catch {
+          // Silent fail — clipboard write can be denied by permissions.
+          // No need to surface a global error for a non-destructive action.
         }
       });
     }

@@ -382,7 +382,10 @@
             <div class="chat-working-prompt__display">
               <div class="chat-working-prompt__meta">
                 <span class="chat-working-prompt__label">Current working prompt</span>
-                <button type="button" id="chat-edit-current-btn" class="btn-tertiary chat-edit-btn">Edit</button>
+                <div class="chat-working-prompt__actions">
+                  <button type="button" id="chat-copy-current-btn" class="btn-tertiary chat-edit-btn" aria-label="Copy working prompt to clipboard">Copy</button>
+                  <button type="button" id="chat-edit-current-btn" class="btn-tertiary chat-edit-btn">Edit</button>
+                </div>
               </div>
               <pre id="chat-working-prompt-text" class="chat-working-prompt__text"></pre>
             </div>

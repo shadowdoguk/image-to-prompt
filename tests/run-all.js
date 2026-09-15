@@ -7566,9 +7566,11 @@ test('Issue #1: route handler persists declined_suggested_prompt + declined_miss
   // declined_missing_terms at +1661, session.messages.push at +1792.
   // SPEC §23 (Slice III) extended the assistantMessage construction
   // with patch tracking + annotations; window bumped 1900 → 3000 to
-  // cover the new fields + the Issue #1 block. Window still local
-  // enough to remain a regression guard for the chat route handler.
-  const block = serverText.slice(idx, idx + 3000);
+  // cover the new fields + the Issue #1 block. SPEC §26 (Slice 26)
+  // added the preservation-override audit block between the Issue #1
+  // block and the push; window bumped 3000 → 4500 to keep this as a
+  // regression guard for the chat route handler.
+  const block = serverText.slice(idx, idx + 4500);
   assertTrue(/declined_suggested_prompt/.test(block),
     'route handler writes declined_suggested_prompt to disk');
   assertTrue(/declined_missing_terms/.test(block),
@@ -8308,18 +8310,24 @@ test('Chat context: bounds pathological system prompt and retains original promp
 test('Chat context regression: prompt-budget overflow must not collapse history to zero', async () => {
   const {
     CHAT_CONTEXT_CHAR_BUDGET,
+    CHAT_SYSTEM_PROMPT_BUDGET,
     buildChatRequestContext
   } = require(path.join(PROJECT_ROOT, 'server.js'));
 
-  // The bug fires when the system prompt (including the RAG retrieval
-  // block) exceeds CHAT_CONTEXT_CHAR_BUDGET. To reproduce in a
-  // KILO_API_KEY-less test environment, stub rag.retrieve to return
-  // a realistic top-k corpus. Restore the original method after.
-  // 4 chunks × 480 chars each ≈ 1,800 chars of retrieval block + base
-  // system prompt (19,310 chars for an 8k working prompt) ≈ 21k chars,
-  // past the 20,000-char budget. This is exactly the production path:
-  // sessions that have been iterated over several turns accumulate
-  // retrieval history that pushes the system prompt past the cap.
+  // The bug: when the system prompt (including the RAG retrieval
+  // block) exceeded CHAT_CONTEXT_CHAR_BUDGET, buildChatRequestContext
+  // handed the ENTIRE remaining budget (0 chars) to history. The
+  // safety valve then shipped the most-recent turn as a literal '…',
+  // so the model saw `user: '…'` and replied "your message came
+  // through empty". Sessions that had been iterated over several turns
+  // (long working prompt + retrieval block) hit this on every message.
+  //
+  // The fix (2026-09-07): the trim cascade now targets
+  // CHAT_SYSTEM_PROMPT_BUDGET (leaving CHAT_HISTORY_RESERVE chars for
+  // conversation turns), and the RAG retrieval block is only injected
+  // when it fits inside that system budget — otherwise it is dropped
+  // (ADR 0025 no-RAG mode). Regression assertion: the wire body must
+  // contain the most recent user turn VERBATIM, never a stub.
   const ragModule = require(path.join(PROJECT_ROOT, 'server/lib/rag.js'));
   const originalRetrieve = ragModule.retrieve;
   ragModule.retrieve = async () => ([
@@ -8332,7 +8340,8 @@ test('Chat context regression: prompt-budget overflow must not collapse history 
     // ~3.3 KB of working prompt — the sweet spot where the trim cascade
     // in buildChatSystemPrompt does NOT shrink the prompt (so the base
     // system prompt is at its largest), but combined with the retrieval
-    // block it overflows CHAT_CONTEXT_CHAR_BUDGET.
+    // block it would exceed CHAT_CONTEXT_CHAR_BUDGET. This is exactly
+    // the production path that produced the '…' stub.
     const session = {
       preset_id: 'preset_968c0ccdf6fc6151',
       original_prompt: 'A woman stands at the center of the composition. '.repeat(70),
@@ -8348,16 +8357,26 @@ test('Chat context regression: prompt-budget overflow must not collapse history 
 
     const context = await buildChatRequestContext(session);
 
-    // Diagnostic surface (visible if the assertion fails):
+    // Core regression assertion — the system prompt must NOT blow the
+    // full wire budget: the cascade trims to CHAT_SYSTEM_PROMPT_BUDGET
+    // and the retrieval block is dropped when it does not fit, so
+    // conversation turns always have CHAT_HISTORY_RESERVE chars left.
     assertTrue(
-      context.systemPrompt.length > CHAT_CONTEXT_CHAR_BUDGET,
-      `test premise holds: system prompt (${context.systemPrompt.length}) exceeds budget (${CHAT_CONTEXT_CHAR_BUDGET}); otherwise this test does not exercise the bug. Bump the session prompt size or stub a larger retrieval chunk.`
+      context.systemPrompt.length <= CHAT_SYSTEM_PROMPT_BUDGET,
+      `system prompt (${context.systemPrompt.length}) must fit the system budget (${CHAT_SYSTEM_PROMPT_BUDGET}) so history keeps CHAT_HISTORY_RESERVE chars`
     );
+
+    // The wire body must fit the hard budget (system + turns ≤ 20,000).
+    const totalChars = context.systemPrompt.length + context.messages.reduce(
+      (t, m) => t + (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length),
+      0
+    );
+    assertTrue(totalChars <= CHAT_CONTEXT_CHAR_BUDGET, 'provider input fits the hard budget');
 
     // Core regression assertion:
     assertTrue(
       context.messages.length >= 1,
-      'context.messages must include at least the last user turn when the session has user messages — even if the system prompt overflows the budget. An empty messages array triggers upstream "messages must not be empty (2013)" rejection.'
+      'context.messages must include at least the last user turn when the session has user messages.'
     );
 
     // Last message in context.messages must be the most recent user turn
@@ -8365,10 +8384,57 @@ test('Chat context regression: prompt-budget overflow must not collapse history 
     // happens when the last session message is a user turn).
     const last = context.messages[context.messages.length - 1];
     assertEqual(last.role, 'user', 'last message in context is the user turn');
-    assertTrue(
-      typeof last.content === 'string' && last.content.length > 0,
-      'last user message content is non-empty (may be truncated when budget is too small to fit it verbatim)'
+    assertEqual(
+      last.content,
+      'second user turn — the last one',
+      'last user message content must be preserved VERBATIM — never a truncated stub or a bare ellipsis. The model needs the user\'s actual request to reply.'
     );
+  } finally {
+    ragModule.retrieve = originalRetrieve;
+  }
+});
+
+test('Chat context: RAG block is dropped when it does not fit the reserved system budget', async () => {
+  // Companion to the overflow regression. When the persona + session
+  // context ALONE is too big to also carry the retrieval block inside
+  // CHAT_SYSTEM_PROMPT_BUDGET, the block must be dropped (ADR 0025
+  // no-RAG mode) instead of overflowing the system budget and
+  // collapsing the conversation turns to a '…' stub.
+  const {
+    CHAT_SYSTEM_PROMPT_BUDGET,
+    buildChatRequestContext
+  } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const ragModule = require(path.join(PROJECT_ROOT, 'server/lib/rag.js'));
+  const originalRetrieve = ragModule.retrieve;
+  ragModule.retrieve = async () => ([
+    // ~3.9 KB of retrieval content — larger than the room the cascade
+    // leaves when the prompts are near the trim threshold.
+    { id: 'a', source: 'stage2', content: 'Pastel-focal alla prima oil painting — saturated focal accent. '.repeat(40), similarity: 0.95 },
+    { id: 'b', source: 'chat', content: 'Lost-and-found edges, scumbled atmospheric layers. '.repeat(40), similarity: 0.85 },
+    { id: 'c', source: 'stage2', content: 'Palette-knife ridges, no depicted light source. '.repeat(40), similarity: 0.80 },
+    { id: 'd', source: 'chat', content: 'Chromatic vibration from juxtaposed warm and cool near-complementaries. '.repeat(40), similarity: 0.75 }
+  ]);
+  try {
+    const session = {
+      preset_id: 'preset_968c0ccdf6fc6151',
+      original_prompt: 'A woman stands at the center of the composition. '.repeat(70),
+      current_prompt: 'A woman stands at the center, frontal view, body oriented toward the viewer. '.repeat(70),
+      pending_prompt: null,
+      analysis_snapshot: null,
+      messages: [
+        { role: 'user', content: 'make the background dissolve into mist', suggested_prompt: null, timestamp: '2026-09-07T09:00:02.000Z', attachment_ids: [] }
+      ]
+    };
+    const context = await buildChatRequestContext(session);
+    assertTrue(
+      context.systemPrompt.length <= CHAT_SYSTEM_PROMPT_BUDGET,
+      `system prompt stays within budget even with an oversized retrieval result (${context.systemPrompt.length} <= ${CHAT_SYSTEM_PROMPT_BUDGET})`
+    );
+    // Retrieval either fit, or was dropped — but the user turn always ships.
+    assertTrue(Array.isArray(context.retrievalIds), 'retrievalIds is an array');
+    const last = context.messages[context.messages.length - 1];
+    assertEqual(last.role, 'user', 'last message is the user turn');
+    assertEqual(last.content, 'make the background dissolve into mist', 'user turn preserved verbatim');
   } finally {
     ragModule.retrieve = originalRetrieve;
   }
@@ -9110,6 +9176,16 @@ test('CR-3 src/index.html: working-prompt editor markup present', () => {
   assertTrue(html.includes('id="chat-edit-current-input"'), 'editor textarea present');
   assertTrue(html.includes('id="chat-edit-current-cancel"'), 'Cancel button present');
   assertTrue(html.includes('id="chat-edit-current-save"'), 'Save button present');
+  assertTrue(html.includes('id="chat-copy-current-btn"'), 'Copy button present');
+  assertTrue(html.includes('chat-working-prompt__actions'), 'actions wrapper present');
+});
+
+test('CR-3 src/app.js: Copy working-prompt handler wired', () => {
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(app.includes("chatCopyCurrentBtn: $('chat-copy-current-btn')"), 'dom ref present');
+  assertTrue(app.includes('chatCopyCurrentBtn'), 'handler var present');
+  assertTrue(app.includes('navigator.clipboard.writeText(text)'), 'clipboard write called on current_prompt');
+  assertTrue(app.includes("'Copied!'"), 'user-facing Copied feedback present');
 });
 
 test('CR-3 src/app.js: working-prompt render + handlers wired', () => {
@@ -9127,6 +9203,7 @@ test('CR-3 src/styles.css: working-prompt editor styles present', () => {
   assertTrue(css.includes('.chat-working-prompt'), 'working-prompt style present');
   assertTrue(css.includes('.chat-edit-btn'), 'edit-btn style present');
   assertTrue(css.includes('.chat-working-prompt__editor'), 'editor style present');
+  assertTrue(css.includes('.chat-working-prompt__actions'), 'actions style present');
 });
 
 test('CR-3 server.js: PATCH endpoint registered', () => {

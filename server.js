@@ -536,6 +536,16 @@ const CHAT_TITLE_MAX_LENGTH = 80;
 const CHAT_CONTEXT_CHAR_BUDGET = 20000;
 const CHAT_HISTORY_CHAR_BUDGET = 6000;
 const CHAT_HISTORY_MAX_MESSAGES = 12;
+// Minimum chars of the 20,000-char wire budget that are ALWAYS reserved
+// for conversation turns (user + assistant). Sized to MAX_CHAT_MESSAGE_LENGTH
+// (2,000) so the most recent user request always ships whole — the trim
+// cascade targets CHAT_CONTEXT_CHAR_BUDGET - CHAT_HISTORY_RESERVE, and RAG
+// injection is refused when it would eat into this reserve.
+const CHAT_HISTORY_RESERVE = 2000;
+// The system prompt (persona + session context + optional retrieval
+// block) is capped at this length so the conversation always has at
+// least CHAT_HISTORY_RESERVE chars of wire budget left for turns.
+const CHAT_SYSTEM_PROMPT_BUDGET = CHAT_CONTEXT_CHAR_BUDGET - CHAT_HISTORY_RESERVE;
 
 // ─── Anchor-preserving chat refinements (ADR 0012) ────────────────
 // Wholesale-rewrite prevention: the validator below scores how much
@@ -593,6 +603,100 @@ const buildPreservationDeclineNote = (report) => {
     " Try a more specific request, e.g. \"only change the colors to " +
     "navy, gold, white; keep everything else exactly as is.\")"
   );
+};
+
+/**
+ * SPEC §26 / ADR 0029 — preservation override (per-message opt-in).
+ *
+ * The override lets a user explicitly request a revision that would
+ * otherwise be declined by `validatePromptPreservation`. It is
+ * opt-in, per-message, requires explicit confirmation on the
+ * frontend, and is gated by a hard catastrophic floor: revisions
+ * that drop strictly below this floor of keyword retention still
+ * get declined, even when the override is requested. The floor is
+ * strictly below the existing short (0.50) and long (0.70) keyword
+ * thresholds, so it catches only the catastrophic case where 90%+
+ * of original content tokens vanish — the failure mode ADR 0012
+ * was built to prevent. Typical "rewrite in a punchier voice"
+ * revisions (30-50% retention) fall above the floor and pass.
+ */
+const PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR = 0.10;
+
+/**
+ * User-facing decline note when the user explicitly opted into the
+ * preservation override but the revision still tripped the
+ * catastrophic floor. Distinct from `PRESERVATION_FAILED_REPLY_NOTE`
+ * so the UI / logs can tell the override-vs-non-override paths
+ * apart.
+ */
+const PRESERVATION_FAILED_CATASTROPHIC_REPLY_NOTE =
+  " (Note: I'd proposed a revision but the override cannot bypass a catastrophic " +
+  "context loss (>90% of original content dropped). The model's revision " +
+  "would erase production requirements or named values; apply manually or " +
+  "rephrase to keep at least the structural anchors (subject, palette, " +
+  "lens, render).)";
+
+/**
+ * SPEC §26 / ADR 0029 — append-only telemetry writer for
+ * preservation-override events. File lives at
+ * `data/preservation_override_log.json`; mirrors the chat-sessions
+ * pattern (gitignored, JSON file, per-user state). Capped at
+ * `PRESERVATION_OVERRIDE_TELEMETRY_CAP` rows; oldest are dropped
+ * when the cap is hit (FIFO eviction).
+ *
+ * Pure: caller passes a structured row object; this helper handles
+ * serialization, atomic-ish read-modify-write (sequential in
+ * Node.js, no concurrency to worry about in the single-user
+ * tool), and cap enforcement.
+ */
+const PRESERVATION_OVERRIDE_TELEMETRY_CAP = 1000;
+const PRESERVATION_OVERRIDE_TELEMETRY_FILE = path.join(__dirname, 'data', 'preservation_override_log.json');
+
+const recordPreservationOverrideTelemetry = (row) => {
+  if (!row || typeof row !== 'object') return;
+  let arr = [];
+  try {
+    if (fs.existsSync(PRESERVATION_OVERRIDE_TELEMETRY_FILE)) {
+      const raw = fs.readFileSync(PRESERVATION_OVERRIDE_TELEMETRY_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) arr = parsed;
+    }
+  } catch (e) {
+    // Corrupt file: reset rather than crash. Telemetry is best-effort.
+    arr = [];
+  }
+  arr.push(row);
+  // Cap: keep the most recent N rows, drop oldest first.
+  if (arr.length > PRESERVATION_OVERRIDE_TELEMETRY_CAP) {
+    arr = arr.slice(arr.length - PRESERVATION_OVERRIDE_TELEMETRY_CAP);
+  }
+  try {
+    fs.mkdirSync(path.dirname(PRESERVATION_OVERRIDE_TELEMETRY_FILE), { recursive: true });
+    fs.writeFileSync(
+      PRESERVATION_OVERRIDE_TELEMETRY_FILE,
+      JSON.stringify(arr, null, 2),
+      'utf8'
+    );
+  } catch (e) {
+    // Telemetry is best-effort; never block the chat on a write failure.
+    console.warn(`[chat] Failed to write preservation-override telemetry: ${e.message}`);
+  }
+};
+
+/**
+ * Read the full telemetry array. Used by tests and by future
+ * inspection endpoints. Returns `[]` when the file is absent or
+ * malformed.
+ */
+const readPreservationOverrideTelemetry = () => {
+  try {
+    if (!fs.existsSync(PRESERVATION_OVERRIDE_TELEMETRY_FILE)) return [];
+    const raw = fs.readFileSync(PRESERVATION_OVERRIDE_TELEMETRY_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
+  }
 };
 
 // Common English stop words plus chat noise ("hi", "ok", "thanks"). The
@@ -7583,6 +7687,16 @@ const validateChatMessage = (body) => {
   if (body.content.length > MAX_CHAT_MESSAGE_LENGTH) {
     return `content must be ${MAX_CHAT_MESSAGE_LENGTH} characters or fewer (got ${body.content.length}).`;
   }
+  // SPEC §26 / ADR 0029 — preservation override is an optional
+  // boolean. Defensive: reject only if it's set to a non-boolean
+  // value (e.g. a string or a number). Undefined is the default
+  // (override off), which matches the prior behavior exactly.
+  if (
+    body.preservation_override !== undefined &&
+    typeof body.preservation_override !== 'boolean'
+  ) {
+    return 'preservation_override must be a boolean when present.';
+  }
   return null;
 };
 
@@ -7933,7 +8047,7 @@ const callKiloChat = async (systemPrompt, messages, options = {}, model = DEFAUL
     throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
   }
 
-  const { currentPrompt, lastUserRequest } = options;
+  const { currentPrompt, lastUserRequest, preservationOverride } = options;
   const baseOpenaiMessages = [
     { role: 'system', content: systemPrompt },
     ...messages.map((m) => ({
@@ -8001,6 +8115,67 @@ const callKiloChat = async (systemPrompt, messages, options = {}, model = DEFAUL
             ];
             await new Promise((r) => setTimeout(r, CHAT_RETRY_DELAY_MS * (attempt + 1)));
             continue;
+          }
+          // Out of retries — about to decline. SPEC §26 / ADR 0029:
+          // if the user explicitly opted into the preservation
+          // override, the catastrophic-floor check decides what
+          // happens next. Above the floor → let the revision through
+          // (with telemetry). Below the floor → decline with a
+          // distinct fallback_reason so the UI can surface the
+          // override-vs-no-override paths separately.
+          if (preservationOverride === true) {
+            const catastrophic = report.keywordRatio < PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR;
+            // Telemetry write is performed by the route handler (it
+            // has access to session_id / message_id, which
+            // callKiloChat does not). The handler reads
+            // `preservation_override_report` and calls
+            // `recordPreservationOverrideTelemetry` with the
+            // session/message ids filled in.
+            if (!catastrophic) {
+              console.warn(
+                `Chat preservation overridden by user (nonTargeted=${report.nonTargetedRatio}, ` +
+                `bigram=${report.bigramRatio}); accepting revision.`
+              );
+              // Return the model's original reply + suggested_prompt.
+              // The `preservation_override_report` field is a
+              // non-breaking additive hint so the route handler /
+              // frontend can confirm the override was honored.
+              return {
+                ...result.value,
+                preservation_override_applied: true,
+                preservation_override_report: {
+                  nonTargetedRatio: report.nonTargetedRatio,
+                  bigramRatio: report.bigramRatio,
+                  keywordRatio: report.keywordRatio,
+                  catastrophic: false,
+                  catastrophicFloor: PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR
+                }
+              };
+            }
+            // Catastrophic: still decline. The override can't bypass
+            // the catastrophic floor (ADR 0029 §3).
+            console.warn(
+              `Chat preservation override REJECTED (catastrophic floor); ` +
+              `nonTargeted=${report.nonTargetedRatio}, keyword=${report.keywordRatio}, ` +
+              `floor=${PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR}.`
+            );
+            return {
+              reply: (result.value.reply || '') + PRESERVATION_FAILED_CATASTROPHIC_REPLY_NOTE,
+              suggested_prompt: null,
+              fallback_reason: 'preservation_failed_catastrophic',
+              declined_suggested_prompt: suggested,
+              declined_missing_terms: Array.isArray(report.nonTargetedMissing)
+                ? report.nonTargetedMissing.slice(0, PRESERVATION_DECLINE_TERMS_DISPLAY_LIMIT)
+                : [],
+              preservation_override_attempted: true,
+              preservation_override_report: {
+                nonTargetedRatio: report.nonTargetedRatio,
+                bigramRatio: report.bigramRatio,
+                keywordRatio: report.keywordRatio,
+                catastrophic: true,
+                catastrophicFloor: PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR
+              }
+            };
           }
           // Out of retries — decline the revision. Surface a friendly
           // note so the user knows why no Apply button appears. Issue
@@ -8366,16 +8541,16 @@ const buildBoundedChatHistory = (messages, maxChars = CHAT_HISTORY_CHAR_BUDGET) 
       // Safety valve: emit the most-recent turn truncated if needed.
       // The wire protocol requires at least one non-system message;
       // the upstream rejects `[system]` alone with 2013.
+      //
+      // NEVER ship a bare truncation marker ('…') as the entire
+      // content: the model interprets it as an empty message and
+      // replies "your message came through empty". Always emit real
+      // leading content (up to 64 chars). A slight budget overage is
+      // tolerated by the model's context window; a content-free turn
+      // loses the user's request entirely.
       if (selected.length === 0) {
         const headChars = Math.min(64, message.content.length);
-        // Prefer within-budget (remaining > 0); when over-budget
-        // we still ship up to 64 chars because the model's context
-        // window tolerates a small overage but a totally empty
-        // turn array does not.
-        const remaining = Math.max(0, maxChars - chars);
-        const truncated = remaining >= headChars
-          ? message.content.slice(0, headChars)
-          : `${message.content.slice(0, Math.max(0, Math.min(remaining, headChars) - 1))}…`;
+        const truncated = message.content.slice(0, headChars);
         selected.unshift({ role: message.role, content: truncated });
         chars += truncated.length;
       }
@@ -8495,21 +8670,27 @@ const buildChatSystemPrompt = (session) => {
     trimWorking: false,
     trimOriginal: false
   });
-  if (systemPrompt.length <= CHAT_CONTEXT_CHAR_BUDGET) return systemPrompt;
+  // The cascade targets CHAT_SYSTEM_PROMPT_BUDGET (18,000), not the full
+  // CHAT_CONTEXT_CHAR_BUDGET (20,000), so conversation history always has
+  // CHAT_HISTORY_RESERVE (2,000) chars of wire budget left. Without the
+  // reserve, long working prompts (original 2.3k + current 3.1k +
+  // analysis 2.6k ≈ 18.9k) left ~0 chars for turns and the upstream saw
+  // a degenerate '…' user message.
+  if (systemPrompt.length <= CHAT_SYSTEM_PROMPT_BUDGET) return systemPrompt;
 
   systemPrompt = build({
     includeAnalysis: false,
     trimWorking: false,
     trimOriginal: false
   });
-  if (systemPrompt.length <= CHAT_CONTEXT_CHAR_BUDGET) return systemPrompt;
+  if (systemPrompt.length <= CHAT_SYSTEM_PROMPT_BUDGET) return systemPrompt;
 
   systemPrompt = build({
     includeAnalysis: false,
     trimWorking: true,
     trimOriginal: false
   });
-  if (systemPrompt.length <= CHAT_CONTEXT_CHAR_BUDGET) return systemPrompt;
+  if (systemPrompt.length <= CHAT_SYSTEM_PROMPT_BUDGET) return systemPrompt;
 
   return build({
     includeAnalysis: false,
@@ -8538,9 +8719,23 @@ const buildChatRequestContext = async (session, llmModel = null) => {
       const chunks = await rag.retrieve(retrievalQuery, rag.DEFAULT_TOP_K);
       if (Array.isArray(chunks) && chunks.length > 0) {
         const retrievalBlock = rag.buildRetrievalBlock(chunks);
-        if (retrievalBlock) {
+        // Budget-aware injection (ADR 0025 no-RAG mode). The retrieval
+        // block must fit inside the system-prompt budget together with
+        // the persona + session context; otherwise the conversation
+        // turns (which carry the user's actual request) would be
+        // squeezed out of the 20,000-char wire budget. When the block
+        // doesn't fit, drop it — the assistant still runs, just without
+        // corpus grounding (logged WARN, retrieval_ids = [] so the UI
+        // shows no provenance).
+        if (retrievalBlock && (systemPrompt.length + retrievalBlock.length) <= CHAT_SYSTEM_PROMPT_BUDGET) {
           systemPrompt = `${systemPrompt}\n\n${retrievalBlock}`;
           retrievalIds = chunks.map((c) => c.id);
+        } else if (retrievalBlock) {
+          console.warn(
+            `[chat] retrieval block dropped (${retrievalBlock.length} chars): system prompt ` +
+            `(${systemPrompt.length}) + retrieval would exceed the ${CHAT_SYSTEM_PROMPT_BUDGET}-char system budget. ` +
+            `Running this turn without corpus grounding (ADR 0025 no-RAG mode).`
+          );
         }
       }
     }
@@ -8548,7 +8743,11 @@ const buildChatRequestContext = async (session, llmModel = null) => {
     // Never block the chat on retrieval failure.
     console.warn(`[chat] retrieval injection failed: ${err.message}`);
   }
-  const remaining = Math.max(0, CHAT_CONTEXT_CHAR_BUDGET - systemPrompt.length);
+  // History budget: whatever the 20,000-char wire budget leaves after
+  // the system prompt. Because the trim cascade + RAG gate keep the
+  // system prompt ≤ CHAT_SYSTEM_PROMPT_BUDGET, this is always
+  // ≥ CHAT_HISTORY_RESERVE, so the latest user turn ships whole.
+  const remaining = Math.max(CHAT_HISTORY_RESERVE, CHAT_CONTEXT_CHAR_BUDGET - systemPrompt.length);
   const messages = buildBoundedChatHistory(sessionObj.messages, remaining);
   // CR-2 — vision-aware user message (SPEC §18.1 / ADR 0025). If the
   // last user message has attachment_ids and the model is vision-
@@ -8863,9 +9062,20 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       // Closes the Slice-4-completion item previously tracked in
       // docs/SESSION-STATE.md Session #5.
       if (provider === 'kilo_code') {
+        // SPEC §26 / ADR 0029 — preservation override. The flag
+        // travels from the request body through to callKiloChat's
+        // options.preservationOverride. The catastrophic-floor
+        // check happens inside callKiloChat (it has the validator
+        // report); the resulting parsedReply carries a
+        // `preservation_override_report` field when the override
+        // was attempted. After the call returns, this route handler
+        // writes the telemetry row with the actual session_id /
+        // message_id (callKiloChat doesn't know them).
+        const preservationOverride = req.body.preservation_override === true;
         parsedReply = await callKiloChat(context.systemPrompt, context.messages, {
           currentPrompt: activePrompt,
           lastUserRequest: userMessage.content,
+          preservationOverride,
         }, llmModel);
       } else {
         const providerResult = await callProvider(provider, llmModel, 'chat', {
@@ -8899,6 +9109,39 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
     // When both are present, patches take precedence (the model is
     // told patches are more precise; the full suggested_prompt is
     // retained as `original_suggested_prompt` for audit).
+    // SPEC §26 / ADR 0029 — preservation override telemetry. The
+    // callKiloChat helper stamps `preservation_override_report` on
+    // the parsedReply when the override was attempted. We write
+    // the telemetry row here, where we have the actual session_id
+    // and the assistant message_id (not yet generated, so we use
+    // a placeholder; the assistant message persists the report
+    // itself so the audit trail lives on the message). The
+    // telemetry file is best-effort: never throw.
+    if (parsedReply && parsedReply.preservation_override_report) {
+      try {
+        recordPreservationOverrideTelemetry({
+          timestamp: new Date().toISOString(),
+          session_id: session.id,
+          // The message id isn't generated until the assistant
+          // message is constructed below; we record the telemetry
+          // row with a stable marker so the audit trail still
+          // correlates to this turn. The session_id + the
+          // timestamp are sufficient to look up the row in tests
+          // and in the data file.
+          message_id: null,
+          nonTargetedRatio: parsedReply.preservation_override_report.nonTargetedRatio,
+          bigramRatio: parsedReply.preservation_override_report.bigramRatio,
+          keywordRatio: parsedReply.preservation_override_report.keywordRatio,
+          catastrophic: parsedReply.preservation_override_report.catastrophic === true,
+          applied: parsedReply.preservation_override_report.catastrophic !== true,
+          catastrophicFloor: parsedReply.preservation_override_report.catastrophicFloor,
+          fallback_reason: parsedReply.fallback_reason || null
+        });
+      } catch (e) {
+        // Swallow: telemetry never blocks the chat.
+        console.warn(`[chat] preservation-override telemetry write failed: ${e.message}`);
+      }
+    }
     let resolvedSuggestedPrompt = typeof parsedReply.suggested_prompt === 'string'
       ? parsedReply.suggested_prompt
       : null;
@@ -8976,6 +9219,25 @@ app.post('/api/chat/sessions/:id/messages', async (req, res) => {
       if (Array.isArray(parsedReply.declined_missing_terms)) {
         assistantMessage.declined_missing_terms = parsedReply.declined_missing_terms;
       }
+    }
+    // SPEC §26 / ADR 0029 — preservation-override audit on the
+    // assistant message. When the override was attempted (whether
+    // applied or rejected by the catastrophic floor), stamp the
+    // report on the message so the per-turn audit trail is durable
+    // on disk (in addition to the append-only telemetry file).
+    // This is additive: existing assistant messages that didn't
+    // have an override attempt simply don't carry this field, so
+    // old sessions are unaffected.
+    if (parsedReply && parsedReply.preservation_override_report) {
+      assistantMessage.preservation_override = {
+        applied: parsedReply.preservation_override_applied === true,
+        attempted: true,
+        catastrophic: parsedReply.preservation_override_report.catastrophic === true,
+        nonTargetedRatio: parsedReply.preservation_override_report.nonTargetedRatio,
+        bigramRatio: parsedReply.preservation_override_report.bigramRatio,
+        keywordRatio: parsedReply.preservation_override_report.keywordRatio,
+        catastrophicFloor: parsedReply.preservation_override_report.catastrophicFloor
+      };
     }
     session.messages.push(assistantMessage);
     session.updated_at = assistantMessage.timestamp;
@@ -9119,9 +9381,16 @@ app.get('/api/chat/sessions/:id/messages/stream', async (req, res) => {
 
       let parsedReply;
       if (provider === 'kilo_code') {
+        // SPEC §26 / ADR 0029 — preservation override, streaming
+        // path. The override flag arrives on the query string
+        // (the streaming endpoint doesn't have a body). The
+        // catastrophic-floor check + telemetry write mirror the
+        // POST route.
+        const preservationOverride = req.query.preservation_override === 'true';
         parsedReply = await callKiloChat(context.systemPrompt, context.messages, {
           currentPrompt: activePrompt,
           lastUserRequest: userMessage.content,
+          preservationOverride,
         }, llmModel);
       } else {
         const providerResult = await callProvider(provider, llmModel, 'chat', {
@@ -9215,6 +9484,38 @@ app.get('/api/chat/sessions/:id/messages/stream', async (req, res) => {
         assistantMessage.declined_suggested_prompt = parsedReply.declined_suggested_prompt;
         if (Array.isArray(parsedReply.declined_missing_terms)) {
           assistantMessage.declined_missing_terms = parsedReply.declined_missing_terms;
+        }
+      }
+      // SPEC §26 / ADR 0029 — preservation-override audit on the
+      // assistant message (streaming path). Mirrors the POST
+      // route. Also writes a telemetry row, since the streaming
+      // route handler is the only place we have a session id
+      // after the callKiloChat call returns.
+      if (parsedReply && parsedReply.preservation_override_report) {
+        assistantMessage.preservation_override = {
+          applied: parsedReply.preservation_override_applied === true,
+          attempted: true,
+          catastrophic: parsedReply.preservation_override_report.catastrophic === true,
+          nonTargetedRatio: parsedReply.preservation_override_report.nonTargetedRatio,
+          bigramRatio: parsedReply.preservation_override_report.bigramRatio,
+          keywordRatio: parsedReply.preservation_override_report.keywordRatio,
+          catastrophicFloor: parsedReply.preservation_override_report.catastrophicFloor
+        };
+        try {
+          recordPreservationOverrideTelemetry({
+            timestamp: new Date().toISOString(),
+            session_id: session.id,
+            message_id: assistantMessage.id,
+            nonTargetedRatio: parsedReply.preservation_override_report.nonTargetedRatio,
+            bigramRatio: parsedReply.preservation_override_report.bigramRatio,
+            keywordRatio: parsedReply.preservation_override_report.keywordRatio,
+            catastrophic: parsedReply.preservation_override_report.catastrophic === true,
+            applied: parsedReply.preservation_override_applied === true,
+            catastrophicFloor: parsedReply.preservation_override_report.catastrophicFloor,
+            fallback_reason: parsedReply.fallback_reason || null
+          });
+        } catch (e) {
+          console.warn(`[chat] preservation-override telemetry write failed (stream): ${e.message}`);
         }
       }
       if (typeof resolvedSuggestedPrompt === 'string' && resolvedSuggestedPrompt.length >= 30) {
@@ -10322,6 +10623,8 @@ module.exports = {
   CHAT_CONTEXT_CHAR_BUDGET,
   CHAT_HISTORY_CHAR_BUDGET,
   CHAT_HISTORY_MAX_MESSAGES,
+  CHAT_HISTORY_RESERVE,
+  CHAT_SYSTEM_PROMPT_BUDGET,
   DEFAULT_CHAT_SYSTEM_PROMPT,
   generateChatSessionId,
   generateChatMessageId,
@@ -10363,7 +10666,16 @@ module.exports = {
   tokenizeForPreservation,
   extractPreservationBigrams,
   validatePromptPreservation,
+  // SPEC §26 / ADR 0029 — preservation override exports.
+  PRESERVATION_OVERRIDE_CATASTROPHIC_FLOOR,
+  PRESERVATION_FAILED_CATASTROPHIC_REPLY_NOTE,
+  PRESERVATION_OVERRIDE_TELEMETRY_CAP,
+  recordPreservationOverrideTelemetry,
+  readPreservationOverrideTelemetry,
   // CR-2 — chat attachment helpers (SPEC §18 / ADR 0025)
   buildUserMessageWithAttachments,
-  cascadeDeleteChatSessionAttachments
+  cascadeDeleteChatSessionAttachments,
+  // CR-A11 — bulk chat history clear (SPEC §27)
+  clearAllChatSessions,
+  countChatData
 };
