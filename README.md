@@ -844,6 +844,7 @@ that advances only when the user clicks Apply on a revision.
 | `DELETE` | `/api/chat/sessions/:id` | Hard-delete a session and its full history |
 | `GET` | `/api/chat/sessions/count` | Return live `{ sessions, attachments }` counts for the Settings "Clear chat history" modal |
 | `DELETE` | `/api/chat/sessions` | Bulk erase all chat sessions + their attachment directories (irreversible; SPEC §27) |
+| `POST` | `/api/chat/sessions/:id/analyze-generated` | Iterative refinement: compare the most recently uploaded chat attachment against the first (reference) attachment, emit a revised `suggested_prompt` as an assistant message tagged `audit.kind='ir_iteration'`. Cap: 8 iterations per session (SPEC §28 / IR series). |
 
 ### Providers & keys (ADR 0024, UI-REDESIGN-SPEC §6)
 

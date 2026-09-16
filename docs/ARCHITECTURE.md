@@ -1384,3 +1384,177 @@ Total server.js delta: ~80 LOC. Total frontend delta: ~100 LOC (HTML 25, CSS 5, 
 - No telemetry / no audit log for clears. The action is reversible only by the user restoring from a manual backup of `data/chat_sessions.json` (the file is gitignored, so backups are the user's responsibility).
 - `data/preservation_override_log.json` (SPEC §26 telemetry) is intentionally NOT cleared — it's aggregate usage analytics, not user-visible chat content. This is documented in SPEC §27 "Out of scope".
 - The Settings panel surfaces the bulk action but does NOT auto-prompt the user on first visit, on every Nth session, or via any other nudge. Discovery is via Settings → Chat data → button, matching the platform convention.
+
+---
+
+## §28 architecture — Iterative refinement: "Analyze Generated Image" in Chat (SPEC §28)
+
+### A1 — Three modules, one route
+
+The new feature decomposes into three pure-ish server modules and one
+HTTP route. Each module has one job, one return shape, and one
+external collaborator (the MiniMax vision/text API). None of the
+three modify existing handlers.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Chat input bar (src/app.js, src/shell.js)                           │
+│   #chat-analyze-generated-btn   #chat-ir-counter  (N / 8)           │
+└────────────────────────────┬────────────────────────────────────────┘
+                             │ POST /api/chat/sessions/:id/analyze-generated
+                             ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ server.js — analyze-generated route                                  │
+│   1. Validate session + ≥2 attachments (1 reference, 1 generated)   │
+│   2. Check ir_iteration_count < 8                                    │
+│   3. Resolve reference + generated attachment → on-disk paths       │
+│   4. irAnalyzeImage(reference)  → ImageAttributes                   │
+│   5. irAnalyzeImage(generated)  → ImageAttributes                   │
+│   6. irCompareImages(ref, gen) → Mismatch[]                         │
+│   7. irRevisePrompt(current_prompt, mismatches) → revised_prompt    │
+│   8. validatePromptPreservation(current_prompt, revised, '')        │
+│      (ADR 0012 — declines if anchor drop > threshold)               │
+│   9. Append assistant message (audit.kind='ir_iteration')            │
+│  10. Increment session.ir_iteration_count                           │
+└─────────────────────────────────────────────────────────────────────┘
+        │                  │                  │
+        ▼                  ▼                  ▼
+┌─────────────────┐ ┌─────────────────┐ ┌─────────────────────────┐
+│ irAnalyzeImage  │ │ irCompareImages │ │ irRevisePrompt          │
+│ (single vision  │ │ (single vision  │ │ (single text call,      │
+│  call → JSON    │ │  call → JSON    │ │  system + user prompt)  │
+│  schema)        │ │  schema)        │ │                         │
+└─────────────────┘ └─────────────────┘ └─────────────────────────┘
+        │                  │                  │
+        ▼                  ▼                  ▼
+  MiniMax M3 vision   MiniMax M3 vision   MiniMax M3 text
+  (response_format:   (response_format:   (json_schema for
+   json_schema)        json_schema)        text-only diff)
+```
+
+### A2 — Module contracts
+
+```js
+// irAnalyzeImage(imagePath: string) -> Promise<ImageAttributes>
+//   Reads the file from disk, base64-encodes it, sends one vision
+//   call with a strict JSON schema. Resolves to ImageAttributes.
+//   Throws on: file-not-found, >8MB image, model non-vision-capable,
+//   30s timeout. Rejects with { code, message }.
+
+async function irAnalyzeImage(imagePath) { ... }
+
+// irCompareImages(reference: ImageAttributes,
+//                  generated: ImageAttributes,
+//                  opts?: { model?: string })
+//              -> Promise<Mismatch[]>
+//   Single vision call that receives both structured analyses AS TEXT
+//   (already-extracted JSON) plus a fresh vision pass over both
+//   images. Returns Mismatch[]. Throws on timeout / parse failure.
+
+// irRevisePrompt(currentPrompt: string,
+//                mismatches: Mismatch[],
+//                opts?: { model?: string })
+//            -> Promise<string>            // the revised prompt
+//   Single text call. Returns a prompt ≤ MAX_FINAL_PROMPT_LENGTH
+//   that addresses every mismatch in Mismatch[]. Throws on timeout
+//   / oversize / empty.
+```
+
+### A3 — Wire to the existing chat subsystem
+
+- **Attachment selection:** a new helper `resolveAnalyzeImages(session)`
+  on `server.js` reads the manifest, picks the `role: 'reference'`
+  entry (or, if none, the first attachment — with a 422 error if
+  none exists) and the most recent non-reference entry (422 if
+  none exists). Both are loaded from disk via
+  `data/chat_attachments/<session_id>/<file>`.
+- **Reference-role tagging:** `markChatAttachmentAsReference(manifest,
+  attachmentId)` sets `entry.role = 'reference'` on exactly one entry
+  and clears it on all others. Atomic on `_manifest.json`.
+- **Assistant message shape:** same envelope as SPEC §22 / SPEC §24.
+  `{ id, role:'assistant', content, suggested_prompt, audit:
+  { kind:'ir_iteration', iteration_index, mismatches,
+  reference_attachment_id, generated_attachment_id,
+  latency_ms: { analyze, compare, revise } }, timestamp }`.
+  Streaming in-flight indicator per SPEC §24.
+- **Iteration cap:** server reads `session.ir_iteration_count`
+  (default 0), increments after a successful analyze, returns 409
+  on the 9th call.
+- **Anchor preservation:** `validatePromptPreservation` (ADR 0012)
+  runs on the revised prompt before it is emitted. If preservation
+  fails, the assistant message is appended with
+  `audit.declined_partial_prompt = revised` and a follow-up note —
+  the same fallback pattern as SPEC §22 partial-apply decline.
+
+### A4 — Frontend wire
+
+- `#chat-analyze-generated-btn` lives in the chat input bar (HTML,
+  ~12 LOC).
+- `#chat-ir-counter` shows `N / 8` next to the button; disabled
+  state mirrors server-side cap.
+- `app.onAnalyzeGeneratedClick()` in `src/app.js`:
+  1. Read attachment manifest for current session.
+  2. POST to the route.
+  3. Stream in-flight per SPEC §24.
+  4. On response, render the assistant message with
+     `Mismatch[]` as inline diff (SPEC §22 pattern).
+  5. Increment the counter locally (server is source of truth).
+- `src/shell.js` wires the button + counter visibility (button
+  hidden when 0 attachments, disabled at 8).
+
+### A5 — Error UX
+
+| Failure | Server returns | Client behavior |
+|---|---|---|
+| No reference uploaded | 422 `{ error: "Upload a reference image first (the original)." }` | Inline error in the input bar |
+| No generated uploaded | 422 `{ error: "Upload a generated image first." }` | Inline error |
+| Only one image uploaded (same as above) | 422 | Inline error |
+| Iteration cap reached | 409 `{ error: "Iteration cap (8) reached for this session. Adjust the prompt manually or start a new session." }` | Counter pill turns red, button stays disabled |
+| MiniMax timeout (analyze) | 504 `{ error: "Image analysis timed out. Try a smaller image." }` | Inline error, counter NOT incremented |
+| MiniMax timeout (compare / revise) | 504 | Same |
+| Anchor preservation declined | 200 `{ data: session, declined: true, declined_partial_prompt, declined_missing_terms }` | Inline note "Revision declined — too much original context would have been lost." Mirrors SPEC §22 partial-apply decline UX exactly. |
+| `validatePromptPreservation` not exported (defensive — it always is, but if the module is renamed in the future the route must not crash) | 200 with the revised prompt (skip the check) | Inline warning, log to console |
+
+### A6 — Performance budget (per IR-6 commitment)
+
+```
+irAnalyzeImage       ≤ 15s (timeout: 18s hard, 504 on timeout)
+irCompareImages      ≤ 15s (timeout: 18s hard, 504 on timeout)
+irRevisePrompt       ≤ 10s (timeout: 12s hard, 504 on timeout)
+                     ─────
+end-to-end budget    ≤ 45s p95, 90s hard
+```
+
+Latency is instrumented: each module returns its duration on the
+response (`latency_ms.{analyze,compare,revise}` on the assistant
+message audit). p95 measured in the IR-6 smoke script.
+
+### A7 — Privacy / data-handling notes
+
+- Images leave the user's machine once per analyze call (the two
+  attachments are sent to MiniMax as base64 image_url content).
+  The user is already trusting MiniMax with the original uploaded
+  image on Create; the IR loop is the same trust boundary, no
+  wider.
+- No new on-disk state beyond `session.ir_iteration_count` and
+  the optional `role` field on attachment manifest entries. No
+  `ir_*.json` files. No telemetry.
+- The `Mismatch[]` lives only on the assistant message in the
+  session. Deleting the session deletes it. Same lifetime as all
+  chat content.
+
+### A8 — Why this is small
+
+- **Three modules, ~50 LOC each.** Each is a thin shell over one
+  MiniMax call with a JSON schema. Pattern mirrors the existing
+  per-field vision calls (texture, lighting, etc.).
+- **One new route, ~80 LOC.** Mirrors the existing
+  `POST /api/chat/sessions/:id/messages` route's validation shape.
+- **Reuses `validatePromptPreservation`** — same ADR 0012 helper
+  the rest of chat uses for anchor preservation.
+- **Reuses the SPEC §24 streaming in-flight indicator** — no new
+  client-side infrastructure.
+- **Reuses the SPEC §22 inline-diff rendering** for `Mismatch[]`.
+
+Total server.js delta: ~260 LOC. Total frontend delta: ~100 LOC
+(HTML 25, CSS 5, shell.js 30, app.js 40). Total tests: ≥23.

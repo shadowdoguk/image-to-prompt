@@ -291,6 +291,9 @@
     chatAttachBtn: $('chat-attach-btn'),
     chatAttachInput: $('chat-attach-input'),
     chatPendingAttachments: $('chat-pending-attachments'),
+    // SPEC §28 / IR-1 — Analyze Generated Image wire
+    chatAnalyzeGeneratedBtn: $('chat-analyze-generated-btn'),
+    chatIrCounter: $('chat-ir-counter'),
     // CR-3 — inline working-prompt editor
     chatWorkingPrompt: $('chat-working-prompt'),
     chatWorkingPromptText: $('chat-working-prompt-text'),
@@ -4749,6 +4752,54 @@
   // destructive bulk action. SPEC §27 A3.
   window.__i2pClearChatHistory = onChatHistoryCleared;
 
+  // SPEC §28 / IR-1 — onAnalyzeGeneratedClick handler. Thin wire:
+  // validates session, POSTs to the new route, renders the assistant
+  // message + Mismatch[] inline, mirrors the iteration counter
+  // locally. Hoisted to module scope so the window hook (below) and
+  // the click-listener (above) can both reference it.
+  const onAnalyzeGeneratedClick = async () => {
+    if (!state.chatSessionId) {
+      setChatFormStatus('Open a chat session first.', true);
+      return;
+    }
+    const btn = dom.chatAnalyzeGeneratedBtn;
+    if (!btn) return;
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    setChatFormStatus('Analyzing generated image…', false);
+    try {
+      const r = await fetch(`/api/chat/sessions/${state.chatSessionId}/analyze-generated`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const json = await r.json();
+      if (!r.ok || !json.success) {
+        setChatFormStatus(json.error || 'Analyze failed.', true);
+        return;
+      }
+      // Refresh local session from the response so the message
+      // + ir_iteration_count are authoritative.
+      const idx = state.chatSessions.findIndex((s) => s.id === state.chatSessionId);
+      if (idx >= 0) state.chatSessions[idx] = json.data.session;
+      setChatFormStatus(`Iteration ${json.data.ir_iteration_count}/8 complete.`, false);
+      // Re-render chat so the new assistant message + Mismatch[]
+      // appear inline.
+      if (typeof renderChatMessages === 'function') {
+        renderChatMessages(state.chatSessions[idx] || json.data.session);
+      }
+    } catch (err) {
+      setChatFormStatus('Analyze failed: ' + (err && err.message ? err.message : 'network error'), true);
+    } finally {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+    }
+  };
+
+  // Expose for shell.js (Analyze button + counter visibility wiring).
+  // SPEC §28 / IR-1.
+  window.__i2pAnalyzeGenerated = onAnalyzeGeneratedClick;
+
   // ─── CR-2 — chat attachment helpers ────────────────────────────────
 
   /**
@@ -6657,6 +6708,13 @@
           if (state.chatPendingAttachmentIds.length >= 4) break;
         }
       });
+    }
+
+    // SPEC §28 / IR-1 — wire the Analyze Generated Image button to the
+    // hoisted handler below. The handler itself lives at module scope
+    // so it can be exposed on window.__i2pAnalyzeGenerated.
+    if (dom.chatAnalyzeGeneratedBtn) {
+      dom.chatAnalyzeGeneratedBtn.addEventListener('click', onAnalyzeGeneratedClick);
     }
 
     // Copy the current working prompt to the clipboard. Mirrors the

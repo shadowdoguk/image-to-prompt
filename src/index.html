@@ -429,6 +429,15 @@
               </button>
               <input type="file" id="chat-attach-input" accept="image/png,image/jpeg,image/webp" hidden multiple />
               <span id="chat-form-status" class="chat-form-status" role="status" aria-live="polite"></span>
+              <!-- SPEC §28 / IR-1 — Analyze Generated Image button.
+                   Hidden until ≥ 2 chat attachments exist (see shell.js);
+                   disabled when the iteration cap (8) is hit. The first
+                   uploaded attachment is the reference image; subsequent
+                   uploads are the "generated image" to compare against it. -->
+              <button type="button" id="chat-analyze-generated-btn" class="btn-secondary chat-analyze-generated-btn" aria-label="Analyze Generated Image" title="Compare the most recently uploaded image against the original reference and suggest a revised prompt" hidden>
+                <span class="btn-text">Analyze Generated Image</span>
+              </button>
+              <span id="chat-ir-counter" class="chat-ir-counter" aria-live="polite" title="Iterative refinement iterations this session (cap: 8)" hidden>0 / 8</span>
               <button type="submit" id="chat-send-btn" class="btn-primary">
                 <span class="btn-text">Send</span>
                 <span class="btn-spinner" hidden aria-hidden="true"></span>

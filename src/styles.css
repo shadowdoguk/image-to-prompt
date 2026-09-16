@@ -3923,6 +3923,29 @@ body {
   filter: brightness(1.1);
 }
 
+/* SPEC §28 / IR-1 — Analyze Generated Image button + counter pill.
+   The button uses the existing .btn-secondary class for its base style;
+   this rule scopes the disabled state to the IR variant so the rest of
+   .btn-secondary is unaffected. The counter is a small monospace pill
+   so it stays legible next to the chat-form-status line. */
+.chat-analyze-generated-btn[aria-busy="true"],
+.chat-analyze-generated-btn[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.chat-ir-counter {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  color: var(--text-dim, #888);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: var(--radius, 6px);
+  user-select: none;
+}
+
 /* Live-reply placeholder: a translucent assistant message that fills
    in as the stream emits deltas. Visually distinct from a final
    message so the user knows the response is still in progress. */

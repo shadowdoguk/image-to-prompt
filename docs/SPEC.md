@@ -1565,3 +1565,224 @@ The chat history is server-authoritative. All sessions live in `data/chat_sessio
 - `src/index.html` lines 513–580 — the existing Settings view layout (panel order: Defaults, System prompts).
 - `src/shell.js` lines 320–367 — the existing focus-trap infrastructure (modals are auto-trapped).
 - `docs/CODE-REVIEW-UI-R4-chat-settings.md` §Deviations — the prior decision on Settings scope ("resists accretion") that this slice deliberately overrides per G1.
+
+## §28 — Iterative refinement: "Analyze Generated Image" in Chat (slice series IR)
+
+**Status:** SPEC complete (Gate G2 approved, G3 follows).
+
+**Why now.** The chat tab is where users iterate on a working prompt (per
+ADR 0011 / 0011a / 0012). Today the loop is: user describes what they
+want changed in natural language → assistant suggests a `suggested_prompt`
+→ user hits Apply → manually regenerates the image elsewhere → looks at
+it → comes back to chat and describes the next change. The new loop
+collapses that round-trip: upload the reference image and the most
+recently-generated image, click **Analyze Generated Image**, the
+system does the describing-the-change step itself and emits a
+revised `suggested_prompt` the user can Apply directly.
+
+### Behaviour (locked at G1 under full autonomy).
+
+1. The user uploads **two** images as chat attachments in the current
+   chat session:
+   - **Reference image** — the original image the working prompt is
+     meant to match. Uploaded once at the start of a refinement run
+     (or any time before the first click). On first upload the
+     attachment is tagged `role: 'reference'` in its manifest entry.
+     Subsequent reference uploads to the same session overwrite the
+     tag (only one reference at a time).
+   - **Generated image** — the most recent image produced by the
+     user's image-generation tool from the session's `current_prompt`.
+     Uploaded fresh on every iteration. The most recently uploaded
+     attachment that is **not** the reference is the "current
+     generated image".
+2. The user clicks **Analyze Generated Image** in the chat input bar.
+3. The server runs three steps in sequence (each is its own module,
+   each has its own tests, each is a thin wire over a single MiniMax
+   M3 vision call):
+   - **IR-Analyze** — produces a structured `ImageAttributes` JSON for
+     each image: subjects, style, palette, composition, notable
+     objects, text, aesthetic qualities.
+   - **IR-Compare** — diffs the two `ImageAttributes` JSONs (LLM-
+     judged) and emits a `Mismatch[]` list with
+     `{ dimension, severity ('low'|'med'|'high'), generated_value,
+     reference_value, suggested_fix }`.
+   - **IR-Revise** — takes `current_prompt` + the `Mismatch[]` and
+     emits a revised prompt string. The revised prompt is the new
+     `suggested_prompt` on an assistant message; it goes through the
+     existing Apply → `current_prompt` flow unchanged.
+4. The assistant message carrying the `suggested_prompt` is tagged
+   `audit.kind = 'ir_iteration'` with the `Mismatch[]` embedded so
+   the user can see *why* the prompt changed.
+5. The iteration counter (`ir_iteration_count`) on the session tracks
+   how many times Analyze has been clicked. Hard cap: **8 iterations
+   per session**. Cap is enforced server-side; 9th call returns 409
+   with a clear "iteration cap reached, adjust manually" message.
+6. Compatibility: every existing chat refinement workflow
+   (refine via chat Apply, anchor-preservation validation per ADR 0012,
+   prompt-budget overflow handling, attachment serving, partial apply
+   per SPEC §22) keeps working. The new feature adds three new routes
+   and one new audit kind; it does not modify existing handlers.
+7. Errors:
+   - Image upload failures → 400 with `{ success:false, error }` from
+     the existing chat-attachment handler. Client shows the same
+     inline error pattern other chat attachments use.
+   - Analysis timeouts → 30s per step, 90s total budget. Timeout
+     → 504 with a "the model took too long; try a smaller reference
+     image or fewer attachments" message. No silent retries.
+   - Unsupported image formats → already gated by the existing
+     multer filter (JPG/PNG/WebP only). The Analyze route itself
+     re-checks the manifest MIME before fetching bytes.
+   - "No reference uploaded" / "No generated uploaded" / "Only one
+     image uploaded" → 422 with a one-line hint pointing to the
+     input bar upload control.
+8. Performance budget:
+   - Analyze step: ≤ 15s (single vision call).
+   - Compare step: ≤ 15s (single vision call).
+   - Revise step: ≤ 10s (single text call).
+   - Total end-to-end (button click → assistant message in transcript):
+     ≤ 45s p95, ≤ 90s hard timeout. The chat transcript shows a
+     live in-flight indicator (aria-busy) per SPEC §24 streaming.
+9. Multi-iteration: each iteration is independent; the prior
+   `Mismatch[]` is preserved on the previous assistant message and
+   is **not** fed back into the next iteration's prompt (we always
+   compare current generated image vs. the original reference, not
+   vs. the last iteration). This prevents compounding prompt drift.
+
+### Slice plan (vertical, blocked-by graph, 1-3h each).
+
+| # | Slice | Blocked by | What it ships |
+|---|---|---|---|
+| IR-1 | Wire + stub | — | Button + `POST /api/chat/sessions/:id/analyze-generated` returning a hard-coded stub `{ mismatches:[...], revised_prompt:"..." }`; assistant message + audit stub; chat input bar wiring; iteration counter (always 0 in stub); 4 unit tests; browser demo |
+| IR-2 | IR-Analyze module | IR-1 | Real MiniMax vision call → `ImageAttributes` JSON; module-level unit tests with captured-vision-call fixture (no live LLM in CI); route returns `{ reference_attributes, generated_attributes }` |
+| IR-3 | IR-Compare module | IR-2 | Second MiniMax call → `Mismatch[]`; structured JSON schema; unit tests with fixture pairs (palette-mismatch, subject-mismatch, no-mismatch); route returns the full `{ reference_attributes, generated_attributes, mismatches }` |
+| IR-4 | IR-Revise module | IR-3 | Third call → revised prompt string passing through `validatePromptPreservation` (ADR 0012) before emission; unit tests prove the revised prompt preserves anchors and stays ≤ MAX_FINAL_PROMPT_LENGTH; route returns the full `{ mismatches, revised_prompt }` and appends the assistant message |
+| IR-5 | Iteration cap + error envelope | IR-4 | Server-side 8-iteration cap on `session.ir_iteration_count`; client counter visible in the input bar; full error envelope (400/422/504/409); the 5 error-path unit tests |
+| IR-6 | Perf hardening + cross-browser / e2e | IR-5 | Latency instrumentation around each of the 3 MiniMax calls; per-step timeouts (15/15/10s); total budget (90s); regression smoke script `scripts/smoke/ir-loop-smoke.js` (3 iterations on a captured fixture pair); cross-browser e2e (chromedevtools); manual demo + screenshot |
+| IR-7 | Docs | IR-6 | README "Iterative refinement" section; `docs/API.md` (new) documenting the 3 internal modules + the 1 new endpoint; SESSION-STATE outcome + slice tracker rows; POLISH-AUDIT; final G5 ship verdict |
+
+**Total: 7 slices, additive, no modification of existing handlers.**
+
+### File touch-points.
+
+- `server.js` — append (1) three module exports: `irAnalyzeImage`,
+  `irCompareImages`, `irRevisePrompt`; (2) one route:
+  `POST /api/chat/sessions/:id/analyze-generated`; (3) one manifest
+  helper: `markChatAttachmentAsReference` (sets `role: 'reference'`
+  on the manifest entry). Roughly +260 lines, well under the
+  9745 → 10500 boundary. No existing handler is touched.
+- `data/chat_attachments/_manifest.json` — gains an optional `role`
+  field per entry. Existing entries default to `null` (no role).
+  Backwards-compatible: the manifest reader ignores the new field.
+- `src/index.html` — chat input bar: a new button
+  `#chat-analyze-generated-btn` (renders only when ≥ 1 attachment is
+  present, disabled when the cap is hit), a counter pill
+  `#chat-ir-counter` showing `N / 8`, and an upload helper label
+  clarifying "First upload = reference image (the original);
+  every later upload = the new generated image."
+- `src/app.js` — new handler `onAnalyzeGeneratedClick` that POSTs
+  to the route, streams the assistant message in-flight per SPEC
+  §24, renders the `Mismatch[]` as an inline diff on the assistant
+  message (per SPEC §22 inline-diff pattern).
+- `src/shell.js` — wires the button + counter; focus-trap-aware
+  (the button participates in the input-bar focus order naturally).
+- `src/styles.css` — minimal: counter pill + danger-outline button
+  inherit existing classes (mirrors Slice 27's clear-history button).
+- `tests/run-all.js` — append: IR-1 (4 tests), IR-2 (5 tests with
+  captured fixture), IR-3 (4 tests), IR-4 (5 tests), IR-5 (5 tests),
+  IR-6 (regression suite for existing chat Apply / anchor /
+  partial-apply / attachment-serve). 23 new tests minimum; baseline
+  589 + 23 = 612.
+- `scripts/smoke/ir-loop-smoke.js` — new smoke, mirrors
+  `texture-ai-button-smoke.js` shape.
+- `docs/API.md` — new file, documents `POST
+  /api/chat/sessions/:id/analyze-generated` (request/response shape,
+  error envelope, latency budgets) and the three module exports
+  (`irAnalyzeImage`, `irCompareImages`, `irRevisePrompt`).
+
+### DoD (per slice).
+
+Per-slice DoD follows the project's established pattern (test first,
+demo in browser, two-axis code-review with verdict `pass` or
+`pass+minor`, then commit; `docs/CODE-REVIEW-IR-N-slice.md`).
+Gate G5 verdict `pass` after IR-7 lands and `docs/POLISH-AUDIT-IR.md`
+ships with 0 blocking findings.
+
+### Glossary (new terms).
+
+- **Reference image** — the chat attachment marked `role: 'reference'`
+  on its manifest entry; the original image the working prompt is
+  meant to match. Exactly one per chat session.
+- **Generated image (current)** — the most recently uploaded chat
+  attachment in the session whose `role` is not `reference`. The
+  image produced by the user's image-generation tool from the
+  session's `current_prompt`. Refreshed every iteration.
+- **Iteration** — one click of Analyze Generated Image that
+  produces a revised `suggested_prompt`. Each iteration emits one
+  assistant message tagged `audit.kind = 'ir_iteration'`.
+- **ImageAttributes** — structured JSON produced by `irAnalyzeImage`:
+  `{ subjects[], style, palette[], composition, objects[], text?,
+  aesthetic }`. The schema is locked at IR-2.
+- **Mismatch** — one entry in the `Mismatch[]` produced by
+  `irCompareImages`: `{ dimension, severity, generated_value,
+  reference_value, suggested_fix }`. `dimension` ∈ { `subjects`,
+  `style`, `palette`, `composition`, `objects`, `text`, `aesthetic` }.
+- **ir_iteration_count** — counter on the chat session object
+  (`session.ir_iteration_count`), incremented server-side per
+  successful Analyze call. Capped at 8.
+
+### Kill criteria (locked at G2).
+
+- **K1.** If IR-3's `Mismatch[]` accuracy (judged against a small
+  captured fixture pair) is below 60% agreement with a human rater
+  on 3 sample pairs, the slice does not merge; we either redesign
+  the schema or kill the feature. **Set at G2.**
+- **K2.** If end-to-end p95 latency exceeds 90s on 3 real runs at
+  IR-6, we don't ship the multi-iteration feature — single-shot
+  Analyze is the fallback. **Set at G2.**
+- **K3.** If the existing 589-test regression suite fails any time
+  during IR-1…IR-6, that slice does not merge. The new feature is
+  additive; existing chat must not break. **Set at G2.**
+
+### Out of scope (deliberately).
+
+- A new provider. MiniMax M3 vision stays the only model used.
+- Persistent storage of `Mismatch[]` across sessions. The mismatch
+  report lives on the assistant message in the session; if the
+  session is deleted, the report is gone (mirrors existing chat
+  message lifetime).
+- A visual diff UI (side-by-side image thumbnails in the
+  transcript). The reference + generated images are already
+  rendered as existing chat-attachment thumbnails; no new layout.
+- Automatic re-generation. The user takes the revised `suggested_prompt`
+  back to their image-gen tool themselves. (Mirrors the existing
+  Apply flow — Apply updates the prompt, the user re-runs the
+  generator.)
+- Cross-session iteration memory. Iteration counters and `Mismatch[]`
+  reports are per-session. Closing the chat session resets.
+- Adjustable iteration cap. 8 is locked at G2.
+
+### References.
+
+- ADR 0011 — chat subsystem; ADR 0011a — reliability fixes;
+  ADR 0012 — anchor-preserving chat refinements (the
+  `validatePromptPreservation` invariant the revised prompt must
+  pass through).
+- SPEC §19 — Chat fluid iteration; SPEC §22 — inline diff on Apply
+  (the rendering pattern reused for `Mismatch[]` display);
+  SPEC §23 — bounded AI autonomy (CR-A8); SPEC §24 — streaming
+  responses (in-flight indicator reused).
+- `server.js` line 896 — chat attachment multer config; line 8776
+  — `POST /api/chat/sessions`; line 9574 — `apply/:messageId`;
+  line 9866 — `POST /api/chat/sessions/:id/attachments`.
+- `src/app.js` — existing chat input bar wiring; SPEC §24
+  streaming pattern.
+
+---
+
+## Change Log
+
+- §28 added 2026-09-16 — iterative refinement: "Analyze Generated Image"
+  in Chat. 7 vertical slices (IR-1…IR-7), additive, locked kill
+  criteria K1/K2/K3, locked iteration cap 8, locked provider
+  (existing MiniMax M3 vision), locked references (existing
+  chat attachment system + ADR 0012 anchor-preservation).

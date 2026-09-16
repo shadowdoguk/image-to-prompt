@@ -11496,14 +11496,15 @@ test('UI-R8 static: server registers GET / POST / PUT / DELETE for /api/notes', 
   assertTrue(src.includes("path.join(DATA_DIR, 'notes.json')"), 'NOTES_FILE path missing');
 });
 
-test('UI-R8 + UI-R9 + SPEC §27: notes + chat-clear endpoint count matches', () => {
+test('UI-R8 + UI-R9 + SPEC §27 + SPEC §28: notes + chat-clear + IR endpoint count matches', () => {
   const src = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   const matches = src.match(/^app\.(get|post|put|patch|delete)\(/gm) || [];
   // 65 after UI-R8 (60 pre-existing + 5 notes endpoints).
   // UI-R9 adds 9 more (4 folders + 1 move + 4 attachments).
   // SPEC §27 adds 2 more (GET count + DELETE bulk).
-  // Total target: 76.
-  assertEqual(matches.length, 76, `expected 76 endpoints after SPEC §27; got ${matches.length}`);
+  // SPEC §28 / IR-1 adds 1 more (POST analyze-generated).
+  // Total target: 77.
+  assertEqual(matches.length, 77, `expected 77 endpoints after SPEC §28 IR-1; got ${matches.length}`);
 });
 
 // ─── Bugfix CR-16: Analyze Image button silent failure (2026-09-04) ───
@@ -13072,5 +13073,237 @@ test('SPEC §27: cleanup — restore chat_sessions.json to pre-slice state', () 
       }
     }
   }
+  assertTrue(true, 'cleanup marker');
+});
+
+// ─── SPEC §28 / IR-1 — Iterative refinement: Analyze Generated Image (wire + stub) ───
+
+// IR-1 ships the smallest end-to-end demoable piece:
+//  - chat input bar gets a button + counter
+//  - one new server route POST /api/chat/sessions/:id/analyze-generated
+//  - the route returns a hard-coded stub { mismatches:[...], revised_prompt:"..." }
+//  - appends an assistant message with audit.kind='ir_iteration'
+//  - validates session + ≥2 attachments
+//
+// Subsequent slices (IR-2, IR-3, IR-4) replace the stub with three real
+// MiniMax vision calls. The stub at IR-1 is intentionally not a "real"
+// analyzer — it returns one example mismatch and a revised prompt
+// that the user can Apply. The wire proves end-to-end.
+
+// Reuse the 1×1 transparent PNG fixture from CR-2 above.
+const SPEC28_PNG_BUFFER = CR2_PNG_BUFFER;
+
+// Shared helper: upload one PNG to a session and return its attachment id.
+const uploadPngHelper = async (server, sessionId, filename = 'ir-test.png') => {
+  const port = server.address().port;
+  const fd = new FormData();
+  fd.append('image', new Blob([SPEC28_PNG_BUFFER], { type: 'image/png' }), filename);
+  const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/attachments`, {
+    method: 'POST',
+    body: fd
+  });
+  if (!r.ok) throw new Error(`upload failed: ${r.status} ${await r.text()}`);
+  const json = await r.json();
+  return json.data.id;
+};
+
+test('SPEC §28 IR-1: server.js exports the three IR module stubs', () => {
+  const text = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The three module exports are the seam for IR-2 / IR-3 / IR-4.
+  // At IR-1 they exist as stubs; subsequent slices swap in real
+  // MiniMax vision calls.
+  assertTrue(/module\.exports\.irAnalyzeImage\s*=/.test(text) ||
+             /exports\.irAnalyzeImage\s*=/.test(text) ||
+             /(?:async\s+)?function\s+irAnalyzeImage\b/.test(text),
+    'server.js must export irAnalyzeImage (stub at IR-1)');
+  assertTrue(/module\.exports\.irCompareImages\s*=/.test(text) ||
+             /exports\.irCompareImages\s*=/.test(text) ||
+             /(?:async\s+)?function\s+irCompareImages\b/.test(text),
+    'server.js must export irCompareImages (stub at IR-1)');
+  assertTrue(/module\.exports\.irRevisePrompt\s*=/.test(text) ||
+             /exports\.irRevisePrompt\s*=/.test(text) ||
+             /(?:async\s+)?function\s+irRevisePrompt\b/.test(text),
+    'server.js must export irRevisePrompt (stub at IR-1)');
+});
+
+test('SPEC §28 IR-1: server.js registers POST /api/chat/sessions/:id/analyze-generated', () => {
+  const text = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/app\.post\(\s*'\/api\/chat\/sessions\/:id\/analyze-generated'/.test(text) ||
+             /app\.post\(\s*['"`]\/api\/chat\/sessions\/[^'"`]*analyze-generated['"`]/.test(text),
+    'analyze-generated POST route registered');
+});
+
+test('SPEC §28 IR-1: 422 when session has no attachments', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    const port = server.address().port;
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/analyze-generated`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    assertEqual(r.status, 422, 'no attachments returns 422');
+    const json = await r.json();
+    assertEqual(json.success, false, 'success=false');
+    assertTrue(typeof json.error === 'string' && json.error.length > 0,
+      'error message is non-empty');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §28 IR-1: 422 when only one attachment (reference, no generated)', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    await uploadPngHelper(server, sessionId);
+    const port = server.address().port;
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/analyze-generated`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    assertEqual(r.status, 422, 'only one attachment returns 422');
+    const json = await r.json();
+    assertEqual(json.success, false, 'success=false');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §28 IR-1: 200 with stub mismatches + assistant message on 2 attachments', async () => {
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    // Upload two PNGs — first becomes the reference, second is "generated".
+    await uploadPngHelper(server, sessionId, 'reference.png');
+    await uploadPngHelper(server, sessionId, 'generated.png');
+    const port = server.address().port;
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/analyze-generated`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    assertEqual(r.status, 200, `analyze-generated returns 200, got ${r.status}`);
+    const json = await r.json();
+    assertEqual(json.success, true, 'success=true');
+    assertTrue(Array.isArray(json.data.mismatches), 'mismatches is an array');
+    assertTrue(json.data.mismatches.length >= 1, 'stub returns ≥1 mismatch');
+    assertTrue(typeof json.data.revised_prompt === 'string' &&
+              json.data.revised_prompt.length > 0,
+      'revised_prompt is a non-empty string');
+    // The assistant message was appended with audit.kind='ir_iteration'.
+    assertTrue(json.data.session && Array.isArray(json.data.session.messages),
+      'session + messages returned');
+    const lastMsg = json.data.session.messages[json.data.session.messages.length - 1];
+    assertEqual(lastMsg.role, 'assistant', 'last message is assistant');
+    assertTrue(lastMsg.audit && lastMsg.audit.kind === 'ir_iteration',
+      'audit.kind === ir_iteration');
+    assertTrue(typeof lastMsg.suggested_prompt === 'string' &&
+              lastMsg.suggested_prompt.length > 0,
+      'assistant message carries suggested_prompt');
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §28 IR-1: src/index.html — Analyze Generated Image button + counter in chat-form__actions', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'index.html'), 'utf8');
+  assertTrue(html.includes('id="chat-analyze-generated-btn"'),
+    '#chat-analyze-generated-btn present');
+  assertTrue(html.includes('id="chat-ir-counter"'),
+    '#chat-ir-counter present');
+  // The counter shows N / 8 (locked at G2).
+  assertTrue(/chat-ir-counter[\s\S]{0,200}0\s*\/\s*8/.test(html) ||
+             /0\s*\/\s*8[\s\S]{0,200}chat-ir-counter/.test(html),
+    'counter displays "0 / 8"');
+  // The button text mentions what it does (a11y).
+  assertTrue(/Analyze Generated Image/i.test(html),
+    'button is labelled "Analyze Generated Image"');
+  // Counter + button live inside the chat form's actions.
+  const formStart = html.indexOf('id="chat-form"');
+  const formEnd = html.indexOf('</form>', formStart);
+  const formChunk = html.slice(formStart, formEnd);
+  assertTrue(formChunk.includes('chat-analyze-generated-btn'),
+    'button is inside the chat form');
+  assertTrue(formChunk.includes('chat-ir-counter'),
+    'counter is inside the chat form');
+});
+
+test('SPEC §28 IR-1: src/app.js — onAnalyzeGeneratedClick handler + window hook', () => {
+  const app = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'app.js'), 'utf8');
+  assertTrue(app.includes('onAnalyzeGeneratedClick'),
+    'onAnalyzeGeneratedClick function defined');
+  // Posts to the new endpoint.
+  assertTrue(/['"`]\/api\/chat\/sessions\/[^'"`]*analyze-generated['"`]/.test(app),
+    'handler posts to /api/chat/sessions/:id/analyze-generated');
+  // Window hook exported for shell.js to invoke.
+  assertTrue(/window\.__i2pAnalyzeGenerated\s*=/.test(app) ||
+             /window\.app\s*=\s*\{[\s\S]*onAnalyzeGeneratedClick/.test(app),
+    'window.__i2pAnalyzeGenerated hook exported');
+  // Disabled-when-busy + a11y aria-busy.
+  assertTrue(/chatAnalyzeGeneratedBtn/.test(app) ||
+             /chat-analyze-generated-btn/.test(app),
+    'handler references the button DOM');
+});
+
+test('SPEC §28 IR-1: src/shell.js — wires Analyze Generated Image button + counter', () => {
+  const shell = fs.readFileSync(path.join(PROJECT_ROOT, 'src', 'shell.js'), 'utf8');
+  assertTrue(shell.includes("'chat-analyze-generated-btn'"),
+    'shell.js looks up the button');
+  assertTrue(shell.includes("'chat-ir-counter'"),
+    'shell.js looks up the counter');
+  // Counter is updated after each successful Analyze (textContent
+  // assignment somewhere in the IR block).
+  assertTrue(/textContent\s*=\s*[`'"][^`'"]*\/\s*8/.test(shell),
+    'counter textContent assignment present (N / 8)');
+  // The button click is wired to the handler hook.
+  assertTrue(/chat-analyze-generated-btn[\s\S]{0,400}addEventListener/.test(shell) ||
+             /addEventListener[\s\S]{0,400}chat-analyze-generated-btn/.test(shell),
+    'button click is wired');
+  // bindAnalyzeGenerated is called from init.
+  assertTrue(/bindAnalyzeGenerated\(\)/.test(shell),
+    'bindAnalyzeGenerated() invoked in init');
+});
+
+test('SPEC §28 IR-1: SPEC §28 / docs/SPEC.md cross-references are present', () => {
+  const spec = fs.readFileSync(path.join(PROJECT_ROOT, 'docs', 'SPEC.md'), 'utf8');
+  assertTrue(/##\s*§28/.test(spec), 'SPEC §28 heading');
+  assertTrue(/Analyze Generated Image/.test(spec), 'SPEC §28 names the feature');
+  assertTrue(/analyze-generated/.test(spec), 'SPEC §28 names the endpoint');
+  assertTrue(/ir_iteration_count/.test(spec), 'SPEC §28 names the iteration counter');
+  // Architecture + pre-mortem also landed.
+  const arch = fs.readFileSync(path.join(PROJECT_ROOT, 'docs', 'ARCHITECTURE.md'), 'utf8');
+  assertTrue(/##\s*§28/.test(arch), 'ARCH §28 heading');
+  const pm = fs.readFileSync(path.join(PROJECT_ROOT, 'docs', 'PRE-MORTEM.md'), 'utf8');
+  assertTrue(/##\s*§28/.test(pm), 'PRE-MORTEM §28 heading');
+  // CONTEXT.md gained the IR glossary.
+  const ctx = fs.readFileSync(path.join(PROJECT_ROOT, 'CONTEXT.md'), 'utf8');
+  assertTrue(/IR series glossary/.test(ctx), 'CONTEXT.md has IR series glossary');
+  assertTrue(/Reference image/.test(ctx), 'CONTEXT.md defines Reference image');
+  assertTrue(/ir_iteration_count/.test(ctx), 'CONTEXT.md defines ir_iteration_count');
+});
+
+test('SPEC §28 IR-1: cleanup — sweep any IR-1 fixtures left in the chat attachments dir', () => {
+  // Defensive cleanup matching the SPEC §27 pattern. Runs last so a
+  // partial test failure doesn't leak IR-1 attachments into the
+  // user's data dir.
+  const spec28AttachmentsDir = path.join(PROJECT_ROOT, 'data', 'chat_attachments');
+  if (fs.existsSync(spec28AttachmentsDir)) {
+    for (const name of fs.readdirSync(spec28AttachmentsDir)) {
+      if (name.startsWith('chat_')) {
+        try {
+          fs.rmSync(path.join(spec28AttachmentsDir, name), { recursive: true, force: true });
+        } catch (_) { /* best-effort */ }
+      }
+    }
+  }
+  // chat_sessions.json remains untouched (the test session was a
+  // throwaway in-memory; sessions created via createChatSessionHelper
+  // are written via the live route and may have been deleted already).
   assertTrue(true, 'cleanup marker');
 });

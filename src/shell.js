@@ -1113,6 +1113,35 @@
     }
   };
 
+  // ─── SPEC §28 / IR-1 — Analyze Generated Image wire ─────────────────────
+  // The button is hidden until ≥ 1 attachment is uploaded (server-side
+  // 422 enforces ≥2). The counter shows N / 8 (locked at G2) and is
+  // updated after every successful Analyze. The handler itself lives
+  // in app.js and is exposed on window.__i2pAnalyzeGenerated.
+  const bindAnalyzeGenerated = () => {
+    const btn = $('chat-analyze-generated-btn');
+    const counter = $('chat-ir-counter');
+    if (!btn || !counter) return;
+    btn.addEventListener('click', () => {
+      if (typeof window.__i2pAnalyzeGenerated === 'function') {
+        window.__i2pAnalyzeGenerated();
+      } else {
+        console.warn('[analyze-generated] window.__i2pAnalyzeGenerated is not a function');
+      }
+    });
+    // Counter updates: shell.js exposes updateIrCounter(count) so
+    // app.js can call it after a successful Analyze to mirror server
+    // state without coupling to DOM lookups.
+    const updateIrCounter = (count) => {
+      const n = Math.max(0, Math.min(8, Number(count) || 0));
+      counter.textContent = `${n} / 8`;
+      counter.hidden = n === 0;
+      btn.disabled = n >= 8;
+      btn.setAttribute('aria-label', `Analyze Generated Image (${n} of 8 iterations used)`);
+    };
+    window.__i2pUpdateIrCounter = updateIrCounter;
+  };
+
   // ─── §9 Create-view extras ───────────────────────────────────────────────
 
   const updateFieldCompletion = () => {
@@ -1892,6 +1921,7 @@
     bindLibrary();
     bindSettings();
     bindNotes();
+    bindAnalyzeGenerated();
     bindCreateExtras();
 
     fetchProviders();

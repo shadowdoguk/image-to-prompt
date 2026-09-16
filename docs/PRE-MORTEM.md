@@ -573,3 +573,128 @@ Companion to SPEC §25 and ARCH §30.
 - **K-1:** If `fs.rmSync` proves unreliable on the user's platform (Windows file locking, network filesystem), fall back to `fs.rmdirSync(dir, { recursive: true })` (the older Node API) or to a recursive unlink loop. Should not happen — `fs.rmSync` is the documented modern API.
 - **K-2:** If the defensive `localStorage` sweep accidentally clears a non-chat key (false-positive regex), narrow the regex to `/^i2p\.chat/i` (chat prefix only). Mitigation is one-character.
 - **K-3:** If the bulk endpoint can't be made idempotent (e.g., concurrent clears race on the manifest write), add a per-file mutex. Should not happen — `writeChatSessions` is already atomic and the manifest write follows the same pattern.
+
+---
+
+## §28 pre-mortem — Iterative refinement: "Analyze Generated Image" in Chat (SPEC §28)
+
+### Risks
+
+- **R-1 (HIGH):** The MiniMax vision model returns a `Mismatch[]` that
+  is **wrong or fabricated**. This is a model-judged comparison,
+  not a deterministic CV pipeline. Users may apply a revised
+  prompt that moves them further from their reference.
+  *Mitigation:* every revised prompt goes through `validatePromptPreservation`
+  (ADR 0012) so non-targeted anchors cannot be silently dropped.
+  The `Mismatch[]` is rendered inline in the transcript (SPEC §22
+  inline-diff pattern) so the user can SEE the model's reasoning
+  before applying. The Apply step is still user-initiated — no
+  auto-apply. Iteration cap of 8 prevents unbounded credit burn
+  on a wrong direction.
+
+- **R-2 (HIGH):** The latency budget is blown. The three sequential
+  vision calls + one text call can easily exceed 45s on slow
+  networks. The user clicks Analyze, walks away, comes back to a
+  half-rendered transcript.
+  *Mitigation:* per-step timeouts (15/15/10s, hard 18/18/12s).
+  Streaming in-flight indicator per SPEC §24. The 504 envelope
+  returns gracefully. Smoke script `scripts/smoke/ir-loop-smoke.js`
+  measures p95 at IR-6 — if it's > 90s, we don't ship multi-iteration
+  (kill criterion K2).
+
+- **R-3 (MEDIUM):** The attachment manifest's `role` field collides
+  with a future field of the same name. *Mitigation:* the field is
+  namespaced by being optional and only ever set by
+  `markChatAttachmentAsReference`. Other write paths ignore it. A
+  test asserts that `role` round-trips through `_manifest.json`
+  without loss. If the project later needs a richer attachment
+  taxonomy, this slice is a no-op for those changes.
+
+- **R-4 (MEDIUM):** `validatePromptPreservation` declines the
+  revised prompt on first iteration because the IR-Revise module
+  rewrote it aggressively. The user sees a decline message and
+  no revised prompt to apply.
+  *Mitigation:* the IR-Revise system prompt explicitly tells the
+  model to preserve every non-targeted term from `current_prompt`.
+  The module has a unit test (IR-4 #3) that asserts the revised
+  prompt does not drop > 10% of content words from `current_prompt`
+  on a fixture. Decline path mirrors SPEC §22 partial-apply
+  decline exactly, including the user-facing explanation.
+
+- **R-5 (MEDIUM):** Concurrent Analyze calls (user double-clicks
+  the button). Two parallel runs, double credit spend.
+  *Mitigation:* button is `disabled` immediately on click (SPEC
+  §24 streaming pattern). Server-side, the route reads
+  `ir_iteration_count` then writes — if two requests interleave
+  past the cap check, the second sees `count >= 8` on its read
+  and returns 409. Race window is one read-write; we accept the
+  window (mirrors the existing chat message write race which
+  the project has accepted since Slice 26).
+
+- **R-6 (LOW):** The `imageDataUri` for an 8MB image blows the
+  MiniMax request body limit. *Mitigation:* the existing per-field
+  vision callers (texture, lighting) already enforce an 8MB cap.
+  We mirror: `fs.statSync(imagePath).size > 8 * 1024 * 1024`
+  returns 422 "Image too large; resize to under 8MB." before the
+  vision call.
+
+- **R-7 (LOW):** `data/chat_attachments/<session_id>/` doesn't
+  exist for a fresh session. *Mitigation:* the route validates
+  session existence first (404 if missing), then attachment
+  presence (422). Same pattern as the existing
+  `POST /api/chat/sessions/:id/messages` route.
+
+- **R-8 (LOW):** Cross-browser chat input-bar layout breaks (Safari
+  input bar overflow). *Mitigation:* the new button is wrapped in
+  a flex container that follows the existing chat input-bar
+  layout rules (mirrors the chat-attachment-upload button).
+  Cross-browser e2e at IR-6 covers this.
+
+- **R-9 (LOW):** The user uploads a non-image file as a "reference"
+  (multer filters JPG/PNG/WebP, but a corrupt or renamed file
+  could pass the filter). *Mitigation:* the route re-reads the
+  file with `fs.readFileSync` and validates the magic bytes
+  (PNG: `89 50 4E 47`, JPG: `FF D8 FF`, WebP: `RIFF....WEBP`)
+  before sending to the model. 415 on magic-byte mismatch.
+
+### Pre-commitments
+
+- **P-1:** Every revised prompt MUST pass `validatePromptPreservation`
+  before being emitted. A test asserts that on a fixture where the
+  model would aggressively rewrite, the route declines with the
+  standard partial-apply-decline envelope. (IR-4 #5.)
+- **P-2:** Each IR module MUST have its own unit test fixture
+  (captured MiniMax responses for analyze / compare / revise),
+  committed under `tests/fixtures/ir/` and loaded in CI without
+  network access. No live LLM calls in CI. (IR-2, IR-3, IR-4.)
+- **P-3:** `session.ir_iteration_count` MUST be incremented only
+  after a successful (non-declined) Analyze. A test asserts the
+  counter does not increment on 504 / 422 / 409 paths. (IR-5 #2.)
+- **P-4:** The 8-iteration cap MUST be enforced server-side, not
+  just client-side. A test asserts the 9th POST returns 409 even
+  when the client counter says 7. (IR-5 #1.)
+- **P-5:** The `Mismatch[]` MUST be rendered inline in the
+  transcript, visible BEFORE the user clicks Apply. A test
+  asserts the DOM contains the `Mismatch[]` text after a
+  successful Analyze. (IR-6 regression suite.)
+- **P-6:** Every error path MUST return a one-line user-facing
+  message. No raw stack traces. (IR-5 #3-5.)
+- **P-7:** No regression in the 589 baseline tests. (Per-slice
+  gate; the IR-6 smoke + e2e run is the final proof.)
+- **P-8:** p95 end-to-end latency MUST be ≤ 90s on the smoke
+  script, measured at IR-6 with 3 iterations on a fixture pair.
+  (Kill criterion K2.)
+
+### Kill criteria
+
+- **K-1:** If IR-3's `Mismatch[]` accuracy on a captured fixture
+  pair is below 60% agreement with a human rater on 3 sample
+  pairs, the slice does not merge; redesign the schema or kill
+  the feature.
+- **K-2:** If end-to-end p95 latency exceeds 90s on 3 real runs
+  at IR-6, we don't ship multi-iteration — single-shot Analyze
+  is the fallback.
+- **K-3:** If the existing 589-test regression suite fails any
+  time during IR-1…IR-6, that slice does not merge. The new
+  feature is additive; existing chat must not break.
+

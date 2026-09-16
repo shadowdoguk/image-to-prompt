@@ -9779,6 +9779,184 @@ app.delete('/api/chat/sessions', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SPEC §28 / IR-1 — Iterative refinement: Analyze Generated Image (stub)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Three module exports (irAnalyzeImage / irCompareImages /
+// irRevisePrompt) plus one new HTTP route
+// (POST /api/chat/sessions/:id/analyze-generated). At IR-1 these
+// are intentional stubs — they prove the wire end-to-end without
+// touching any LLM. Subsequent slices (IR-2, IR-3, IR-4) replace
+// the stubs with real MiniMax M3 vision/text calls.
+//
+// The semantics of the loop:
+//   - User uploads ≥ 2 chat attachments to the session (one is the
+//     reference image — the original; the most recently uploaded
+//     non-reference is the "generated" image).
+//   - Click "Analyze Generated Image" → server reads both images,
+//     runs the 3-step pipeline (analyze → compare → revise), emits
+//     a revised prompt as a new assistant message tagged
+//     audit.kind='ir_iteration'.
+//   - session.ir_iteration_count is incremented on success.
+//   - Cap: 8 iterations per session (enforced server-side in IR-5).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const IR_ITERATION_CAP = 8;
+
+// SPEC §28 IR-2 stub — analyze one image into ImageAttributes JSON.
+// IR-1 returns a deterministic placeholder; IR-2 replaces the body
+// with a real MiniMax vision call.
+async function irAnalyzeImage(imagePath) {
+  return {
+    subjects: ['unknown subject'],
+    style: 'unknown style',
+    palette: [],
+    composition: 'unknown composition',
+    objects: [],
+    text: null,
+    aesthetic: 'unknown aesthetic'
+  };
+}
+
+// SPEC §28 IR-3 stub — diff two ImageAttributes JSONs into Mismatch[].
+// IR-1 returns one example mismatch; IR-3 replaces the body with a
+// real MiniMax vision comparison.
+async function irCompareImages(reference, generated) {
+  return [
+    {
+      dimension: 'style',
+      severity: 'med',
+      generated_value: 'unknown style',
+      reference_value: 'unknown reference style',
+      suggested_fix: 'Match the reference style more closely.'
+    }
+  ];
+}
+
+// SPEC §28 IR-4 stub — given current_prompt + Mismatch[], produce a
+// revised prompt string. IR-1 returns a deterministic placeholder;
+// IR-4 replaces the body with a real MiniMax text call that runs
+// the revised prompt through validatePromptPreservation.
+async function irRevisePrompt(currentPrompt, mismatches) {
+  return `${currentPrompt} [IR-1 stub revision — analyzed ${mismatches.length} mismatch(es).]`;
+}
+
+/**
+ * `POST /api/chat/sessions/:id/analyze-generated` — IR-1 stub.
+ *
+ * Validates:
+ *   - session exists (404)
+ *   - session has ≥ 2 attachments (422 — needs reference + generated)
+ *
+ * Behaviour at IR-1:
+ *   - calls the three IR module stubs
+ *   - emits the first attachment as the reference, the most recent
+ *     non-reference attachment as the generated image
+ *   - appends an assistant message with audit.kind='ir_iteration'
+ *     and suggested_prompt from the stub
+ *   - increments session.ir_iteration_count
+ *
+ * Validation mirror: SPEC §22 partial-apply decline envelope
+ * (returned via data.declined when present). Iteration cap (8) is
+ * enforced in IR-5; the IR-1 stub does NOT yet 409 on cap.
+ */
+app.post('/api/chat/sessions/:id/analyze-generated', async (req, res) => {
+  try {
+    if (typeof req.params.id !== 'string' || !req.params.id.startsWith(CHAT_SESSION_ID_PREFIX)) {
+      return res.status(400).json({ success: false, error: `id must start with "${CHAT_SESSION_ID_PREFIX}".` });
+    }
+
+    const sessions = readChatSessions();
+    const idx = sessions.findIndex((s) => s.id === req.params.id);
+    if (idx === -1) {
+      return res.status(404).json({ success: false, error: `Chat session "${req.params.id}" not found.` });
+    }
+    const session = sessions[idx];
+
+    const manifest = readChatAttachmentsManifest();
+    const sessionAttachments = manifest.filter((a) => a && a.session_id === req.params.id);
+    if (sessionAttachments.length < 2) {
+      return res.status(422).json({
+        success: false,
+        error: sessionAttachments.length === 0
+          ? 'Upload a reference image (the original) and a generated image first.'
+          : 'Upload a generated image too — one attachment is not enough to compare.'
+      });
+    }
+
+    // Resolve reference + generated from the manifest.
+    // Reference = first attachment with role==='reference', else the
+    // first attachment uploaded. Generated = the most recent
+    // attachment that isn't the reference.
+    const referenceEntry = sessionAttachments.find((a) => a.role === 'reference') || sessionAttachments[0];
+    const generatedCandidates = sessionAttachments.filter((a) => a.id !== referenceEntry.id);
+    const generatedEntry = generatedCandidates[generatedCandidates.length - 1];
+
+    // Read both files from disk (the bytes are sent to MiniMax in
+    // IR-2; the stub at IR-1 only validates that the files exist).
+    // The manifest stores the absolute path under `path`; the
+    // `filename` field is the original upload name. We use `path`.
+    const refPath = referenceEntry.path;
+    const genPath = generatedEntry.path;
+    if (!refPath || !fs.existsSync(refPath)) {
+      return res.status(422).json({ success: false, error: 'Reference image file is missing on disk.' });
+    }
+    if (!genPath || !fs.existsSync(genPath)) {
+      return res.status(422).json({ success: false, error: 'Generated image file is missing on disk.' });
+    }
+
+    // Stub pipeline. IR-2 / IR-3 / IR-4 will replace these with
+    // real MiniMax calls; the route contract does not change.
+    // NOTE: each stub is async (Promise-returning) so it can be
+    // swapped for a real MiniMax call in subsequent slices without
+    // changing the route's call sites.
+    const referenceAttributes = await irAnalyzeImage(refPath);
+    const generatedAttributes = await irAnalyzeImage(genPath);
+    const mismatches = await irCompareImages(referenceAttributes, generatedAttributes);
+    const revisedPrompt = await irRevisePrompt(session.current_prompt, mismatches);
+
+    // Append the assistant message. Shape mirrors SPEC §22 / SPEC
+    // §24 assistant messages.
+    const assistantMessage = {
+      id: generateChatMessageId(),
+      role: 'assistant',
+      content: `IR-1 stub iteration: ${mismatches.length} mismatch(es) flagged. The revised prompt below addresses them.`,
+      suggested_prompt: revisedPrompt,
+      audit: {
+        kind: 'ir_iteration',
+        iteration_index: (session.ir_iteration_count || 0) + 1,
+        reference_attachment_id: referenceEntry.id,
+        generated_attachment_id: generatedEntry.id,
+        mismatches,
+        // IR-6 will populate real latency numbers; the stub emits 0.
+        latency_ms: { analyze: 0, compare: 0, revise: 0 }
+      },
+      timestamp: new Date().toISOString()
+    };
+    session.messages.push(assistantMessage);
+    session.ir_iteration_count = (session.ir_iteration_count || 0) + 1;
+    session.updated_at = new Date().toISOString();
+    sessions[idx] = session;
+    writeChatSessions(sessions);
+
+    res.json({
+      success: true,
+      data: {
+        session,
+        message: assistantMessage,
+        reference_attributes: referenceAttributes,
+        generated_attributes: generatedAttributes,
+        mismatches,
+        revised_prompt: revisedPrompt,
+        ir_iteration_count: session.ir_iteration_count
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // CR-1 — RAG foundation (SPEC §17 / ADR 0025 / ARCHITECTURE CR-A1)
 //
 // Three read-only endpoints expose the curated corpus + retrieval;
@@ -10852,5 +11030,11 @@ module.exports = {
   cascadeDeleteChatSessionAttachments,
   // CR-A11 — bulk chat history clear (SPEC §27)
   clearAllChatSessions,
-  countChatData
+  countChatData,
+  // SPEC §28 / IR-1 — Iterative refinement: Analyze Generated Image (stubs at IR-1).
+  // IR-2 / IR-3 / IR-4 swap the bodies for real MiniMax vision/text calls.
+  IR_ITERATION_CAP,
+  irAnalyzeImage,
+  irCompareImages,
+  irRevisePrompt
 };

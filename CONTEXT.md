@@ -271,3 +271,28 @@ resolved. Tracked here so the audit trail is clear:
 - **Contact-sheet strip** — the film-frame presentation of the generated prompt
   (sprocket corners, gradient frame edge, mono text, exposure counter). The
   app's signature element.
+
+### IR series glossary — iterative refinement in Chat (2026-09-16, SPEC §28)
+
+- **Reference image** — the chat attachment marked `role: 'reference'`
+  on its manifest entry; the original image the working prompt is
+  meant to match. Exactly one per chat session. Uploaded once at the
+  start of an iteration run; subsequent reference uploads overwrite
+  the tag.
+- **Generated image (current)** — the most recently uploaded chat
+  attachment whose `role` is not `reference`. The image produced by
+  the user's image-generation tool from the session's `current_prompt`.
+  Refreshed every iteration.
+- **Iteration (IR iteration)** — one click of "Analyze Generated
+  Image" that produces a revised `suggested_prompt`. Emits one
+  assistant message tagged `audit.kind = 'ir_iteration'`.
+- **ImageAttributes** — structured JSON produced by `irAnalyzeImage`
+  (server module): `{ subjects[], style, palette[], composition,
+  objects[], text?, aesthetic }`. Schema locked at IR-2.
+- **Mismatch** — one entry in the `Mismatch[]` produced by
+  `irCompareImages`: `{ dimension, severity, generated_value,
+  reference_value, suggested_fix }`. `dimension` ∈ { `subjects`,
+  `style`, `palette`, `composition`, `objects`, `text`, `aesthetic` }.
+- **ir_iteration_count** — counter on the chat session object
+  (`session.ir_iteration_count`), incremented server-side per
+  successful Analyze call. Capped at 8.
