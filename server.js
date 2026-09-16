@@ -10481,6 +10481,20 @@ app.post('/api/chat/sessions/:id/analyze-generated', async (req, res) => {
     }
     const session = sessions[idx];
 
+    // SPEC §28 / IR-5 — iteration cap. Enforced BEFORE manifest
+    // reads so a capped session can't burn read cycles. Returns 409
+    // (per SPEC §28 A5). The counter does NOT increment on 409
+    // (the request never advances; counter is unchanged).
+    const currentCount = session.ir_iteration_count || 0;
+    if (currentCount >= IR_ITERATION_CAP) {
+      return res.status(409).json({
+        success: false,
+        error: `Iteration cap (${IR_ITERATION_CAP}) reached for this session. Adjust the prompt manually or start a new session.`,
+        ir_iteration_count: currentCount,
+        ir_iteration_cap: IR_ITERATION_CAP
+      });
+    }
+
     const manifest = readChatAttachmentsManifest();
     const sessionAttachments = manifest.filter((a) => a && a.session_id === req.params.id);
     if (sessionAttachments.length < 2) {
