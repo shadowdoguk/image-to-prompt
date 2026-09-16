@@ -16,6 +16,72 @@ An AI-powered web application that transforms uploaded images into refined, deta
 - **Saved directives** — name, tag, version, search, share, and reuse your favorite Stage 2 directives. Below the directives textarea, a "Save directive…" button captures the current text as a named, tagged directive; a "Manage directives…" modal lets you edit, search, filter, restore prior versions, and import/export directive sets as `.i2p.json` files. Usage frequency and last-used date are tracked automatically each time you apply a directive.
 - **Focused re-analysis + curated presets for Actions / Mood / Lighting** — three new "Populate with AI" buttons (ADR 0018) sit directly beneath the `actions`, `mood`, and `lighting` fields in the analysis editor, each delegating a focused Kilo Code vision call to a single field via dedicated endpoints (`/api/actions`, `/api/mood`, `/api/lighting`). For `mood` and `lighting`, a curated taxonomy of preset chips is rendered beneath the button — five labeled categories (Positive / Reflective / Intense / Atmospheric / Still for mood; Natural / Directional / Quality / Stylized / Studio for lighting). Click a chip to fill the field with a one-line descriptor; edit after clicking. Chips are a zero-credit quick override; the AI button is the custom image-derived escape hatch.
 - **Focused re-analysis for Texture** — a "Populate with AI" button (Slice 1) sits directly beneath the `texture` field in the analysis editor, delegating a focused Kilo Code vision call to a single field via a dedicated endpoint (`/api/texture`). The shipped prompt excludes the subject, lighting, color, mood, composition, style, and medium — those are separate fields — and mandates coverage of five texture categories: surface quality (smooth / rough / pitted / polished / matte / glossy), mark-making and tool traces (brushstrokes / palette-knife slabs / pen hatching / photographic grain), material identification (oil / acrylic / watercolor / paper / canvas / photographic emulsion / 3D render), pigment interaction (impasto / glazing / scumbling / wet-in-wet bleeds / drybrush / washes / sgraffito), and tactile cues (chunky / slick / fibrous / velvety / sticky / gritty). Texture is image-specific and resists a curated chip taxonomy (mirror ADR 0018 §5); only the AI button is rendered, no chips.
+- **Iterative refinement: "Analyze Generated Image"** (SPEC §28 / IR series) — a new button in the chat input bar runs a three-step vision pipeline on your uploaded reference image and the most recently generated image: extract `ImageAttributes` from each, diff them into a `Mismatch[]` (subjects / style / palette / composition / objects / text / aesthetic), and emit a revised `suggested_prompt` that you can Apply directly. Up to **8 iterations per session** (hard cap). The revised prompt passes through anchor-preservation (ADR 0012); on decline, the user sees a clear "Revision declined — too much original context would have been lost" message with the missing terms listed. See [Iterative refinement](#iterative-refinement) below for the full user flow.
+
+## Iterative refinement
+
+The chat tab supports an iterative refinement loop: upload a
+reference image and a generated image, click "Analyze Generated
+Image", and the system compares them and emits a revised prompt
+you can Apply. Repeat until the generated image matches the
+reference.
+
+### User flow
+
+1. Generate a prompt on the Create tab.
+2. Open the Chat tab. Use the paperclip to upload **the original
+   reference image** (the image the working prompt is meant to
+   match).
+3. Take the working prompt to your image-generation tool of choice
+   and render it. Save the output.
+4. Back in Chat, use the paperclip to upload **the generated image**
+   as a second attachment.
+5. Click **Analyze Generated Image** in the chat input bar.
+6. The system runs the three-step pipeline:
+   - **Analyze** — extracts `ImageAttributes` (subjects, style,
+     palette, composition, objects, text, aesthetic) from both
+     images.
+   - **Compare** — diffs the two analyses into a `Mismatch[]`
+     report, with severity (low/med/high) and a concrete
+     `suggested_fix` per mismatch.
+   - **Revise** — rewrites your current prompt to address each
+     mismatch, then runs it through anchor-preservation (ADR 0012)
+     to make sure non-targeted elements aren't lost.
+7. The assistant emits a message with the revised `suggested_prompt`
+   and the inline `Mismatch[]` report. Click **Apply** to update
+   `current_prompt`.
+8. Take the revised prompt back to your image-generation tool,
+   render, upload the new output, click **Analyze Generated Image**
+   again. Up to **8 iterations per chat session** (the counter
+   shows `N / 8` next to the button).
+
+### What the button shows
+
+- **Hidden** until you have at least one attachment.
+- **Disabled** when the 8-iteration cap is reached. Start a new
+  chat session to reset the counter.
+- **Aria-busy** during the pipeline (15s + 15s + 10s soft budget,
+  90s hard cap end-to-end).
+- **Inline errors** if the MiniMax API is down, the image is too
+  large (>8MB), the format is unsupported, or anchor-preservation
+  declines the revised prompt.
+
+### When the revised prompt is declined
+
+If the model's revision drops too much of your original context
+(per ADR 0012 anchor-preservation), the assistant message says
+"Revision declined — too much of the original context would have
+been lost" and lists the missing terms. The revised prompt is
+still visible in the audit block so you can see what the model
+proposed; you can manually edit your working prompt to incorporate
+any of the changes you want.
+
+### API + module documentation
+
+See `docs/API.md` for the HTTP endpoint, the three module exports
+(`irAnalyzeImage` / `irCompareImages` / `irRevisePrompt`), the
+validators, the iteration counter semantics, and the latency
+budgets.
 
 ## Architecture
 
