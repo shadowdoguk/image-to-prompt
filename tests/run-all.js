@@ -13471,3 +13471,140 @@ test('SPEC §28 IR-2: src/index.html + server.js — markChatAttachmentAsReferen
   assertEqual(typeof markChatAttachmentAsReference, 'function',
     'markChatAttachmentAsReference is exported');
 });
+
+// ─── SPEC §28 / IR-3 — Iterative refinement: irCompareImages module ─────
+//
+// IR-3 swaps the IR-1 stub for a real MiniMax M3 vision call that
+// receives both ImageAttributes (as text) plus both images and
+// returns a Mismatch[] list. The contract:
+//   - dimension ∈ { subjects, style, palette, composition, objects, text, aesthetic }
+//   - severity   ∈ { low, med, high }
+//   - generated_value: string
+//   - reference_value: string
+//   - suggested_fix:   string
+//
+// Tests assert the parseMismatchList validator against three
+// fixtures (with-mismatches, no-mismatches, malformed) plus the
+// route-level integration.
+
+const IR_COMPARE_FIXTURE_WITH = path.join(IR_FIXTURE_DIR, 'ir-compare-with-mismatches.json');
+const IR_COMPARE_FIXTURE_NONE = path.join(IR_FIXTURE_DIR, 'ir-compare-no-mismatches.json');
+
+test('SPEC §28 IR-3: server.js exports the IR-Compare module surface', () => {
+  const { irCompareImages, parseMismatchList, IR_MISMATCH_SCHEMA,
+          DEFAULT_IR_COMPARE_PROMPT, IR_VALID_DIMENSIONS } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(typeof irCompareImages, 'function', 'irCompareImages is a function');
+  assertEqual(typeof parseMismatchList, 'function', 'parseMismatchList is a function');
+  assertEqual(typeof IR_MISMATCH_SCHEMA, 'object', 'IR_MISMATCH_SCHEMA is an object');
+  assertEqual(typeof DEFAULT_IR_COMPARE_PROMPT, 'string', 'DEFAULT_IR_COMPARE_PROMPT is a string');
+  assertTrue(Array.isArray(IR_VALID_DIMENSIONS), 'IR_VALID_DIMENSIONS is an array');
+  for (const d of ['subjects', 'style', 'palette', 'composition', 'objects', 'text', 'aesthetic']) {
+    assertTrue(IR_VALID_DIMENSIONS.includes(d), `IR_VALID_DIMENSIONS includes "${d}"`);
+  }
+});
+
+test('SPEC §28 IR-3: parseMismatchList accepts a captured with-mismatches fixture', () => {
+  const { parseMismatchList } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const raw = JSON.parse(fs.readFileSync(IR_COMPARE_FIXTURE_WITH, 'utf8'));
+  const parsed = parseMismatchList(raw);
+  assertTrue(Array.isArray(parsed) && parsed.length === 3, '3 mismatches parsed');
+  assertEqual(parsed[0].dimension, 'palette', 'first mismatch is palette');
+  assertEqual(parsed[0].severity, 'high', 'first mismatch is high severity');
+  assertEqual(parsed[1].dimension, 'style', 'second is style');
+  assertEqual(parsed[2].dimension, 'subjects', 'third is subjects');
+  for (const m of parsed) {
+    assertEqual(typeof m.generated_value, 'string', 'generated_value is string');
+    assertEqual(typeof m.reference_value, 'string', 'reference_value is string');
+    assertEqual(typeof m.suggested_fix, 'string', 'suggested_fix is string');
+    assertTrue(['low', 'med', 'high'].includes(m.severity), 'severity is valid');
+  }
+});
+
+test('SPEC §28 IR-3: parseMismatchList accepts the no-mismatches fixture (empty array)', () => {
+  const { parseMismatchList } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const raw = JSON.parse(fs.readFileSync(IR_COMPARE_FIXTURE_NONE, 'utf8'));
+  const parsed = parseMismatchList(raw);
+  assertTrue(Array.isArray(parsed) && parsed.length === 0, 'empty array parsed');
+});
+
+test('SPEC §28 IR-3: parseMismatchList rejects an entry with an invalid dimension', () => {
+  const { parseMismatchList } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const bad = [
+    { dimension: 'mood', severity: 'high', generated_value: 'a', reference_value: 'b', suggested_fix: 'c' }
+  ];
+  let threw = false;
+  try { parseMismatchList(bad); } catch (err) {
+    threw = true;
+    assertTrue(/dimension|mood/i.test(err.message), `error names the bad field: ${err.message}`);
+  }
+  assertTrue(threw, 'invalid dimension throws');
+});
+
+test('SPEC §28 IR-3: parseMismatchList rejects an entry with an invalid severity', () => {
+  const { parseMismatchList } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const bad = [
+    { dimension: 'style', severity: 'critical', generated_value: 'a', reference_value: 'b', suggested_fix: 'c' }
+  ];
+  let threw = false;
+  try { parseMismatchList(bad); } catch (err) {
+    threw = true;
+    assertTrue(/severity|critical/i.test(err.message), `error names the bad field: ${err.message}`);
+  }
+  assertTrue(threw, 'invalid severity throws');
+});
+
+test('SPEC §28 IR-3: route response includes mismatches array (happy or 504)', async () => {
+  // The IR-3 module is wired into the route's pipeline step. We
+  // tolerate both 200 (live API success) and 504 (no credits); the
+  // route envelope is the same in both cases.
+  const { app } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const server = app.listen(0);
+  try {
+    const sessionId = await createChatSessionHelper(server);
+    await uploadPngHelper(server, sessionId, 'ref.png');
+    await uploadPngHelper(server, sessionId, 'gen.png');
+    const port = server.address().port;
+    const r = await fetch(`http://127.0.0.1:${port}/api/chat/sessions/${sessionId}/analyze-generated`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    if (r.status === 504) {
+      const json = await r.json();
+      assertEqual(json.success, false, '504 success=false');
+      return;
+    }
+    assertEqual(r.status, 200, `analyze-generated returns 200, got ${r.status}`);
+    const json = await r.json();
+    assertTrue(Array.isArray(json.data.mismatches), 'mismatches is an array');
+    // Each mismatch must carry the locked schema fields.
+    for (const m of json.data.mismatches) {
+      assertEqual(typeof m.dimension, 'string', 'mismatch.dimension is string');
+      assertEqual(typeof m.severity, 'string', 'mismatch.severity is string');
+      assertEqual(typeof m.generated_value, 'string', 'mismatch.generated_value is string');
+      assertEqual(typeof m.reference_value, 'string', 'mismatch.reference_value is string');
+      assertEqual(typeof m.suggested_fix, 'string', 'mismatch.suggested_fix is string');
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test('SPEC §28 IR-3: DEFAULT_IR_COMPARE_PROMPT matches the locked dimensions (source-grep)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const m = serverText.match(/const DEFAULT_IR_COMPARE_PROMPT\s*=\s*`([\s\S]*?)`;/);
+  assertTrue(m, 'DEFAULT_IR_COMPARE_PROMPT template literal found');
+  const prompt = m[1];
+  for (const key of ['dimension', 'severity', 'generated_value', 'reference_value', 'suggested_fix']) {
+    assertTrue(prompt.includes(key),
+      `DEFAULT_IR_COMPARE_PROMPT mentions "${key}"`);
+  }
+  // Must list the locked dimensions so the model knows what's allowed.
+  for (const d of ['subjects', 'style', 'palette', 'composition', 'objects', 'text', 'aesthetic']) {
+    assertTrue(prompt.includes(d),
+      `DEFAULT_IR_COMPARE_PROMPT mentions locked dimension "${d}"`);
+  }
+  // Must require JSON output and an array.
+  assertTrue(/json/i.test(prompt), 'prompt mentions JSON');
+  assertTrue(/array/i.test(prompt) || /\[\s*\{/.test(prompt), 'prompt mentions array');
+});

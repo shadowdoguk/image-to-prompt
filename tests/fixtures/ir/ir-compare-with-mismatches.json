@@ -1,0 +1,23 @@
+[
+  {
+    "dimension": "palette",
+    "severity": "high",
+    "generated_value": "monochrome blue and gray",
+    "reference_value": "warm reds, golds, bone white",
+    "suggested_fix": "Shift the dominant palette from cool blues toward warm reds and golds to match the reference."
+  },
+  {
+    "dimension": "style",
+    "severity": "med",
+    "generated_value": "digital illustration with flat shading",
+    "reference_value": "oil painting alla prima with palette knife",
+    "suggested_fix": "Switch the medium to oil painting alla prima and add palette-knife mark-making."
+  },
+  {
+    "dimension": "subjects",
+    "severity": "low",
+    "generated_value": "single figure, frontal pose",
+    "reference_value": "two figures, three-quarter pose",
+    "suggested_fix": "Add a second figure and shift to a three-quarter pose."
+  }
+]

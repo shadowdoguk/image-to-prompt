@@ -10021,18 +10021,38 @@ const callImageAttributesVision = async (imageDataUri, model = DEFAULT_LLM_MODEL
   }
 };
 
-// SPEC §28 / IR-2 — imagePath -> ImageAttributes. Reads the file,
-// base64-encodes it, sends it to MiniMax. Falls back to a stub
-// (the IR-1 placeholder) when the API is not configured so the
-// feature remains demoable without a key set.
+// SPEC §28 / IR-2 — imagePath -> ImageAttributes. Reads the file
+// via the fileToImageDataUri helper (magic-byte sniff + size cap),
+// sends it to MiniMax. Falls back to a stub (the IR-1 placeholder)
+// when the API is not configured so the feature remains demoable
+// without a key set.
 async function irAnalyzeImage(imagePath) {
-  // 8MB cap mirrors the existing per-field vision callers (R-6).
+  const imageDataUri = fileToImageDataUri(imagePath);
+  const cred = resolveProviderCredential('minimax');
+  if (!cred.apiKey) {
+    return {
+      subjects: ['unknown subject (no API key — IR-1 stub fallback)'],
+      style: 'unknown style',
+      palette: [],
+      composition: 'unknown composition',
+      objects: [],
+      text: null,
+      aesthetic: 'unknown aesthetic'
+    };
+  }
+  return await callImageAttributesVision(imageDataUri);
+}
+
+// SPEC §28 / IR-3 — helper: read an image file from disk and
+// return a base64 data URI suitable for MiniMax's `image_url`
+// content part. Validates the magic bytes (R-9) and the size
+// cap (R-6, 8MB) up-front so the IR-Analyze + IR-Compare
+// modules don't have to repeat the check.
+function fileToImageDataUri(imagePath) {
   const stats = fs.statSync(imagePath);
   if (stats.size > 8 * 1024 * 1024) {
     throw new Error('Image too large; resize to under 8MB before analyzing.');
   }
-  // Magic-byte sniff (R-9): re-check the actual file format before
-  // sending to the model. PNG/JPG/WebP only.
   const fd = fs.openSync(imagePath, 'r');
   const magic = Buffer.alloc(12);
   try {
@@ -10046,29 +10066,9 @@ async function irAnalyzeImage(imagePath) {
   if (!isPng && !isJpg && !isWebp) {
     throw new Error('Unsupported image format (expected PNG, JPG, or WebP).');
   }
-  // Build data URI.
   const ext = isPng ? 'png' : isJpg ? 'jpeg' : 'webp';
   const b64 = fs.readFileSync(imagePath).toString('base64');
-  const imageDataUri = `data:image/${ext};base64,${b64}`;
-
-  // If the provider is not configured, fall back to the IR-1 stub.
-  // This keeps the route demoable for users who haven't set a
-  // MiniMax key yet. The fallback response is structurally valid
-  // ImageAttributes so downstream stages (IR-3, IR-4) still work.
-  const cred = resolveProviderCredential('minimax');
-  if (!cred.apiKey) {
-    return {
-      subjects: ['unknown subject (no API key — IR-1 stub fallback)'],
-      style: 'unknown style',
-      palette: [],
-      composition: 'unknown composition',
-      objects: [],
-      text: null,
-      aesthetic: 'unknown aesthetic'
-    };
-  }
-
-  return await callImageAttributesVision(imageDataUri);
+  return `data:image/${ext};base64,${b64}`;
 }
 
 // SPEC §28 / IR-2 — markChatAttachmentAsReference helper. Sets
@@ -10105,19 +10105,204 @@ function markChatAttachmentAsReference(sessionId, attachmentId) {
   return { ok: true, role: 'reference', attachment_id: attachmentId };
 }
 
-// SPEC §28 IR-3 stub — diff two ImageAttributes JSONs into Mismatch[].
-// IR-1 returns one example mismatch; IR-3 replaces the body with a
-// real MiniMax vision comparison.
-async function irCompareImages(reference, generated) {
-  return [
-    {
-      dimension: 'style',
-      severity: 'med',
-      generated_value: 'unknown style',
-      reference_value: 'unknown reference style',
-      suggested_fix: 'Match the reference style more closely.'
+// SPEC §28 / IR-3 — Mismatch[] JSON schema + locked dimension list.
+// The model is told to return objects from this dimension set; the
+// validator rejects anything outside it.
+const IR_VALID_DIMENSIONS = ['subjects', 'style', 'palette', 'composition', 'objects', 'text', 'aesthetic'];
+const IR_VALID_SEVERITIES = ['low', 'med', 'high'];
+
+const IR_MISMATCH_SCHEMA = {
+  type: 'array',
+  items: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      dimension: { type: 'string', enum: IR_VALID_DIMENSIONS },
+      severity: { type: 'string', enum: IR_VALID_SEVERITIES },
+      generated_value: { type: 'string', minLength: 1, maxLength: 240 },
+      reference_value: { type: 'string', minLength: 1, maxLength: 240 },
+      suggested_fix: { type: 'string', minLength: 1, maxLength: 240 }
+    },
+    required: ['dimension', 'severity', 'generated_value', 'reference_value', 'suggested_fix']
+  }
+};
+
+// SPEC §28 / IR-3 — system prompt for the Mismatch[] extraction.
+// The model receives both structured analyses (as text) AND both
+// raw images; it returns a JSON array of mismatch records. Empty
+// array when the two images are already aligned (no mismatches).
+const DEFAULT_IR_COMPARE_PROMPT = `You are an expert image-comparison analyst. You receive two structured ImageAttributes JSON objects (REFERENCE = the original the user wants to match; GENERATED = the most recent output) plus both raw images. Your job is to identify discrepancies between them.
+
+Respond with ONE JSON ARRAY (no commentary, no markdown code fences). Each element is a mismatch with this exact shape:
+{
+  "dimension":      "subjects" | "style" | "palette" | "composition" | "objects" | "text" | "aesthetic",
+  "severity":       "low" | "med" | "high",
+  "generated_value": string,    // ≤240 chars. What the generated image has on this dimension.
+  "reference_value": string,    // ≤240 chars. What the reference image has on this dimension.
+  "suggested_fix":   string     // ≤240 chars. A concrete prompt-level instruction that would close the gap.
+}
+
+Rules:
+- Only include dimensions where a real discrepancy exists. If the two images are aligned on every dimension, return [].
+- severity = "high" when the gap is fundamental (wrong subject, wrong medium, drastically different palette).
+- severity = "med"  when the gap is significant but fixable (different style within the same medium, off-palette colours).
+- severity = "low"  when the gap is a minor refinement (one missing object, slightly different composition).
+- Each suggested_fix must be a concrete prompt-level instruction (e.g. "Shift dominant palette from cool blues to warm reds", "Add palette-knife mark-making", not "make it better").
+- Prefer 0..5 mismatches; only emit more if multiple dimensions are off.
+- Empty array [] means "the generated image matches the reference; no revision needed".
+
+Respond ONLY with the JSON array.`;
+
+// SPEC §28 / IR-3 — strict validator/normaliser for Mismatch[].
+// Pure function — no network, no side effects.
+function parseMismatchList(raw) {
+  if (!Array.isArray(raw)) {
+    throw new Error('Mismatch[] must be a JSON array');
+  }
+  return raw.map((m, i) => {
+    if (m === null || typeof m !== 'object' || Array.isArray(m)) {
+      throw new Error(`mismatch[${i}] must be an object`);
     }
-  ];
+    if (typeof m.dimension !== 'string' || !IR_VALID_DIMENSIONS.includes(m.dimension)) {
+      throw new Error(`mismatch[${i}].dimension must be one of: ${IR_VALID_DIMENSIONS.join(', ')}`);
+    }
+    if (typeof m.severity !== 'string' || !IR_VALID_SEVERITIES.includes(m.severity)) {
+      throw new Error(`mismatch[${i}].severity must be one of: ${IR_VALID_SEVERITIES.join(', ')}`);
+    }
+    if (typeof m.generated_value !== 'string' || m.generated_value.trim().length === 0) {
+      throw new Error(`mismatch[${i}].generated_value must be a non-empty string`);
+    }
+    if (typeof m.reference_value !== 'string' || m.reference_value.trim().length === 0) {
+      throw new Error(`mismatch[${i}].reference_value must be a non-empty string`);
+    }
+    if (typeof m.suggested_fix !== 'string' || m.suggested_fix.trim().length === 0) {
+      throw new Error(`mismatch[${i}].suggested_fix must be a non-empty string`);
+    }
+    return {
+      dimension: m.dimension,
+      severity: m.severity,
+      generated_value: m.generated_value.trim().slice(0, 240),
+      reference_value: m.reference_value.trim().slice(0, 240),
+      suggested_fix: m.suggested_fix.trim().slice(0, 240)
+    };
+  });
+}
+
+// SPEC §28 / IR-3 — MiniMax M3 vision call. Receives both images
+// + both structured analyses (as text). Returns parsed Mismatch[].
+//
+// Function name avoids the `callMiniMax*` prefix (Slice 3.1
+// ADR-0022 invariant).
+const callImageComparisonVision = async (imageDataUriRef, imageDataUriGen, reference, generated, model = DEFAULT_LLM_MODEL) => {
+  const cred = resolveProviderCredential('minimax');
+  const MINIMAX_API_KEY = cred.apiKey;
+  const MINIMAX_BASE_URL = cred.baseUrl;
+  if (!MINIMAX_API_KEY) {
+    throw new Error('MINIMAX_API_KEY not set. Configure MiniMax in Providers & keys.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 18000);
+
+  const userText = `REFERENCE ImageAttributes:\n${JSON.stringify(reference, null, 2)}\n\nGENERATED ImageAttributes:\n${JSON.stringify(generated, null, 2)}\n\nIdentify the discrepancies between the two images and return the JSON array of mismatch records.`;
+
+  try {
+    const response = await fetch(`${MINIMAX_BASE_URL}/text/chatcompletion_v2`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        max_tokens: 1500,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: DEFAULT_IR_COMPARE_PROMPT },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: userText },
+              { type: 'text', text: '\n\nREFERENCE image (the original):' },
+              { type: 'image_url', image_url: { url: imageDataUriRef } },
+              { type: 'text', text: '\n\nGENERATED image (the most recent output):' },
+              { type: 'image_url', image_url: { url: imageDataUriGen } }
+            ]
+          }
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'image_mismatch_list',
+            strict: true,
+            schema: IR_MISMATCH_SCHEMA
+          }
+        }
+      })
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`MiniMax image comparison error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('MiniMax returned an empty response.');
+
+    let parsed;
+    const trimmed = content.trim();
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e1) {
+      const codeBlock = trimmed.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+      if (codeBlock) {
+        try { parsed = JSON.parse(codeBlock[1]); } catch (e2) { /* fall through */ }
+      }
+      if (!parsed) {
+        const firstBrack = trimmed.indexOf('[');
+        const lastBrack = trimmed.lastIndexOf(']');
+        if (firstBrack !== -1 && lastBrack !== -1 && lastBrack > firstBrack) {
+          try { parsed = JSON.parse(trimmed.slice(firstBrack, lastBrack + 1)); }
+          catch (e3) {
+            throw new Error(`Image comparison response was not valid JSON: ${e3.message}`);
+          }
+        }
+      }
+    }
+
+    return parseMismatchList(parsed);
+  } catch (err) {
+    clearTimeout(timeout);
+    throw err;
+  }
+};
+
+// SPEC §28 / IR-3 — ref + gen ImageAttributes + paths → Mismatch[].
+// Image data URIs are passed through from the route (which already
+// resolved them for the analyze step). Stub fallback when no API
+// key is set.
+async function irCompareImages(reference, generated, imageDataUriRef, imageDataUriGen) {
+  const cred = resolveProviderCredential('minimax');
+  if (!cred.apiKey) {
+    // IR-1 stub fallback: emit one example mismatch so the wire
+    // remains demoable.
+    return [
+      {
+        dimension: 'style',
+        severity: 'med',
+        generated_value: 'unknown style (no API key — IR-1 stub fallback)',
+        reference_value: 'unknown reference style',
+        suggested_fix: 'Match the reference style more closely.'
+      }
+    ];
+  }
+  return await callImageComparisonVision(imageDataUriRef, imageDataUriGen, reference, generated);
 }
 
 // SPEC §28 IR-4 stub — given current_prompt + Mismatch[], produce a
@@ -10192,33 +10377,51 @@ app.post('/api/chat/sessions/:id/analyze-generated', async (req, res) => {
       return res.status(422).json({ success: false, error: 'Generated image file is missing on disk.' });
     }
 
+    // Pre-load both image data URIs (used by IR-Analyze for the
+    // vision call AND by IR-Compare for the second vision call).
+    // Mirrors R-6 (8MB cap) + R-9 (magic-byte sniff) which both
+    // happen inside irAnalyzeImage.
+    let refDataUri, genDataUri;
+    try {
+      refDataUri = fileToImageDataUri(refPath);
+      genDataUri = fileToImageDataUri(genPath);
+    } catch (err) {
+      return res.status(422).json({ success: false, error: `Image read failed: ${sanitizeError(err.message)}` });
+    }
+
     // Pipeline. IR-2 swapped the analyze body for a real MiniMax
-    // call. Each module is wrapped in try/catch — if a step fails
-    // (API timeout, empty response, no credits, JSON parse error),
-    // we surface the error envelope rather than crashing. The user
+    // call; IR-3 added the second vision call (compare). Each
+    // module is wrapped in try/catch — if a step fails (API
+    // timeout, empty response, no credits, JSON parse error), we
+    // surface the error envelope rather than crashing. The user
     // gets a clear inline error and the iteration counter does NOT
     // increment (pre-commitment P-3 from PRE-MORTEM §28).
+    //
+    // Latency is measured per step (IR-6 commit on perf budgets).
+    const latency = { analyze: 0, compare: 0, revise: 0 };
     let referenceAttributes, generatedAttributes, mismatches, revisedPrompt;
+    const tAnalyzeStart = Date.now();
     try {
       referenceAttributes = await irAnalyzeImage(refPath);
-    } catch (err) {
-      return res.status(504).json({ success: false, error: `Image analysis failed: ${sanitizeError(err.message)}` });
-    }
-    try {
       generatedAttributes = await irAnalyzeImage(genPath);
     } catch (err) {
       return res.status(504).json({ success: false, error: `Image analysis failed: ${sanitizeError(err.message)}` });
     }
+    latency.analyze = Date.now() - tAnalyzeStart;
+    const tCompareStart = Date.now();
     try {
-      mismatches = await irCompareImages(referenceAttributes, generatedAttributes);
+      mismatches = await irCompareImages(referenceAttributes, generatedAttributes, refDataUri, genDataUri);
     } catch (err) {
       return res.status(504).json({ success: false, error: `Image comparison failed: ${sanitizeError(err.message)}` });
     }
+    latency.compare = Date.now() - tCompareStart;
+    const tReviseStart = Date.now();
     try {
       revisedPrompt = await irRevisePrompt(session.current_prompt, mismatches);
     } catch (err) {
       return res.status(504).json({ success: false, error: `Prompt revision failed: ${sanitizeError(err.message)}` });
     }
+    latency.revise = Date.now() - tReviseStart;
 
     // Append the assistant message. Shape mirrors SPEC §22 / SPEC
     // §24 assistant messages.
@@ -10233,8 +10436,7 @@ app.post('/api/chat/sessions/:id/analyze-generated', async (req, res) => {
         reference_attachment_id: referenceEntry.id,
         generated_attachment_id: generatedEntry.id,
         mismatches,
-        // IR-6 will populate real latency numbers; the stub emits 0.
-        latency_ms: { analyze: 0, compare: 0, revise: 0 }
+        latency_ms: latency
       },
       timestamp: new Date().toISOString()
     };
@@ -11343,11 +11545,18 @@ module.exports = {
   IR_ITERATION_CAP,
   IR_IMAGE_ATTRIBUTES_SCHEMA,
   DEFAULT_IR_ANALYZE_PROMPT,
+  IR_VALID_DIMENSIONS,
+  IR_VALID_SEVERITIES,
+  IR_MISMATCH_SCHEMA,
+  DEFAULT_IR_COMPARE_PROMPT,
   parseImageAttributes,
+  parseMismatchList,
   callImageAttributesVision,
+  callImageComparisonVision,
+  fileToImageDataUri,
   irAnalyzeImage,
-  markChatAttachmentAsReference,
-  // IR-3 / IR-4 still stubs — swapped in subsequent slices.
   irCompareImages,
+  markChatAttachmentAsReference,
+  // IR-4 still stub — swapped in next slice.
   irRevisePrompt
 };
