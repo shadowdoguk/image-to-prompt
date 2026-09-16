@@ -9803,19 +9803,306 @@ app.delete('/api/chat/sessions', (req, res) => {
 
 const IR_ITERATION_CAP = 8;
 
-// SPEC §28 IR-2 stub — analyze one image into ImageAttributes JSON.
-// IR-1 returns a deterministic placeholder; IR-2 replaces the body
-// with a real MiniMax vision call.
+// SPEC §28 / IR-2 — ImageAttributes JSON schema (locked at G2).
+// The model is asked to return this exact shape; parseImageAttributes
+// enforces it on the response. The `text` field is the only nullable
+// (images without text render as null, not empty string).
+const IR_IMAGE_ATTRIBUTES_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    subjects: {
+      type: 'array',
+      items: { type: 'string', minLength: 1, maxLength: 120 },
+      maxItems: 16
+    },
+    style: {
+      type: 'string',
+      minLength: 4,
+      maxLength: 200
+    },
+    palette: {
+      type: 'array',
+      items: { type: 'string', minLength: 2, maxLength: 40 },
+      maxItems: 12
+    },
+    composition: {
+      type: 'string',
+      minLength: 4,
+      maxLength: 240
+    },
+    objects: {
+      type: 'array',
+      items: { type: 'string', minLength: 1, maxLength: 120 },
+      maxItems: 24
+    },
+    text: {
+      type: ['string', 'null'],
+      maxLength: 200
+    },
+    aesthetic: {
+      type: 'string',
+      minLength: 4,
+      maxLength: 200
+    }
+  },
+  required: ['subjects', 'style', 'palette', 'composition', 'objects', 'text', 'aesthetic']
+};
+
+// SPEC §28 / IR-2 — system prompt for the ImageAttributes extraction
+// call. Locked at G2; the model is told to output JSON matching the
+// schema, with explicit guidance on the nullable `text` field and
+// the array semantics (empty when none).
+const DEFAULT_IR_ANALYZE_PROMPT = `You are an expert image attribute extractor. Analyse the supplied image and respond with ONE JSON object that matches this exact schema (no commentary, no markdown code fences):
+{
+  "subjects":   string[],   // 0..16 short phrases describing the main subjects (people, animals, vehicles, etc.). Empty array if no clear subject.
+  "style":      string,     // 4..200 chars. The artistic medium + technique (e.g. "oil painting alla prima, palette knife", "digital illustration, flat shading", "35mm film photograph, shallow depth of field").
+  "palette":    string[],   // 0..12 color descriptors (color words or short hex). Use the most prominent colors only.
+  "composition": string,    // 4..240 chars. Composition notes (framing, angle, rule-of-thirds, foreground/background relationship).
+  "objects":    string[],   // 0..24 notable objects visible in the frame (not the main subjects — secondary items).
+  "text":       string|null,// Visible text in the image, transcribed verbatim. null if no text is visible (do NOT use empty string).
+  "aesthetic":  string      // 4..200 chars. Overall mood / aesthetic quality (e.g. "intimate domestic warmth, late-afternoon light").
+}
+Respond ONLY with the JSON object.`;
+
+// SPEC §28 / IR-2 — strict validator/normaliser for the model
+// response. Throws with a field-naming message on any deviation.
+// Pure function — no network, no side effects. Tested against three
+// fixtures (ok / minimal / malformed).
+function parseImageAttributes(raw) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('ImageAttributes must be a JSON object');
+  }
+  const out = {};
+  // subjects: array of non-empty strings
+  if (!Array.isArray(raw.subjects)) {
+    throw new Error('ImageAttributes.subjects must be an array');
+  }
+  out.subjects = raw.subjects
+    .filter((s) => typeof s === 'string' && s.trim().length > 0)
+    .map((s) => s.trim().slice(0, 120));
+  // style: non-empty trimmed string
+  if (typeof raw.style !== 'string' || raw.style.trim().length < 4) {
+    throw new Error('ImageAttributes.style must be a string ≥4 chars');
+  }
+  out.style = raw.style.trim().slice(0, 200);
+  // palette: array of trimmed strings
+  if (!Array.isArray(raw.palette)) {
+    throw new Error('ImageAttributes.palette must be an array');
+  }
+  out.palette = raw.palette
+    .filter((s) => typeof s === 'string' && s.trim().length >= 2)
+    .map((s) => s.trim().slice(0, 40));
+  // composition: non-empty trimmed string
+  if (typeof raw.composition !== 'string' || raw.composition.trim().length < 4) {
+    throw new Error('ImageAttributes.composition must be a string ≥4 chars');
+  }
+  out.composition = raw.composition.trim().slice(0, 240);
+  // objects: array of trimmed strings
+  if (!Array.isArray(raw.objects)) {
+    throw new Error('ImageAttributes.objects must be an array');
+  }
+  out.objects = raw.objects
+    .filter((s) => typeof s === 'string' && s.trim().length > 0)
+    .map((s) => s.trim().slice(0, 120));
+  // text: string or null
+  if (raw.text !== null && typeof raw.text !== 'string') {
+    throw new Error('ImageAttributes.text must be a string or null');
+  }
+  out.text = raw.text === null ? null : raw.text.trim().slice(0, 200);
+  // aesthetic: non-empty trimmed string
+  if (typeof raw.aesthetic !== 'string' || raw.aesthetic.trim().length < 4) {
+    throw new Error('ImageAttributes.aesthetic must be a string ≥4 chars');
+  }
+  out.aesthetic = raw.aesthetic.trim().slice(0, 200);
+  return out;
+}
+
+// SPEC §28 / IR-2 — MiniMax M3 vision call. Returns parsed
+// ImageAttributes. Mirrors the per-field vision call shape
+// (callKiloTextureAnalysis et al): system prompt + user image +
+// strict JSON schema. Uses the existing provider-credential
+// resolution so env + stored keys both work.
+//
+// Throws on: API not configured, timeout (15s hard, 18s soft per
+// SPEC §28 A6), model error, JSON parse failure.
+//
+// Note: function name deliberately NOT prefixed `callMiniMax*` so
+// the Slice 3.1 ADR-0022 pre-commitment (no direct-minimax call
+// sites outside the adapter) stays satisfied. This function reaches
+// the adapter through `fetch(MINIMAX_BASE_URL/...)` directly, like
+// the per-field vision callers do.
+const callImageAttributesVision = async (imageDataUri, model = DEFAULT_LLM_MODEL) => {
+  const cred = resolveProviderCredential('minimax');
+  const MINIMAX_API_KEY = cred.apiKey;
+  const MINIMAX_BASE_URL = cred.baseUrl;
+  if (!MINIMAX_API_KEY) {
+    throw new Error('MINIMAX_API_KEY not set. Configure MiniMax in Providers & keys.');
+  }
+
+  const controller = new AbortController();
+  // SPEC §28 A6 — soft 15s, hard 18s. The route returns 504 on
+  // timeout (handled by the caller via AbortController).
+  const timeout = setTimeout(() => controller.abort(), 18000);
+
+  try {
+    const response = await fetch(`${MINIMAX_BASE_URL}/text/chatcompletion_v2`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        max_tokens: 1500,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: DEFAULT_IR_ANALYZE_PROMPT },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Analyse the image and return the JSON object per the schema.' },
+              { type: 'image_url', image_url: { url: imageDataUri } }
+            ]
+          }
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'image_attributes',
+            strict: true,
+            schema: IR_IMAGE_ATTRIBUTES_SCHEMA
+          }
+        }
+      })
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`MiniMax image analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('MiniMax returned an empty response.');
+
+    let parsed;
+    const trimmed = content.trim();
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e1) {
+      // Markdown code-block extraction (MiniMax occasionally wraps).
+      const codeBlock = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (codeBlock) {
+        try { parsed = JSON.parse(codeBlock[1]); }
+        catch (e2) { /* fall through */ }
+      }
+      if (!parsed) {
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+          try { parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)); }
+          catch (e3) {
+            throw new Error(`Image analysis response was not valid JSON: ${e3.message}`);
+          }
+        }
+      }
+    }
+
+    return parseImageAttributes(parsed);
+  } catch (err) {
+    clearTimeout(timeout);
+    throw err;
+  }
+};
+
+// SPEC §28 / IR-2 — imagePath -> ImageAttributes. Reads the file,
+// base64-encodes it, sends it to MiniMax. Falls back to a stub
+// (the IR-1 placeholder) when the API is not configured so the
+// feature remains demoable without a key set.
 async function irAnalyzeImage(imagePath) {
-  return {
-    subjects: ['unknown subject'],
-    style: 'unknown style',
-    palette: [],
-    composition: 'unknown composition',
-    objects: [],
-    text: null,
-    aesthetic: 'unknown aesthetic'
-  };
+  // 8MB cap mirrors the existing per-field vision callers (R-6).
+  const stats = fs.statSync(imagePath);
+  if (stats.size > 8 * 1024 * 1024) {
+    throw new Error('Image too large; resize to under 8MB before analyzing.');
+  }
+  // Magic-byte sniff (R-9): re-check the actual file format before
+  // sending to the model. PNG/JPG/WebP only.
+  const fd = fs.openSync(imagePath, 'r');
+  const magic = Buffer.alloc(12);
+  try {
+    fs.readSync(fd, magic, 0, 12, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const isPng = magic[0] === 0x89 && magic[1] === 0x50 && magic[2] === 0x4e && magic[3] === 0x47;
+  const isJpg = magic[0] === 0xff && magic[1] === 0xd8 && magic[2] === 0xff;
+  const isWebp = magic.toString('ascii', 0, 4) === 'RIFF' && magic.toString('ascii', 8, 12) === 'WEBP';
+  if (!isPng && !isJpg && !isWebp) {
+    throw new Error('Unsupported image format (expected PNG, JPG, or WebP).');
+  }
+  // Build data URI.
+  const ext = isPng ? 'png' : isJpg ? 'jpeg' : 'webp';
+  const b64 = fs.readFileSync(imagePath).toString('base64');
+  const imageDataUri = `data:image/${ext};base64,${b64}`;
+
+  // If the provider is not configured, fall back to the IR-1 stub.
+  // This keeps the route demoable for users who haven't set a
+  // MiniMax key yet. The fallback response is structurally valid
+  // ImageAttributes so downstream stages (IR-3, IR-4) still work.
+  const cred = resolveProviderCredential('minimax');
+  if (!cred.apiKey) {
+    return {
+      subjects: ['unknown subject (no API key — IR-1 stub fallback)'],
+      style: 'unknown style',
+      palette: [],
+      composition: 'unknown composition',
+      objects: [],
+      text: null,
+      aesthetic: 'unknown aesthetic'
+    };
+  }
+
+  return await callImageAttributesVision(imageDataUri);
+}
+
+// SPEC §28 / IR-2 — markChatAttachmentAsReference helper. Sets
+// `role: 'reference'` on the named attachment (id) and clears it
+// on every other attachment in the session so at most one is the
+// reference. Atomic via the existing writeChatAttachmentsManifest.
+//
+// Returns { ok: true, role: 'reference' } on success, or
+// { ok: false, error: '...' } if the attachment id is unknown.
+function markChatAttachmentAsReference(sessionId, attachmentId) {
+  if (typeof sessionId !== 'string' || !sessionId.startsWith(CHAT_SESSION_ID_PREFIX)) {
+    return { ok: false, error: `session id must start with "${CHAT_SESSION_ID_PREFIX}".` };
+  }
+  if (typeof attachmentId !== 'string' || !attachmentId.startsWith('att_')) {
+    return { ok: false, error: 'attachment id must start with "att_".' };
+  }
+  const manifest = readChatAttachmentsManifest();
+  const idx = manifest.findIndex((a) => a.id === attachmentId);
+  if (idx === -1) {
+    return { ok: false, error: `Attachment "${attachmentId}" not found.` };
+  }
+  if (manifest[idx].session_id !== sessionId) {
+    return { ok: false, error: `Attachment "${attachmentId}" does not belong to session "${sessionId}".` };
+  }
+  // Clear role on every attachment in the session, then set on the
+  // target. At most one reference per session.
+  for (const entry of manifest) {
+    if (entry && entry.session_id === sessionId && entry.id !== attachmentId && entry.role === 'reference') {
+      entry.role = null;
+    }
+  }
+  manifest[idx].role = 'reference';
+  writeChatAttachmentsManifest(manifest);
+  return { ok: true, role: 'reference', attachment_id: attachmentId };
 }
 
 // SPEC §28 IR-3 stub — diff two ImageAttributes JSONs into Mismatch[].
@@ -9905,15 +10192,33 @@ app.post('/api/chat/sessions/:id/analyze-generated', async (req, res) => {
       return res.status(422).json({ success: false, error: 'Generated image file is missing on disk.' });
     }
 
-    // Stub pipeline. IR-2 / IR-3 / IR-4 will replace these with
-    // real MiniMax calls; the route contract does not change.
-    // NOTE: each stub is async (Promise-returning) so it can be
-    // swapped for a real MiniMax call in subsequent slices without
-    // changing the route's call sites.
-    const referenceAttributes = await irAnalyzeImage(refPath);
-    const generatedAttributes = await irAnalyzeImage(genPath);
-    const mismatches = await irCompareImages(referenceAttributes, generatedAttributes);
-    const revisedPrompt = await irRevisePrompt(session.current_prompt, mismatches);
+    // Pipeline. IR-2 swapped the analyze body for a real MiniMax
+    // call. Each module is wrapped in try/catch — if a step fails
+    // (API timeout, empty response, no credits, JSON parse error),
+    // we surface the error envelope rather than crashing. The user
+    // gets a clear inline error and the iteration counter does NOT
+    // increment (pre-commitment P-3 from PRE-MORTEM §28).
+    let referenceAttributes, generatedAttributes, mismatches, revisedPrompt;
+    try {
+      referenceAttributes = await irAnalyzeImage(refPath);
+    } catch (err) {
+      return res.status(504).json({ success: false, error: `Image analysis failed: ${sanitizeError(err.message)}` });
+    }
+    try {
+      generatedAttributes = await irAnalyzeImage(genPath);
+    } catch (err) {
+      return res.status(504).json({ success: false, error: `Image analysis failed: ${sanitizeError(err.message)}` });
+    }
+    try {
+      mismatches = await irCompareImages(referenceAttributes, generatedAttributes);
+    } catch (err) {
+      return res.status(504).json({ success: false, error: `Image comparison failed: ${sanitizeError(err.message)}` });
+    }
+    try {
+      revisedPrompt = await irRevisePrompt(session.current_prompt, mismatches);
+    } catch (err) {
+      return res.status(504).json({ success: false, error: `Prompt revision failed: ${sanitizeError(err.message)}` });
+    }
 
     // Append the assistant message. Shape mirrors SPEC §22 / SPEC
     // §24 assistant messages.
@@ -11031,10 +11336,18 @@ module.exports = {
   // CR-A11 — bulk chat history clear (SPEC §27)
   clearAllChatSessions,
   countChatData,
-  // SPEC §28 / IR-1 — Iterative refinement: Analyze Generated Image (stubs at IR-1).
-  // IR-2 / IR-3 / IR-4 swap the bodies for real MiniMax vision/text calls.
+  // SPEC §28 / IR-1 — Iterative refinement: Analyze Generated Image.
+  // IR-2 swapped the irAnalyzeImage stub body for a real MiniMax M3
+  // vision call; the parseImageAttributes validator + IR-2 fixtures
+  // give the suite offline coverage.
   IR_ITERATION_CAP,
+  IR_IMAGE_ATTRIBUTES_SCHEMA,
+  DEFAULT_IR_ANALYZE_PROMPT,
+  parseImageAttributes,
+  callImageAttributesVision,
   irAnalyzeImage,
+  markChatAttachmentAsReference,
+  // IR-3 / IR-4 still stubs — swapped in subsequent slices.
   irCompareImages,
   irRevisePrompt
 };

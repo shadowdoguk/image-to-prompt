@@ -1,0 +1,5 @@
+{
+  "subjects": "not an array — this should fail validation",
+  "style": 42,
+  "composition": null
+}
