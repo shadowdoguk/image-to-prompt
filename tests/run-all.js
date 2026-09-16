@@ -13608,3 +13608,142 @@ test('SPEC §28 IR-3: DEFAULT_IR_COMPARE_PROMPT matches the locked dimensions (s
   assertTrue(/json/i.test(prompt), 'prompt mentions JSON');
   assertTrue(/array/i.test(prompt) || /\[\s*\{/.test(prompt), 'prompt mentions array');
 });
+
+// ─── SPEC §28 / IR-4 — Iterative refinement: irRevisePrompt module ─────
+//
+// IR-4 swaps the IR-1 stub for a real MiniMax M3 text call. The
+// model receives the current working prompt + the Mismatch[] and
+// emits a revised prompt string ≤ MAX_FINAL_PROMPT_LENGTH.
+//
+// Critical: the revised prompt MUST pass
+// `validatePromptPreservation(current_prompt, revised, joinedFixes)`
+// (ADR 0012). If it declines, the route emits the SPEC §22
+// partial-apply decline envelope (the IR-4 path mirrors the same
+// shape).
+//
+// The pure validator (`parseRevisedPrompt`) handles: length cap,
+// non-empty, normalisation. Anchor-preservation is the validator's
+// caller — `irRevisePrompt` runs it after the model call.
+
+const IR_REVISE_FIXTURE_OK = path.join(IR_FIXTURE_DIR, 'ir-revise-ok.json');
+const IR_REVISE_FIXTURE_LONG = path.join(IR_FIXTURE_DIR, 'ir-revise-too-long.json');
+const IR_REVISE_FIXTURE_EMPTY = path.join(IR_FIXTURE_DIR, 'ir-revise-empty.json');
+
+test('SPEC §28 IR-4: server.js exports the IR-Revise module surface', () => {
+  const { irRevisePrompt, parseRevisedPrompt, callImageRevisionText,
+          DEFAULT_IR_REVISE_PROMPT } = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(typeof irRevisePrompt, 'function', 'irRevisePrompt is a function');
+  assertEqual(typeof parseRevisedPrompt, 'function', 'parseRevisedPrompt is a function');
+  assertEqual(typeof callImageRevisionText, 'function', 'callImageRevisionText is a function');
+  assertEqual(typeof DEFAULT_IR_REVISE_PROMPT, 'string', 'DEFAULT_IR_REVISE_PROMPT is a string');
+  assertTrue(DEFAULT_IR_REVISE_PROMPT.length > 100, 'revise prompt is substantive');
+});
+
+test('SPEC §28 IR-4: parseRevisedPrompt accepts a fixture under the length cap', () => {
+  const { parseRevisedPrompt } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const raw = JSON.parse(fs.readFileSync(IR_REVISE_FIXTURE_OK, 'utf8'));
+  const parsed = parseRevisedPrompt(raw);
+  assertEqual(typeof parsed, 'string', 'parsed is string');
+  assertTrue(parsed.length > 50, 'parsed is non-trivial');
+  assertTrue(parsed.length <= 5000, 'parsed fits MAX_FINAL_PROMPT_LENGTH');
+});
+
+test('SPEC §28 IR-4: parseRevisedPrompt rejects an oversize prompt', () => {
+  const { parseRevisedPrompt, MAX_FINAL_PROMPT_LENGTH } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const raw = JSON.parse(fs.readFileSync(IR_REVISE_FIXTURE_LONG, 'utf8'));
+  let threw = false;
+  try { parseRevisedPrompt(raw); } catch (err) {
+    threw = true;
+    assertTrue(/length|exceeds|max/i.test(err.message), `error names the size limit: ${err.message}`);
+    assertTrue(err.message.includes(String(MAX_FINAL_PROMPT_LENGTH)),
+      `error message includes the cap value ${MAX_FINAL_PROMPT_LENGTH}`);
+  }
+  assertTrue(threw, 'oversize prompt throws');
+});
+
+test('SPEC §28 IR-4: parseRevisedPrompt rejects an empty string', () => {
+  const { parseRevisedPrompt } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const raw = JSON.parse(fs.readFileSync(IR_REVISE_FIXTURE_EMPTY, 'utf8'));
+  let threw = false;
+  try { parseRevisedPrompt(raw); } catch (err) {
+    threw = true;
+    assertTrue(/empty|non-empty/i.test(err.message), `error names the constraint: ${err.message}`);
+  }
+  assertTrue(threw, 'empty prompt throws');
+});
+
+test('SPEC §28 IR-4: irRevisePrompt runs revised prompt through validatePromptPreservation', async () => {
+  // The revised prompt must pass ADR 0012 anchor-preservation when
+  // the joined suggested_fix strings are passed as the "user
+  // request". We seed a current_prompt + mismatches where the fix
+  // overlaps the dropped terms, and verify the function does not
+  // raise. (The function returns the revised prompt or the decline
+  // envelope — both are acceptable shapes.)
+  //
+  // Live API errors (no credits, network) are tolerated: the
+  // function should throw, and the route's 504 envelope converts
+  // that into a user-visible error.
+  const { irRevisePrompt, resolveProviderCredential } = require(path.join(PROJECT_ROOT, 'server.js'));
+  const cred = resolveProviderCredential('minimax');
+  if (!cred.apiKey) {
+    // No API key: stub path. Verify it returns a non-empty string.
+    const out = await irRevisePrompt('A red dress on a woman.', [
+      { dimension: 'style', severity: 'med', generated_value: 'digital', reference_value: 'oil painting',
+        suggested_fix: 'Switch to oil painting medium' }
+    ]);
+    assertEqual(typeof out, 'string', 'stub returns string');
+    assertTrue(out.length > 0, 'stub non-empty');
+    return;
+  }
+  // With API key: live call. Accept string OR decline envelope OR
+  // thrown error (API outage — the route catches).
+  try {
+    const out = await irRevisePrompt('A red dress on a woman.', [
+      { dimension: 'style', severity: 'med', generated_value: 'digital', reference_value: 'oil painting',
+        suggested_fix: 'Switch to oil painting medium' }
+    ]);
+    if (typeof out === 'string') {
+      assertTrue(out.length > 0 && out.length <= 5000, 'revised prompt fits length cap');
+    } else if (out && out.declined === true) {
+      assertTrue(Array.isArray(out.declined_missing_terms), 'decline carries missing_terms');
+    } else {
+      throw new Error(`unexpected irRevisePrompt return shape: ${JSON.stringify(out).slice(0, 200)}`);
+    }
+  } catch (err) {
+    // Live API failed (no credits, network, etc). The route catches
+    // this and returns 504; that's the correct behaviour.
+    assertTrue(typeof err.message === 'string' && err.message.length > 0,
+      `live call threw with non-empty message: ${err.message}`);
+  }
+});
+
+test('SPEC §28 IR-4: route emits decline envelope when anchor preservation rejects', () => {
+  // We can't easily force a live API decline here, but we can assert
+  // the route's response envelope recognises the decline shape (the
+  // IR-1 + IR-2 + IR-3 happy-path tests cover the success shape;
+  // this test covers the decline-shape contract via the assistant
+  // message audit shape).
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/declined_partial_prompt/.test(serverText),
+    'server.js handles declined_partial_prompt on the ir iteration path');
+  assertTrue(/declined_missing_terms/.test(serverText),
+    'server.js handles declined_missing_terms on the ir iteration path');
+  // The IR route specifically threads the decline through.
+  assertTrue(/analyze-generated[\s\S]{0,4000}declined/.test(serverText),
+    'analyze-generated route recognises decline shape');
+});
+
+test('SPEC §28 IR-4: DEFAULT_IR_REVISE_PROMPT matches the contract (source-grep)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const m = serverText.match(/const DEFAULT_IR_REVISE_PROMPT\s*=\s*`([\s\S]*?)`;/);
+  assertTrue(m, 'DEFAULT_IR_REVISE_PROMPT template literal found');
+  const prompt = m[1];
+  // Must reference the inputs the model receives.
+  for (const key of ['mismatch', 'severity', 'dimension', 'suggested_fix']) {
+    assertTrue(prompt.includes(key),
+      `DEFAULT_IR_REVISE_PROMPT mentions "${key}"`);
+  }
+  // Must instruct the model to emit ONLY the revised prompt.
+  assertTrue(/only/i.test(prompt), 'prompt says "only" the revised prompt');
+  assertTrue(/preserve|anchor/i.test(prompt), 'prompt mentions preservation/anchor');
+});

@@ -10305,12 +10305,148 @@ async function irCompareImages(reference, generated, imageDataUriRef, imageDataU
   return await callImageComparisonVision(imageDataUriRef, imageDataUriGen, reference, generated);
 }
 
-// SPEC §28 IR-4 stub — given current_prompt + Mismatch[], produce a
-// revised prompt string. IR-1 returns a deterministic placeholder;
-// IR-4 replaces the body with a real MiniMax text call that runs
-// the revised prompt through validatePromptPreservation.
+// SPEC §28 / IR-4 — system prompt for the prompt-revision call.
+// The model receives the current working prompt + the Mismatch[]
+// and is told to emit ONLY the revised prompt string (no
+// commentary, no markdown). The prompt explicitly mentions anchor
+// preservation: the revised prompt MUST keep every non-targeted
+// element of the current prompt intact.
+const DEFAULT_IR_REVISE_PROMPT = `You are an expert prompt engineer. You receive the current working prompt for an AI image-generation model AND a list of mismatches between the image the user generated and the original reference image. Your job is to rewrite the current prompt so the next generation better matches the reference.
+
+Rules:
+- Output ONLY the revised prompt string. No commentary, no markdown, no quotes.
+- Preserve every non-targeted element of the current prompt (subject, composition, lighting, mood, format tags, etc.). Only adjust the dimensions named in each mismatch (dimension field: subjects, style, palette, composition, objects, text, aesthetic).
+- For each mismatch, apply the suggested_fix concretely — don't paraphrase it into vagueness.
+- Match the severity: high-severity mismatches need structural changes; low-severity can be one-word swaps.
+- Keep the prompt under 5000 characters.
+- If the mismatch list is empty, return the current prompt unchanged.
+- Do not invent new facts not in the current prompt (preserve the anchor set).
+
+Inputs:
+- current_prompt: the user's current working prompt.
+- mismatches: array of { dimension, severity, generated_value, reference_value, suggested_fix }.
+
+Respond with the revised prompt only.`;
+
+// SPEC §28 / IR-4 — strict validator for the revised prompt.
+// Pure function. Throws on: empty string, oversize, non-string.
+function parseRevisedPrompt(raw) {
+  if (typeof raw !== 'string') {
+    throw new Error('Revised prompt must be a string');
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new Error('Revised prompt must be non-empty');
+  }
+  if (trimmed.length > MAX_FINAL_PROMPT_LENGTH) {
+    throw new Error(`Revised prompt exceeds ${MAX_FINAL_PROMPT_LENGTH} characters (got ${trimmed.length}).`);
+  }
+  return trimmed;
+}
+
+// SPEC §28 / IR-4 — MiniMax M3 text call. Returns parsed revised
+// prompt string. Function name avoids the callMiniMax* prefix
+// (Slice 3.1 ADR-0022 invariant).
+const callImageRevisionText = async (currentPrompt, mismatches, model = DEFAULT_LLM_MODEL) => {
+  const cred = resolveProviderCredential('minimax');
+  const MINIMAX_API_KEY = cred.apiKey;
+  const MINIMAX_BASE_URL = cred.baseUrl;
+  if (!MINIMAX_API_KEY) {
+    throw new Error('MINIMAX_API_KEY not set. Configure MiniMax in Providers & keys.');
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+
+  const userText = `current_prompt:\n${currentPrompt}\n\nmismatches:\n${JSON.stringify(mismatches, null, 2)}\n\nReturn the revised prompt string only.`;
+
+  try {
+    const response = await fetch(`${MINIMAX_BASE_URL}/text/chatcompletion_v2`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        max_tokens: 2000,
+        temperature: 0.4,
+        messages: [
+          { role: 'system', content: DEFAULT_IR_REVISE_PROMPT },
+          { role: 'user', content: userText }
+        ]
+      })
+    });
+
+    clearTimeout(timeout);
+
+    if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+    if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your MINIMAX_API_KEY.');
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`MiniMax prompt revision error (${response.status}): ${errorText.substring(0, 200)}`);
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+    if (!content) throw new Error('MiniMax returned an empty response.');
+
+    return parseRevisedPrompt(content);
+  } catch (err) {
+    clearTimeout(timeout);
+    throw err;
+  }
+};
+
+// SPEC §28 / IR-4 — currentPrompt + mismatches → revised prompt
+// string (or decline envelope). Runs the model output through
+// ADR 0012 validatePromptPreservation before returning.
+//
+// Shape:
+//   - On preservation pass: returns the revised prompt string.
+//   - On preservation decline: returns { declined: true,
+//     declined_partial_prompt, declined_missing_terms, declined_reason }
+//     (mirrors SPEC §22 partial-apply decline shape).
+//
+// Stub fallback (no API key) appends the mismatch summary to the
+// current prompt so the feature remains demoable.
 async function irRevisePrompt(currentPrompt, mismatches) {
-  return `${currentPrompt} [IR-1 stub revision — analyzed ${mismatches.length} mismatch(es).]`;
+  const cred = resolveProviderCredential('minimax');
+  if (!cred.apiKey) {
+    return `${currentPrompt} [IR-1 stub revision — ${mismatches.length} mismatch(es) flagged.]`;
+  }
+  let revised;
+  try {
+    revised = await callImageRevisionText(currentPrompt, mismatches);
+  } catch (err) {
+    // The model's call itself failed — bubble the error to the
+    // route's 504 envelope.
+    throw err;
+  }
+  // Anchor preservation (ADR 0012). Pass the joined suggested_fix
+  // strings as the "user request" so words in the fixes don't
+  // count as non-targeted missing.
+  if (typeof validatePromptPreservation === 'function') {
+    const userRequest = (mismatches || [])
+      .map((m) => `${m.dimension || ''} ${m.generated_value || ''} ${m.reference_value || ''} ${m.suggested_fix || ''}`)
+      .join(' ');
+    const validator = validatePromptPreservation(currentPrompt, revised, userRequest);
+    if (validator && validator.preserved === false) {
+      // Mirror SPEC §22 partial-apply decline envelope.
+      const missingUnion = new Set([
+        ...(validator.targetedMissing || []),
+        ...(validator.nonTargetedMissing || [])
+      ]);
+      return {
+        declined: true,
+        declined_partial_prompt: revised,
+        declined_missing_terms: Array.from(missingUnion),
+        declined_reason: validator.reason || null
+      };
+    }
+  }
+  return revised;
 }
 
 /**
@@ -10423,20 +10559,45 @@ app.post('/api/chat/sessions/:id/analyze-generated', async (req, res) => {
     }
     latency.revise = Date.now() - tReviseStart;
 
+    // SPEC §28 / IR-4 — anchor-preservation decline envelope.
+    // `irRevisePrompt` returns either a string (success) or an
+    // object { declined: true, ... } (ADR 0012 validator rejected
+    // the revised prompt). The route mirrors SPEC §22 partial-apply
+    // decline: the assistant message is appended with
+    // declined_partial_prompt + declined_missing_terms so the user
+    // sees why the model refused to apply.
+    const revisedDeclined = revisedPrompt && typeof revisedPrompt === 'object' && revisedPrompt.declined === true;
+    const revisedPromptText = revisedDeclined ? revisedPrompt.declined_partial_prompt : revisedPrompt;
+    const declinedMissingTerms = revisedDeclined ? (revisedPrompt.declined_missing_terms || []) : [];
+    const declinedReason = revisedDeclined ? (revisedPrompt.declined_reason || null) : null;
+
     // Append the assistant message. Shape mirrors SPEC §22 / SPEC
-    // §24 assistant messages.
+    // §24 assistant messages. IR-4: when the revised prompt fails
+    // anchor preservation, the message is tagged with
+    // declined_partial_prompt + declined_missing_terms (mirrors the
+    // SPEC §22 partial-apply decline envelope) and the user-visible
+    // content says so explicitly.
+    const assistantContent = revisedDeclined
+      ? `Revision declined — too much of the original context would have been lost. ${declinedMissingTerms.length} non-targeted term(s) missing: ${declinedMissingTerms.slice(0, 10).join(', ')}${declinedMissingTerms.length > 10 ? '…' : ''}`
+      : `IR iteration: ${mismatches.length} mismatch(es) flagged. The revised prompt below addresses them.`;
     const assistantMessage = {
       id: generateChatMessageId(),
       role: 'assistant',
-      content: `IR-1 stub iteration: ${mismatches.length} mismatch(es) flagged. The revised prompt below addresses them.`,
-      suggested_prompt: revisedPrompt,
+      content: assistantContent,
+      suggested_prompt: revisedPromptText,
       audit: {
         kind: 'ir_iteration',
         iteration_index: (session.ir_iteration_count || 0) + 1,
         reference_attachment_id: referenceEntry.id,
         generated_attachment_id: generatedEntry.id,
         mismatches,
-        latency_ms: latency
+        latency_ms: latency,
+        // IR-4 — anchor-preservation decline (SPEC §22 envelope).
+        ...(revisedDeclined ? {
+          declined_partial_prompt: revisedPromptText,
+          declined_missing_terms: declinedMissingTerms,
+          declined_reason: declinedReason
+        } : {})
       },
       timestamp: new Date().toISOString()
     };
@@ -10454,8 +10615,13 @@ app.post('/api/chat/sessions/:id/analyze-generated', async (req, res) => {
         reference_attributes: referenceAttributes,
         generated_attributes: generatedAttributes,
         mismatches,
-        revised_prompt: revisedPrompt,
-        ir_iteration_count: session.ir_iteration_count
+        revised_prompt: revisedPromptText,
+        ir_iteration_count: session.ir_iteration_count,
+        ...(revisedDeclined ? {
+          declined: true,
+          declined_missing_terms: declinedMissingTerms,
+          declined_reason: declinedReason
+        } : {})
       }
     });
   } catch (error) {
@@ -11549,14 +11715,16 @@ module.exports = {
   IR_VALID_SEVERITIES,
   IR_MISMATCH_SCHEMA,
   DEFAULT_IR_COMPARE_PROMPT,
+  DEFAULT_IR_REVISE_PROMPT,
   parseImageAttributes,
   parseMismatchList,
+  parseRevisedPrompt,
   callImageAttributesVision,
   callImageComparisonVision,
+  callImageRevisionText,
   fileToImageDataUri,
   irAnalyzeImage,
   irCompareImages,
-  markChatAttachmentAsReference,
-  // IR-4 still stub — swapped in next slice.
-  irRevisePrompt
+  irRevisePrompt,
+  markChatAttachmentAsReference
 };
