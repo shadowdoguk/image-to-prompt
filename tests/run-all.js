@@ -11560,8 +11560,9 @@ test('UI-R8 + UI-R9 + SPEC §27 + SPEC §28: notes + chat-clear + IR endpoint co
   // UI-R9 adds 9 more (4 folders + 1 move + 4 attachments).
   // SPEC §27 adds 2 more (GET count + DELETE bulk).
   // SPEC §28 / IR-1 adds 1 more (POST analyze-generated).
-  // Total target: 77.
-  assertEqual(matches.length, 77, `expected 77 endpoints after SPEC §28 IR-1; got ${matches.length}`);
+  // SPEC §30 / Slice K.2 adds 1 more (POST /api/krea2).
+  // Total target: 78.
+  assertEqual(matches.length, 78, `expected 78 endpoints after SPEC §30 K.2; got ${matches.length}`);
 });
 
 // ─── Bugfix CR-16: Analyze Image button silent failure (2026-09-04) ───
@@ -14431,4 +14432,150 @@ test('SPEC §30 K.1: renderModelSelector renders all three buttons (K.1 acceptan
     /dom\.modelSelector\.querySelectorAll\('\[data-model\]'\)/.test(js),
     'renderModelSelector queries [data-model] (covers all three)'
   );
+});
+
+// ─── SPEC §30 — Krea-2 picker slice (K.2 sub-slice) ───────────────────
+//
+// Slice K.2 ships the actual LLM contract for Krea 2:
+//   DEFAULT_KREA2_PROMPT (the 5-layer formula system prompt)
+//   callKiloKrea2Analysis (the vision-call helper)
+//   POST /api/krea2 route (the dispatcher)
+//   creativityIntToBucketLabel (the helper that maps integer 0-100
+//     to Raw/Low/Medium/High per manual §4)
+// All siblings to the Anima trio (DEFAULT_ANIMA_PROMPT +
+// callKiloAnimaAnalysis + POST /api/anima).
+
+test('SPEC §30 K.2: server.js exports DEFAULT_KREA2_PROMPT', () => {
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertTrue(typeof serverMod.DEFAULT_KREA2_PROMPT === 'string',
+    'DEFAULT_KREA2_PROMPT exported as string');
+  // The constant references all five 5-layer formula names verbatim
+  // (SPEC §30.4 + PRE-MORTEM §30 R-6).
+  const prompt = serverMod.DEFAULT_KREA2_PROMPT;
+  assertTrue(/Subject and action/.test(prompt), 'prompt references "Subject and action"');
+  assertTrue(/Setting and environment/.test(prompt), 'prompt references "Setting and environment"');
+  assertTrue(/Lighting and mood/.test(prompt), 'prompt references "Lighting and mood"');
+  assertTrue(/Style reference/.test(prompt), 'prompt references "Style reference"');
+  assertTrue(/Composition notes/.test(prompt), 'prompt references "Composition notes"');
+  // The four creativity bucket labels are all present verbatim.
+  assertTrue(/\bRaw\b/.test(prompt), 'prompt references "Raw" bucket');
+  assertTrue(/\bLow\b/.test(prompt), 'prompt references "Low" bucket');
+  assertTrue(/\bMedium\b/.test(prompt), 'prompt references "Medium" bucket');
+  assertTrue(/\bHigh\b/.test(prompt), 'prompt references "High" bucket');
+  // The no-negative-prompt invariant is encoded as an explicit rule.
+  assertTrue(/NEVER emit a "negative" key/i.test(prompt),
+    'prompt explicitly forbids a negative key (manual §10 R8 + §11)');
+});
+
+test('SPEC §30 K.2: callKiloKrea2Analysis is exported and signature-locked', () => {
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  assertEqual(typeof serverMod.callKiloKrea2Analysis, 'function',
+    'callKiloKrea2Analysis exported as function');
+});
+
+test('SPEC §30 K.2: creativityIntToBucketLabel pure helper (Raw/Low/Medium/High mapping)', () => {
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  const fn = serverMod.creativityIntToBucketLabel;
+  assertEqual(typeof fn, 'function', 'creativityIntToBucketLabel exported');
+  // Per the operational default mapping (Raw 0-20 / Low 21-45 /
+  // Medium 46-65 / High 66-100). Krea's manual §4 publishes the
+  // bucket labels without numeric boundaries; this mapping is the
+  // project's documented convention, exercised by the Krea-2 prompt
+  // string above.
+  assertEqual(fn(0), 'Raw', '0 → Raw');
+  assertEqual(fn(20), 'Raw', '20 → Raw (boundary)');
+  assertEqual(fn(21), 'Low', '21 → Low (boundary)');
+  assertEqual(fn(45), 'Low', '45 → Low (boundary)');
+  assertEqual(fn(46), 'Medium', '46 → Medium (boundary)');
+  assertEqual(fn(50), 'Medium', '50 → Medium (default)');
+  assertEqual(fn(65), 'Medium', '65 → Medium (boundary)');
+  assertEqual(fn(66), 'High', '66 → High (boundary)');
+  assertEqual(fn(100), 'High', '100 → High');
+  // Non-finite inputs fall back to Medium (canonical safe).
+  assertEqual(fn(NaN), 'Medium', 'NaN → Medium');
+  assertEqual(fn(undefined), 'Medium', 'undefined → Medium');
+  assertEqual(fn('not a number'), 'Medium', 'garbage string → Medium');
+});
+
+test('SPEC §30 K.2: POST /api/krea2 route registered in server.js', () => {
+  const text = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/app\.post\(['"]\/api\/krea2['"]/.test(text),
+    'POST /api/krea2 route is registered');
+  // The route handler accepts multer.single('image').
+  assertTrue(/app\.post\(['"]\/api\/krea2['"][^)]*upload\.single\(['"]image['"]\)/.test(text),
+    'POST /api/krea2 uses multer upload.single("image")');
+});
+
+test('SPEC §30 K.2: POST /api/krea2 response envelope has NO negative field (P-7 + K-5 invariant)', () => {
+  // The K.2 / K.5 invariant: the response envelope explicitly does
+  // NOT carry a `negative` key. Krea 2 has no negative prompt per
+  // manual §10 R8 + §11 default CFG=0. The route handler's `res.json`
+  // block must NOT contain a `negative:` field.
+  const text = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const startIdx = text.indexOf("app.post('/api/krea2'");
+  assertTrue(startIdx !== -1, '/api/krea2 route exists');
+  // 4500-char window covers the entire /api/krea2 route body
+  // (route starts with multer-bound handler, ends with res.json +
+  // catch). The envelope res.json block must include the
+  // documented fields and must NOT include 'negative:'.
+  const window = text.slice(startIdx, startIdx + 4500);
+  assertTrue(/prompt: result\.prompt/.test(window),
+    'envelope includes prompt: result.prompt');
+  assertTrue(/variant: result\.variant/.test(window),
+    'envelope includes variant: result.variant');
+  assertTrue(/creativity: result\.creativity/.test(window),
+    'envelope includes creativity: result.creativity');
+  assertTrue(!/negative:/.test(window),
+    'envelope does NOT carry a "negative:" key (P-7 + K-5)');
+});
+
+test('SPEC §30 K.2: POST /api/krea2 validation — creativity clamped to [0, 100]', () => {
+  const text = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const startIdx = text.indexOf("app.post('/api/krea2'");
+  const window = text.slice(startIdx, startIdx + 2500);
+  // The route clamps creativity in [0, 100] with Math.round.
+  assertTrue(/creativity[\s\S]{0,200}Math\.max\(0,\s*Math\.min\(100,\s*Math\.round\(n\)\)/.test(window),
+    'creativity clamped to [0, 100] with Math.round');
+});
+
+test('SPEC §30 K.2: POST /api/krea2 variant is ACCEPTED but not threaded into system prompt', () => {
+  // PRE-MORTEM §30 R-4: variant is capacity, not contract. The
+  // route accepts a 'variant' field but DEFAULT_KREA2_PROMPT must
+  // not contain variant-specific branches (variant does NOT modify
+  // the system prompt).
+  const serverMod = require(path.join(PROJECT_ROOT, 'server.js'));
+  const prompt = serverMod.DEFAULT_KREA2_PROMPT;
+  // The prompt is INVARIANT to variant. There are no per-variant
+  // branches. (If a future PR adds per-variant prompts, that would
+  // be a deliberate spec amendment, not a silent behaviour change.)
+  // Operationally, we check that the prompt doesn't say "IF variant
+  // is turbo, then ..." — i.e. no variant-conditional language.
+  assertTrue(!/if variant\s*===?\s*['"]turbo['"]/i.test(prompt),
+    'prompt has no "if variant===turbo" branches (variant is capacity, not contract)');
+  assertTrue(!/variant\s*===?\s*['"](turbo|medium|large)['"]/i.test(prompt),
+    'prompt has no per-variant branches');
+});
+
+test('SPEC §30 K.2: Krea 2 ingest into RAG uses single-positive prompt (no negative metadata)', () => {
+  const text = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const startIdx = text.indexOf("app.post('/api/krea2'");
+  const window = text.slice(startIdx, startIdx + 2500);
+  assertTrue(/ragIngest\.ingestStage2Output/.test(window),
+    '/api/krea2 calls ragIngest.ingestStage2Output');
+  assertTrue(/finalPrompt:\s*result\.prompt/.test(window),
+    'ingest finalPrompt = result.prompt');
+  // The ingest metadata should NOT carry a `negative` field
+  // (Krea-2 is single-positive — the metadata field is reserved
+  // for tags-shape contracts like Anima, where the negative prompt
+  // is text-searchable but not embedding-relevant).
+  assertTrue(!/meta:\s*\{[\s\S]{0,300}negative:/.test(window),
+    'ingest metadata does not carry a "negative:" key (Krea-2 single-positive)');
+});
+
+test('SPEC §30 K.2: SPEC §30 + ADR 0030 cross-references present in source', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/SPEC §30/.test(serverText), 'server.js references SPEC §30 (any sub-section)');
+  assertTrue(/ADR 0030/.test(serverText), 'server.js references ADR 0030');
+  // Slice K.2 markers identify the helper + route + constant.
+  assertTrue(/Slice K\.2/.test(serverText), 'server.js identifies Slice K.2 markers');
 });

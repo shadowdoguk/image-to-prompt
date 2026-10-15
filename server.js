@@ -3902,6 +3902,267 @@ const callKiloAnimaAnalysis = async (imageDataUri, variant, model = DEFAULT_LLM_
 };
 
 /**
+ * Slice K.2 — ADR 0030 — callKiloKrea2Analysis (the Krea 2 prompt contract).
+ *
+ * Returns `{ prompt }` — a SINGLE positive prose string. There is no
+ * `negative` field on this envelope because Krea 2's default CFG=0
+ * makes negative prompts have no effect (manual §10 R8 + §11). The
+ * branch updates in this helper mirror `callKiloAnimaAnalysis`
+ * (single-attempt, schema builder inline, 60-second timeout, file-path
+ * cleanup on success/error handled by the route wrapper).
+ *
+ * Two Krea-2-specific arguments:
+ *   - `creativity`: integer 0-100. Default 50 (Medium bucket, manual
+ *     §4 + §2 canonical safe choice). The system prompt branches per
+ *     bucket label (Raw / Low / Medium / High). Exact numeric bucket
+ *     boundaries are NOT published by Krea; the LLM carries the bucket
+ *     mapping verbatim and treats the integer as the fine-grained
+ *     control.
+ *   - `variant`: 'turbo' | 'medium' | 'large'. Capacity tier, NOT contract
+ *     (manual §2 explicit statement). Variant does NOT modify the
+ *     system prompt; it is recorded on the response envelope for the
+ *     chat-session-anchor contract (SPEC §30.4). Variant guards here
+ *     reject unknown values rather than silently defaulting.
+ *
+ * The variant argument is accepted but NOT threaded into the LLM
+ * facing prompt — this is the deliberate behaviour pinned by
+ * PRE-MORTEM §30 R-4. A future variant-aware contract change would
+ * arrive as a documented spec amendment.
+ */
+const DEFAULT_KREA2_PROMPT = `You are an expert prompt engineer for the Krea 2 text-to-image model (Krea AI, San Francisco — see docs/KREA-2-PROMPTING-MANUAL.md §7, §8, §10). You transform a visual analysis into the Krea 2 prose-only 5-layer prompt contract.
+
+You respond with a SINGLE JSON object containing exactly one key: "prompt". The value is a single short prose paragraph. Krea 2 does NOT use a negative prompt — default CFG=0 means negative prompts have no effect (manual §10 R8 + §11). NEVER emit a "negative" key.
+
+# 5-LAYER FORMULA (every Krea 2 prompt)
+
+Every Krea 2 prompt is composed of these five layers, in this order. All five must be present. Each layer is a short prose clause separated by commas, semicolons, or sentence breaks — not tags, not weights, not bracket syntax.
+
+1. **Subject and action** — who or what is in the image, and what they are doing. Use a noun phrase + verb phrase. Concrete. Singular subject unless the image clearly shows multiple.
+2. **Setting and environment** — where the subject is. Indoor or outdoor, season, weather, geography, era of the place. Skip if purely character-portrait on white.
+3. **Lighting and mood** — physical source of light (manual §6.2 vocabulary) + the affect/feeling of the scene (manual §6.6 vocabulary). The clause should read "soft window light from the left, dreamy cinematic scene" — physical + emotional in one phrase.
+4. **Style reference or aesthetic keyword** — pick exactly one from manual §6.1: photorealistic 35 mm film photograph / cinematic photograph / oil painting / watercolor / 3D render / anime illustration / Studio Ghibli / risograph print / comic book / watercolor illustration / Polaroid instant film / Hasselblad medium format / etc. Default to "photorealistic 35 mm film photograph" when the source is photographic with no clear stylistic signal.
+5. **Composition notes** — pick one from manual §6.5: wide shot, rule of thirds / medium close-up portrait / extreme close-up, macro photograph / low angle, looking up / high angle, looking down / centered subject, symmetrical / off-center subject, dynamic / deep focus, environmental context / wide-angle establishing shot. The lens / camera clause (manual §6.3) folds naturally into this layer (e.g. "85 mm portrait lens, shallow depth of field, medium close-up portrait").
+
+# ABSOLUTE RULES (NEVER violate)
+
+- Output is PROSE — never tags, never weights, never quality markers like "(masterpiece)" or "[high quality]". Krea 2 reads prose only (manual §3).
+- NEVER emit a "negative" key. Krea 2 has no negative-prompt slot.
+- NEVER reference meta ("the image", "the photograph", "the artwork", "the picture").
+- NEVER use adjectives from the Anima forbidden list ("beautiful", "striking", "vibrant", "dramatic", "elegant", "majestic", "imposing", "ethereal", "luminous", "bold") unless they are part of a manual §6.2 lighting or mood phrase.
+- NEVER render multi-word in-image text in the prose. Krea 2's text rendering is single-word or short-phrase only (manual §10 R8). If in-image text is wanted, lower the creativity bucket (see CREATIVITY below) and emit the text as a short quoted phrase (e.g. text reading "OPEN" on a sign).
+- Keep the prose tight. 80-300 words is typical. Manual §4.1 places length ceilings — long prose overruns the rendering contract.
+
+# CREATIVITY (integer 0-100; bucket label per manual §4)
+
+The user's integer 0-100 controls the LLM's interpretation latitude. The bucket label goes verbatim into the prose layer 4 (style reference) as a one-token modifier. Four buckets:
+
+- **Raw (0-20):** "Raw — literal photographic rendering. Hedging toward the source image's actual pixels. Default for documentary-style photographs."
+  Modifier: prepend "Raw," to the style reference.
+- **Low (21-45):** "Low — photographic, slight interpretation. Default for portraits where the subject's likeness matters."
+  Modifier: prepend "Low," to the style reference.
+- **Medium (46-65, default):** "Medium — balanced. Stylistic interpretation within reason. Default safe choice for general use."
+  Modifier: prepend "Medium," to the style reference.
+- **High (66-100):** "High — strong stylization / artistic interpretation. Concept art and hero shots welcome the latitude."
+  Modifier: prepend "High," to the style reference.
+
+For in-image text rendering, manual §10 + §11 specifically recommend Low — Medium and High corrupt lettering. The bucket label is verbatim from the manual. The numeric boundaries (Raw 0-20 / Low 21-45 / Medium 46-65 / High 66-100) are operational defaults for the prompt instruction; the LLM treats the integer as the fine-grained control.
+
+# LENGTH (manual §4.1)
+
+- "prompt": minimum 80 characters, maximum 1500 characters.
+- Single short prose paragraph. NEVER multi-paragraph. NEVER bullet list.
+- Respond ONLY with the JSON object — no preamble, no labels, no markdown, no surrounding commentary.
+
+# COVERAGE (close the holes that the Anima contract had)
+
+All five layers must be present and covered in this order. Missing layers are a bug. Mirror the manual §8 worked examples — they always cover all five.
+
+- When the source image is photographic with no clear artistic signal, default the style reference to "photorealistic 35 mm film photograph" and the composition to "85 mm portrait lens, shallow depth of field, medium close-up portrait" if the subject is a head-and-shoulders portrait.
+- When the source is a digital painting or illustration, default the style reference to the matching medium: "oil painting" / "watercolor" / "3D render" / "anime illustration" / etc.
+- When the source is a non-photographic document (chart, screenshot, diagram), default the style reference to "cinematic photograph" with a clear note of the source type in the subject clause.`;
+
+/**
+ * Slice K.2 — ADR 0030 — Krea 2 vision call. Returns `{ prompt }`
+ * (single positive prose; no negative — see manual §10 R8 + §11).
+ *
+ * Mirrors the Anima pattern structurally:
+ *  - single-attempt LLM call (Issue #25 retry only fires on empty
+ *    `finish_reason: "stop"`, which shouldn't happen for the JSON-
+ *    schema-locked Krea-2 envelope, but the retry is preserved for
+ *    shape parity with the rest of the codebase)
+ *  - 60-second AbortController timeout
+ *  - schema builder inline, length floors enforced
+ *  - 429 / 401-403 / 5xx / empty / invalid-JSON / missing-field paths
+ *  - multer file cleanup handled by the route wrapper
+ */
+const callKiloKrea2Analysis = async (
+  imageDataUri,
+  creativity = 50,
+  variant = 'medium',
+  model = DEFAULT_LLM_MODEL
+) => {
+  if (!kiloConfigured) {
+    throw new Error('Kilo Code API is not configured. Set KILO_API_KEY in your .env file.');
+  }
+
+  // Slice K.2 — creativity validator lives in the helper, not the
+  // validator definition. Mirrors callKiloAnimaAnalysis' variant
+  // validator: clamp on garbage rather than silently defaulting.
+  const n = Number(creativity);
+  const creativityInt = Number.isFinite(n)
+    ? Math.max(0, Math.min(100, Math.round(n)))
+    : 50;
+
+  // Slice K.2 — variant is capacity, not contract (manual §2).
+  // We accept the variant arg and return it on the envelope, but
+  // the LLM-facing prompt is invariant to variant per PRE-MORTEM
+  // §30 R-4. Unknown variant values fall through to 'medium'
+  // (canonical safe choice); we DO NOT silently accept garbage to
+  // keep the chat-session-anchor honest.
+  const allowedVariants = ['turbo', 'medium', 'large'];
+  const variantPrompt = allowedVariants.includes(variant) ? variant : 'medium';
+
+  const systemPrompt = DEFAULT_KREA2_PROMPT;
+  const userPrompt = `Analyse the image and respond with the JSON object containing only "prompt" — a single prose paragraph following the 5-layer formula (Subject and action / Setting and environment / Lighting and mood / Style reference / Composition notes). CREATIVITY_BUCKET = ${creativityIntToBucketLabel(creativityInt)} (integer ${creativityInt} of 100).`;
+
+  // Issue #25 — one retry on empty content. Bounded identical to
+  // callKiloAnimaAnalysis. The JSON schema is strict, so this should
+  // rarely fire, but the retry is preserved for shape parity.
+  const fetchBody = JSON.stringify({
+    model: model,
+    max_tokens: 1200,  // longer prose than tags; manual §4.1 ceilings
+    temperature: 0.4,  // 0.4 (vs Anima's 0.3) per manual §7 guidance — Krea 2's LLM contract rewards slight interpretation
+    messages: [
+      { role: 'system', content: systemPrompt },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: userPrompt },
+          { type: 'image_url', image_url: { url: imageDataUri } }
+        ]
+      }
+    ],
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'krea2_prompt_contract',
+        strict: true,
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            prompt: { type: 'string', minLength: 80, maxLength: 1500 }
+          },
+          required: ['prompt']
+        }
+      }
+    }
+  });
+
+  const doFetch = async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    try {
+      const response = await fetch(`${KILO_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${KILO_API_KEY}`
+        },
+        signal: controller.signal,
+        body: fetchBody
+      });
+
+      clearTimeout(timeout);
+
+      if (response.status === 429) throw new Error('Rate limit exceeded. Please try again in a moment.');
+      if (response.status === 401 || response.status === 403) throw new Error('API authentication failed. Check your KILO_API_KEY.');
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Kilo Code krea2 analysis error (${response.status}): ${errorText.substring(0, 200)}`);
+      }
+
+      return await response.json();
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
+    }
+  };
+
+  try {
+    let result = await doFetch();
+    let content = result.choices?.[0]?.message?.content;
+    let finishReason = result.choices?.[0]?.finish_reason;
+    if (!content && finishReason !== 'length') {
+      result = await doFetch();
+      content = result.choices?.[0]?.message?.content;
+      finishReason = result.choices?.[0]?.finish_reason;
+    }
+    if (!content) {
+      throw new Error(`Kilo Code returned an empty response (finish_reason: ${finishReason || 'unknown'}).`);
+    }
+
+    let parsed;
+    const trimmed = content.trim();
+
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e1) {
+      const codeBlock = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+      if (codeBlock) {
+        try { parsed = JSON.parse(codeBlock[1]); } catch (e2) { /* fall through */ }
+      }
+      if (!parsed) {
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+          try { parsed = JSON.parse(trimmed.slice(firstBrace, lastBrace + 1)); } catch (e3) { /* fall through */ }
+        }
+      }
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error(`Kilo Code krea2 response was not valid JSON. Got: ${trimmed.substring(0, 200)}`);
+    }
+    if (typeof parsed.prompt !== 'string' || parsed.prompt.length < 80) {
+      throw new Error(`Kilo Code krea2 response missing 'prompt' string >= 80 chars. Got: ${JSON.stringify(parsed).substring(0, 200)}`);
+    }
+    if (parsed.prompt.length > MAX_FINAL_PROMPT_LENGTH) {
+      // Spec §30.4 sets maxLength 1500 in the JSON schema; the helper
+      // also enforces MAX_FINAL_PROMPT_LENGTH (5000) as a hard ceiling
+      // because the schema is strict-but-server-side-clamping is the
+      // safest of the two.
+      throw new Error(`Krea-2 prompt exceeds MAX_FINAL_PROMPT_LENGTH (${MAX_FINAL_PROMPT_LENGTH}).`);
+    }
+
+    return {
+      prompt: parsed.prompt,
+      variant: variantPrompt,
+      creativity: creativityInt
+    };
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('Krea 2 analysis request timed out after 60 seconds.');
+    throw error;
+  }
+};
+
+/**
+ * Slice K.2 — ADR 0030 — creativity integer-to-bucket helper. Pure
+ * function; exported for unit-testability and for the prompt string
+ * above. Manual §4 publishes the four bucket labels without numeric
+ * boundaries; this operational mapping is a project convention, not
+ * a Krea-published boundary.
+ */
+const creativityIntToBucketLabel = (n) => {
+  if (!Number.isFinite(n)) return 'Medium';
+  const i = Math.round(n);
+  if (i <= 20) return 'Raw';
+  if (i <= 45) return 'Low';
+  if (i <= 65) return 'Medium';
+  return 'High';
+};
+
+/**
  * Stage 1.A — dedicated actions-only re-analysis.
  * Runs ONLY for `POST /api/actions` (ADR 0018). Independent of the active
  * preset. Mirrors `callKiloCameraAngleAnalysis` (ADR 0008): single-
@@ -5334,6 +5595,106 @@ app.post('/api/anima', upload.single('image'), async (req, res) => {
         positive: result.positive,
         negative: result.negative,
         variant: variantPrompt,
+        provider,
+        model: llmModel
+      }
+    });
+  } catch (error) {
+    if (filePath && fs.existsSync(filePath)) {
+      try { fs.unlinkSync(filePath); } catch (_) {}
+    }
+    res.status(500).json({ success: false, error: sanitizeError(error.message) });
+  }
+});
+
+/**
+ * Slice K.2 — ADR 0030 — Krea 2 prompt contract endpoint.
+ *
+ * `POST /api/krea2` — re-analyse the uploaded image with the Krea-2
+ * 5-layer-formula prose contract and return { prompt, variant,
+ * creativity, model }.
+ *
+ * Single-output shape (NO `negative` field — manual §10 R8 + §11
+ * default CFG=0 means negative prompts have no effect on Krea 2).
+ * The K.2 invariant SPEC §30.4 + PRE-MORTEM §30 P-7 + K-5 is enforced
+ * here in code: the response envelope explicitly does NOT carry
+ * `negative`.
+ *
+ * Two multipart fields:
+ *   - `creativity`: integer 0-100 (default 50 = Medium bucket).
+ *     Clamped server-side. The LLM prompt branches per bucket label
+ *     (Raw/Low/Medium/High per manual §4).
+ *   - `variant`: capacity tier ('turbo' | 'medium' | 'large',
+ *     default 'medium'). Recorded on the envelope but NOT threaded
+ *     into the LLM prompt — variant is capacity, not contract
+ *     (manual §2 explicit statement, ADR 0030 decision #2).
+ *
+ * Body validation mirrors /api/anima (the only added check is the
+ * `creativity` integer parse). The RAG auto-ingest mirrors
+ * /api/anima (SPEC §20.1 / ADR 0025 D5-a); the chunk metadata is
+ * single-positive (no negative field to preserve).
+ *
+ * Response envelope: `{ success, data: { prompt, variant, creativity,
+ * provider, model } }`. The `prompt` is a single prose string, 80-1500
+ * characters per JSON-schema floors.
+ */
+app.post('/api/krea2', upload.single('image'), async (req, res) => {
+  let filePath = null;
+  try {
+    if (!req.file) return res.status(400).json({ success: false, error: 'No image file provided.' });
+    filePath = req.file.path;
+
+    if (!kiloConfigured) {
+      fs.unlinkSync(filePath);
+      return res.status(503).json({ success: false, error: 'Kilo Code API key not configured.' });
+    }
+
+    // Creativity integer validation (mirrors callKiloKrea2Analysis's
+    // internal clamp; duplicated here so the route returns 400 on
+    // malformed inputs rather than silently clamping).
+    const rawCreativity = req.body && typeof req.body.creativity === 'string' ? req.body.creativity : '50';
+    const n = Number(rawCreativity);
+    const creativity = Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 50;
+
+    // Variant is capacity (manual §2). We default to 'medium' on
+    // unknown. The helper re-validates; this is a fast-path normalisation.
+    const rawVariant = req.body && typeof req.body.variant === 'string' ? req.body.variant : 'medium';
+    const allowedKrea2Variants = ['turbo', 'medium', 'large'];
+    const variant = allowedKrea2Variants.includes(rawVariant) ? rawVariant : 'medium';
+
+    const imageDataUri = fileToBase64DataUri(filePath, req.file.mimetype);
+    const { provider, model: llmModel } = resolveProviderAndModel(req.body);
+    const result = provider === 'kilo_code'
+      ? await callKiloKrea2Analysis(imageDataUri, creativity, variant, llmModel)
+      : buildProviderStub(provider, llmModel, 'krea2');
+
+    fs.unlinkSync(filePath);
+    filePath = null;
+
+    // Krea-2 RAG auto-ingest: single positive prompt. The manual
+    // recommends ingesting the prompt verbatim — Krea-2's prose
+    // shape is well-suited to embedding retrieval (unlike Anima's
+    // tag shape, which we annotate with negative metadata rather
+    // than embedding).
+    try {
+      ragIngest.ingestStage2Output({
+        presetName: `Krea 2 (${variant})`,
+        model: typeof llmModel === 'string' ? llmModel : 'unknown',
+        finalPrompt: result.prompt,
+        meta: { provider, variant, creativity, ingested_at: new Date().toISOString() }
+      });
+    } catch (e) {
+      console.warn(`[rag_ingest] krea2 ingest failed: ${e.message}`);
+    }
+
+    // Envelope: explicit fields, NO 'negative' key (manual §10 R8 +
+    // §11 + SPEC §30.4 + PRE-MORTEM §30 P-7 + K-5).
+    res.json({
+      success: true,
+      data: {
+        prompt: result.prompt,
+        variant: result.variant,
+        creativity: result.creativity,
         provider,
         model: llmModel
       }
@@ -11553,6 +11914,8 @@ module.exports = {
   DEFAULT_TEXTURE_PROMPT,
   // Slice 2.2 — ADR 0021 — Anima prompt contract (two-output: positive + negative)
   DEFAULT_ANIMA_PROMPT,
+  // Slice K.2 — ADR 0030 — Krea 2 prompt contract constant (single-positive prose)
+  DEFAULT_KREA2_PROMPT,
   MAX_PALETTE_NAME_LENGTH,
   MAX_PALETTE_COLORS,
   HEX_COLOR_REGEX,
@@ -11577,6 +11940,9 @@ module.exports = {
   callKiloTextureAnalysis,
   // Slice 2.2 — ADR 0021 — Anima prompt contract helper (two-output)
   callKiloAnimaAnalysis,
+  // Slice K.2 — ADR 0030 — Krea 2 prompt contract helper (single-positive prose)
+  callKiloKrea2Analysis,
+  creativityIntToBucketLabel,  // Slice K.2 — pure helper for the prompt string
   generatePaletteId,
   generateRunId,
   readPalettes,

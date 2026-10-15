@@ -484,6 +484,66 @@ Mirrors the per-field pattern from `/api/actions`, `/api/mood`,
 sanitisation. The two-output shape (positive + negative) is the
 Anima contract.
 
+### `POST /api/krea2` (Slice K.2 — ADR 0030)
+
+Re-analyse an uploaded image with the **Krea 2 prompt contract**
+and return a single `{ prompt, variant, creativity }` shape. Powers
+the Krea 2 branch of the pre-Generate three-way picker shipped in
+Slice K.1.
+
+The Krea 2 contract is the third sibling to the Z-Image pastel-
+focal-glow and Anima tag-shape contracts. Krea 2 emits a single
+prose paragraph following the **5-layer formula** (Subject and
+action / Setting and environment / Lighting and mood / Style
+reference / Composition notes) per the manual §7. **No negative
+prompt** — Krea 2's default CFG=0 means negative prompts have no
+effect (manual §10 + §11). The contract source of truth is
+[`docs/KREA-2-PROMPTING-MANUAL.md`](./docs/KREA-2-PROMPTING-MANUAL.md).
+
+**Creativity** comes from the multipart field `creativity` (integer
+0-100, clamped server-side with `Math.round`, default 50 = Medium
+bucket). The four bucket labels — Raw / Low / Medium / High — come
+verbatim from manual §4. The LLM carries the bucket mapping in the
+system prompt and treats the integer as the fine-grained control.
+For in-image text rendering, manual §10 + §11 specifically recommend
+**Low** to avoid garbled lettering.
+
+**Variant** comes from the multipart field `variant` (one of `turbo`
+/ `medium` / `large`, default `medium`). Variant is **capacity, not
+contract** (manual §2 explicit statement) — variant is recorded on
+the response envelope for the chat-session-anchor contract, but it
+does NOT modify the system prompt. The three variants accept the
+same prompt format; what differs is inference cost and quality.
+
+**Request:** `multipart/form-data`
+- `image` — image file (JPG, PNG, WebP, max 10MB)
+- `creativity` _(optional)_ — integer 0-100 (default 50)
+- `variant` _(optional)_ — `turbo` / `medium` (default) / `large`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "prompt": "A solitary figure standing at the edge of a sunlit forest clearing, late-afternoon golden hour, soft window light from the upper right filtering through the canopy, Medium, oil painting, 85 mm portrait lens, shallow depth of field, wide shot, rule of thirds, generous negative space.",
+    "variant": "medium",
+    "creativity": 50,
+    "model": "minimax/minimax-m3"
+  }
+}
+```
+
+The `prompt` is a single short prose paragraph (80-1500 characters
+per the JSON Schema floors). The response envelope explicitly does
+NOT carry a `negative` key (SPEC §30.4 invariant, PRE-MORTEM §30
+P-7 + K-5).
+
+Mirrors the per-field pattern from `/api/actions`, `/api/mood`,
+`/api/lighting`, and `/api/texture` — same multer upload, same
+60-second timeout, same JSON Schema with length floors, same error
+sanitisation. The single-output shape (prose `prompt`) is the
+Krea 2 contract.
+
 ### `GET /api/subject-prompt`
 
 Return the active subject-extraction system prompt plus the shipped default
