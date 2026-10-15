@@ -1889,6 +1889,278 @@ unification.
 
 ---
 
+## §30 — Krea 2 picker (pre-Generate three-way fork: Z-Image / Anima / Krea 2)
+
+### 30.1 Reframe
+
+The pre-Generate picker (ADR 0021 / Slice 2) shipped as a two-way
+fork: `Z-Image Turbo | Anima`. The user wants a third option,
+**Krea 2**, added to the same fork. Krea 2 has its own prompt
+contract: **prose-only, 5-layer formula, creativity slider
+(Raw / Low / Medium / High), three capacity variants (Turbo /
+Medium / Large)** — see `docs/KREA-2-PROMPTING-MANUAL.md` §2, §3,
+§7, §8.
+
+The third model is additive. The Z-Image side is unchanged. The
+Anima side is unchanged. Only the picker gains a third option and
+the dispatcher adds a third branch (`/api/krea2`).
+
+The headline design decision (ADR 0030) is to mirror Slice 2's
+pre-Generate picker + per-model chat sessions + single dispatch
+path. The non-trivial addition is that **Krea 2's "variants" are
+capacity tiers, not style variants** — so the "model selector" is
+the which-*line* choice, and a separate **Krea-2 internal selector**
+inside the Krea-2 result panel handles variant + creativity. This
+differs from Anima where the variant (Base / Aesthetic / Turbo) was
+a *style* selector inside the Anima panel.
+
+### 30.2 Scope
+
+**In scope (Slice K):**
+
+- A pre-Generate picker extended to three options: `Z-Image Turbo`,
+  `Anima`, `Krea 2`. Selection persisted (`localStorage`), mirrored
+  in URL (`?model=krea2`), validated against the enum.
+- A new `/api/krea2` endpoint, sibling to `/api/zimage` and
+  `/api/anima`. Calls MiniMax M3 with a **Krea-2-specific system
+  prompt** (the prompt is derived from
+  `docs/KREA-2-PROMPTING-MANUAL.md` §7 — the 5-layer formula — and
+  §8 worked examples).
+- A new `state.krea2Variant` (capacity tier: `turbo | medium | large`,
+  default `medium`) and `state.krea2Creativity` (creativity slider:
+  integer 0-100, default 50). Both persisted alongside the model
+  choice.
+- A new Krea-2 result panel sibling to the existing Z-Image and Anima
+  panels. Renders the prose-only final prompt as a single textarea
+  + a creativity-slider readout + a variant badge.
+- Per-model chat sessions. Switching into Krea-2 (or out of it)
+  closes the current session and starts a new one. Chat messages
+  carry `model: 'krea2'` and (when active) `variant` + `creativity`.
+- Krea-2-aware chat default system prompt. Reuses `validatePromptPreservation`
+  (ADR 0012) — Krea-2 is prose-only, so the anchor-preservation
+  contract operates on prose similarity, same as Z-Image.
+- Frontend helpers: `activateKrea2ChatForResult`, `displayKrea2Result`,
+  `applyKrea2ChatRevision` (parallel to the Anima trio from
+  ADR 0021's 2026-08-04 consequences).
+- Five sub-slices (`K.1` → `K.5`) following the Slice 2 cadence:
+  - **K.1** — model state field + UI selector (3-way) — mirrors Slice 2.1
+  - **K.2** — Krea-2 backend contract (`DEFAULT_KREA2_PROMPT` +
+    `callMiniMaxKrea2Analysis` + `/api/krea2` route) — mirrors Slice 2.2
+  - **K.3** — frontend dispatch wiring (`activateKrea2ChatForResult` +
+    `displayKrea2Result`) — mirrors Slice 2.3
+  - **K.4** — chat refines the selected model (Apply branch for Krea-2) —
+    mirrors Slice 2.4
+  - **K.5** — per-sub-slice code review + final aggregation
+- ADR 0030 (Krea-2 fork).
+- ≥23 new SPEC §30 tests (mirroring the IR-1…IR-7 cadence test counts).
+
+**Out of scope (deferred):**
+
+- Self-hosted ComfyUI / InvokeAI integration for Krea 2 (manual §12
+  treats it as a deployment concern; the app is local-first, not
+  an inference frontend).
+- Realtime API integration for Krea 2 (`krea.ai/image` or
+  `krea.ai/docs/developers/krea-2/overview`) — the slice is
+  prompt-engineering, not inference (mirrors ADR 0021 rejected
+  alternative #7).
+- Style-transfer moodboard UI (manual §9). Parked as a future
+  enhancement, not part of the picker.
+- In-image typography rendering (manual §10). Parked: the app
+  emits prompts; the user runs the inference elsewhere.
+- A per-image-type "creativity preset" library (e.g. "sketch →
+  Creativity 90"). Parked: out of scope for the fork; the
+  default `50` is the canonical safe value per manual §2.
+- License-boundary review for Krea 2 (Krea 2's license is reviewed
+  inline below; flagged for documentation but the slice is a
+  prompt-engineering slice, so the same boundary holds as for Anima).
+
+### 30.3 User stories
+
+- **As an AI artist,** I want the same upload flow to produce a
+  Krea-2-shaped prompt when I select Krea 2.
+- **As an AI artist,** I want to slide the Creativity slider and
+  see the resulting prompt re-rendered against the new creativity
+  on a re-Generate.
+- **As an AI artist,** I want my Krea-2 chat session to stay
+  anchored to the Krea-2 contract — switching models ends the
+  current session and starts a new one.
+- **As an AI artist,** I want the Krea-2 variant capacity tier
+  (Turbo / Medium / Large) to be visible in the result panel
+  header so I know what I'm getting.
+
+### 30.4 Behaviour contract — Krea-2 specifics
+
+- **Krea-2 contract is prose-only.** No tags, no `@`-prefix, no
+  weighted quality markers. The final prompt is a single prose
+  string following the **5-layer formula** (Subject and action /
+  Setting and environment / Lighting and mood / Style reference /
+  Composition notes) per manual §7.
+- **Creativity slider is integer 0-100, default 50 (Medium).**
+  Per `docs/KREA-2-PROMPTING-MANUAL.md` §4 (Hard Specs row
+  "Creativity slider") and §8 (worked examples), the four bucket
+  labels are **Raw / Low / Medium (default) / High**. Exact
+  numeric boundaries are not published by Krea; the LLM-facing
+  prompt will carry the bucket mapping verbatim and let the
+  integer value be the fine-grained control. Low values bias the
+  LLM toward literal photographic rendering; high values bias
+  toward stylised / artistic / interpretive rendering. For
+  in-image text rendering, manual §10 / §11 recommend Creativity
+  = Low to avoid garbled lettering (default CFG=0 is literal by
+  design).
+- **Krea-2 has no negative prompt.** Per manual §10 (troubleshoot
+  R8) and §11 self-review checklist, Krea 2's default CFG=0
+  means negative prompts have no effect. The Krea-2 dispatch
+  emits a single positive prose string and does **not** generate
+  a negative prompt pair (in contrast to Anima's positive +
+  negative pair). The Krea-2 result panel renders one textarea,
+  not two. **Hard contract: no `negative` field on the Krea-2
+  response envelope.**
+- **Variant capacity tier is orthogonal.** All three variants
+  accept the same prompt format. Variant affects cost / latency,
+  not contract. Variant is recorded on the chat session and the
+  result panel header but does NOT modify the system prompt.
+- **Length bounds on the Krea-2 final prompt.** `minLength: 80`,
+  `maxLength: 1500` (prose; the Z-Image length floors don't map
+  to Krea 2's prose shape, and Krea 2's manual §4.1 places its
+  own ceilings).
+- **Per-field "Populate with AI" calls remain Z-Image-only.**
+  The per-field vision endpoints (`/api/subject`, `/api/camera-angle`,
+  `/api/actions`, `/api/mood`, `/api/lighting`, `/api/texture`,
+  `/api/orientation`) target the shared per-field store — not
+  Krea 2's contract. The Krea-2 contract is final-prompt only.
+  This is the same constraint Anima holds (per ADR 0021).
+
+### 30.5 Sub-slice plan (the work breakdown)
+
+#### K.1 — model state + UI selector (3-way)
+
+- **Files:** `server.js` (no server-side change in K.1; this is
+  pure frontend), `src/index.html` (~14 lines for the third radio
+  / button), `src/styles.css` (~20 lines for `.model-selector` /
+  `.is-active` / `.is-krea2`), `src/app.js` (~30 lines for state
+  + restore), `src/shell.js` (~10 lines for the binding).
+- **State:** `state.model` becomes
+  `'zimage_turbo' | 'anima' | 'krea2'`. `state.krea2Variant`,
+  `state.krea2Creativity`. Defaults: `state.model = 'zimage_turbo'`
+  (preserves existing behaviour), `state.krea2Variant = 'medium'`,
+  `state.krea2Creativity = 50`.
+- **Tests:** 4 frontend-wiring assertions + 1 static-source anchor
+  for the third option being present in HTML.
+
+#### K.2 — Krea-2 backend contract
+
+- **Files:** `server.js` (`DEFAULT_KREA2_PROMPT` constant,
+  `callMiniMaxKrea2Analysis` helper, `POST /api/krea2` route).
+- **Contract:** `DEFAULT_KREA2_PROMPT` is derived from manual §7
+  (5-layer formula) and §8 (worked examples). Variant + creativity
+  are passed into the helper as options; the prompt branches per
+  creativity bucket (Raw / Low / Medium / High).
+- **Tests:** ≥7 backend tests (mirroring IR-style cadence): route
+  registers, helper exports, prompt constant exists with the
+  five-layer skeleton, JSON schema enforces `minLength: 80` +
+  `maxLength: 1500`, variant options carry through, creativity
+  thread-through, response envelope shape.
+
+#### K.3 — frontend dispatch wiring
+
+- **Files:** `src/app.js` (~80 lines), `src/index.html` (~30 lines
+  for the Krea-2 result panel), `src/styles.css` (~25 lines).
+- **State:** `state.krea2Result = { prompt, variant, creativity,
+  generated_at, model: 'krea2' }` (parallel to
+  `state.animaResult` from Slice 2).
+- **Helpers:** `activateKrea2ChatForResult`, `displayKrea2Result`,
+  `applyKrea2ChatRevision`.
+- **Tests:** ≥5 frontend tests (DOM presence + dispatch binding +
+  result-panel hide/show + variant badge + creativity readout).
+
+#### K.4 — chat refines the selected model (Apply branch for Krea-2)
+
+- **Files:** `src/app.js` (~50 lines extending `applyChatRevision`),
+  `server.js` (~30 lines extending `callKiloChat`-style chat
+  bound with a Krea-2-specific system prompt block).
+- **State annotation:** every chat message now carries
+  `model: 'zimage_turbo' | 'anima' | 'krea2'` + (for Krea-2)
+  `variant` + `creativity`.
+- **Tests:** ≥6 tests (Apply branch hits Krea-2 textarea, regression
+  for the Z-Image branch, regression for the Anima branch, chat
+  session anchor honoured).
+
+#### K.5 — per-sub-slice review + aggregate review
+
+- **Files:** `docs/CODE-REVIEW-K-1.md`, `-K-2.md`, `-K-3.md`,
+  `-K-4.md`, plus `docs/CODE-REVIEW-K.md` aggregate.
+- Each sub-slice: two-axis review (Standards + Spec), verdict
+  `pass` or `pass+minor`.
+
+### 30.6 Constraints preserved
+
+- **License boundary** — the app emits Krea-2-shaped prompts via
+  MiniMax M3 (a third-party LLM). It does not embed Krea 2 weights,
+  host Krea 2 inference, or integrate with paid Krea APIs. Per
+  manual §12.3, Krea 2's license permits prompt-engineering for
+  non-commercial use; the app already follows this same boundary
+  for Anima (ADR 0021 decision #6).
+- **Per-model chat sessions** — same as ADR 0021 decision #5.
+- **Anchor-preservation** — `validatePromptPreservation` (ADR 0012)
+  measures prose similarity on Krea-2's prose-only output, same
+  as Z-Image.
+- **RAG grounding** — the existing RAG retrieval (`server/lib/rag.js`)
+  applies equally to the Krea-2 dispatch path. No change.
+
+### 30.7 Open questions
+
+None at G1. Resolved at SPEC time:
+
+- **Q1.** *Krea-2 variants are capacity tiers, not style variants —
+  should the variant selector live next to the model selector?* NO.
+  Decided: model selector = which line; Krea-2 internal selector
+  = variant + creativity, parallel to Anima's panel-internal
+  variant selector. Resolution: §30.4 (variant is internal to Krea-2
+  panel).
+- **Q2.** *Should Krea-2 have its own per-field vision buttons
+  (`Populate with AI` for subject, camera, etc.)?* NO. Decided:
+  shared per-field store remains Z-Image-only. Krea-2 contract
+  is final-prompt only. Resolution: §30.4 + §30.2 out-of-scope
+  list.
+- **Q3.** *Switching model mid-session — confirm dialog or silent
+  switch?* Same as ADR 0021: silent switch + new session (existing
+  Slice 2.3 UX).
+- **Q4.** *Is Krea 2's license compatible with the app's usage?*
+  YES per manual §12.3 + ADR 0021 reasoning (read at app level,
+  app does not redistribute weights / inference / paid API hooks).
+
+### 30.8 DoD (each sub-slice)
+
+- **K.1:** Three options visible in picker. State fields added.
+  Tests pass. Visual demo recorded.
+- **K.2:** `DEFAULT_KREA2_PROMPT` + `callMiniMaxKrea2Analysis` +
+  `POST /api/krea2` route registered. ≥7 tests pass. Code review
+  per K.1 cadence (2-axis, inline).
+- **K.3:** Krea-2 result panel renders. Variant + creativity
+  visible. State mirrors Slice 2's Anima panel pattern.
+- **K.4:** Chat session carries `model` + `variant` + `creativity`.
+  Apply branch mirrors Anima pattern. ≥6 tests pass.
+- **K.5:** Aggregate `docs/CODE-REVIEW-K.md` verdict `pass`.
+
+### 30.9 References
+
+- `docs/KREA-2-PROMPTING-MANUAL.md` — the Krea 2 contract source
+  of truth (716 lines, compiled 2026-10-07).
+- `docs/adr/0021-anima-fork.md` — the pattern this slice mirrors.
+- `docs/adr/0019-zimage-pastel-focal-glow-contract.md` — the
+  Z-Image contract this slice parallels.
+- `docs/SPEC.md` §14 — Slice 2 spec (the pattern K.1 → K.5 mirrors).
+- `docs/SPEC.md` §22 / §23 / §24 / §26 / §28 — chat and IR slices
+  that the K.4 chat-Apply branch must not regress.
+- `docs/adr/0012-anchor-preserving-chat-refinements.md` — the
+  preservation contract applied to Krea-2's prose.
+- `https://krea.ai/blog/krea-2-deep-dive-walkthrough`,
+  `https://krea.ai/docs/user-guide/features/krea-2`,
+  `https://huggingface.co/krea/Krea-2-Raw`,
+  `https://krea.ai/blog/krea-2-technical-report`.
+
+---
+
 ## Change Log
 
 - §28 added 2026-09-16 — iterative refinement: "Analyze Generated Image"
@@ -1901,3 +2173,9 @@ unification.
   `tests/run-all.js` replaces the per-test `snapshotChatFile` /
   `restoreChatFile` ad-hoc pattern. Closes the Session #19
   data-wipe class of bug.
+- §30 added 2026-10-15 — Krea 2 picker slice (Slice K, G2 + G3
+  artifacts). Five sub-slices (K.1 → K.5) following Slice 2
+  cadence (ADR 0021). Pre-Generate picker extended to three
+  options; Krea-2 contract is prose-only 5-layer formula with
+  a creativity slider (0-100) and capacity-tier variant
+  (Turbo / Medium / Large); per-model chat sessions preserved.

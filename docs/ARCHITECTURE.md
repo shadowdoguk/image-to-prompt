@@ -1611,3 +1611,139 @@ Total server.js delta: ~260 LOC. Total frontend delta: ~100 LOC
   trigger to revisit.
 - Does NOT change behaviour of any existing test (helper is
   opt-in; legacy helpers untouched).
+
+## §30 architecture — Krea 2 picker (SPEC §30 / ADR 0030)
+
+### A1 — Pre-Generate picker extended to three
+
+The picker sits in the same DOM region it occupies today (created
+under Slice 2.1, render target `dom.modelSelector`). Three options:
+
+| Value        | Display           | Endpoint      | Variant field        | Creativity field |
+|--------------|-------------------|---------------|----------------------|------------------|
+| `zimage_turbo` | Z-Image Turbo   | POST /api/zimage | (none)             | (none)           |
+| `anima`        | Anima         | POST /api/anima  | `animaVariant`     | (none)           |
+| `krea2`        | Krea 2        | POST /api/krea2  | `krea2Variant`     | `krea2Creativity` |
+
+State mirrors Slice 2's pattern — single source of truth in
+`state.model`, persisted + URL-mirrored + validated against enum.
+On mismatch (localStorage corruption, hand-typed URL), fall back to
+`zimage_turbo` and log a warning (mirrors ADR 0021 decision #7).
+
+### A2 — Backend modules for Krea 2
+
+Three new modules in `server.js`, sibling to the existing Anima trio:
+
+- `DEFAULT_KREA2_PROMPT` — constant. Derived from manual §7 (5-layer
+  formula) and §8 (worked examples). One-line per-creativity-bucket
+  branch (Raw / Low / Medium / High). Variant is **not** in the
+  prompt — variant is capacity and does not change contract
+  (per manual §2 explicit statement).
+- `callMiniMaxKrea2Analysis({ provider, imageBase64, variant,
+  creativity })` — helper. Schema-enforced JSON envelope.
+  `minLength: 80`, `maxLength: 1500` on the prose `prompt` field.
+  Mirrors `callKiloAnimaAnalysis`'s shape.
+- `POST /api/krea2` route — single dispatcher. Body validation
+  mirrors `/api/anima`. On success, returns
+  `{ prompt, variant, creativity, model: 'krea2', generated_at }`.
+
+### A3 — Frontend state additions
+
+| State slice            | Type                                                      | Default     | Persisted |
+|------------------------|-----------------------------------------------------------|-------------|-----------|
+| `state.model`          | `'zimage_turbo' \| 'anima' \| 'krea2'`                    | zimage_turbo | yes |
+| `state.krea2Variant`   | `'turbo' \| 'medium' \| 'large'`                          | medium      | yes |
+| `state.krea2Creativity` | integer 0-100                                            | 50          | yes |
+| `state.krea2Result`    | `{ prompt, variant, creativity, generated_at, model }`    | (absent)    | no        |
+
+Mirror ADR 0021's notes on state proliferation: this adds three
+slices to the existing `state.model` + `state.animaResult` +
+`state.animaVariant`. The total budget remains bounded.
+
+### A4 — Krea-2 result panel
+
+Sibling to the Z-Image and Anima result panels. Renders:
+
+- A single prose textarea (`dom.krea2ResultPrompt`).
+- A creativity readout (integer 0-100 with the bucket label).
+- A variant badge ("Krea 2 Turbo" / "Krea 2 Medium" / "Krea 2 Large").
+- A "Generate" CTA adjacent to the picker.
+- A `populateKrea2ResultWithAI`-style hook for re-Generate (no
+  per-field vision buttons — Krea-2 contract is final-prompt only).
+
+### A5 — Chat dispatch extension
+
+The chat subsystem carries `model` on every message (`'zimage_turbo'`
+|`'anima'`|`'krea2'`) plus optional `variant` + `creativity` for
+Krea-2 messages. The chat default system prompt branches per model:
+
+- `Z-Image`: pastel-focal-glow contract (ADR 0019).
+- `Anima`: tag-with-prefix contract (manual §7.6).
+- `Krea-2`: 5-layer-formula contract + creativity-aware instructions
+  (manual §7).
+
+Switching model ends the current session and starts a new one
+(Slice 2.3 behaviour). The Krea-2 chat default system prompt
+references the variant + creativity on the originating message so
+the LLM can condition its response.
+
+### A6 — Per-sub-slice file layout (mirror Slice 2)
+
+| Sub-slice | server.js Δ | src/app.js Δ | src/index.html Δ | src/styles.css Δ | src/shell.js Δ | tests Δ |
+|-----------|-------------|--------------|------------------|------------------|----------------|---------|
+| K.1       | 0           | ~30          | ~14              | ~20              | ~10            | 4+1     |
+| K.2       | ~110        | 0            | 0                | 0                | 0              | ≥7      |
+| K.3       | 0           | ~80          | ~30              | ~25              | 0              | ≥5      |
+| K.4       | ~30         | ~50          | 0                | 0                | 0              | ≥6      |
+| K.5       | 0           | 0            | 0                | 0                | 0              | 0       |
+| **Total** | **~140**    | **~160**     | **~44**          | **~45**          | **~10**        | **≥23** |
+
+Total server.js delta: ~140 LOC. Total frontend delta: ~259 LOC
+(HTML 44, CSS 45, shell.js 10, app.js 160). Total tests: ≥23.
+
+### A7 — Privacy / data-handling notes (mirror ADR 0021)
+
+- Images leave the user's machine once per analyze call (already
+  the case for Z-Image + Anima). The Krea-2 dispatch uses the
+  same `state.uploadedFile` reference and the same MiniMax M3
+  upload pipeline.
+- No new on-disk state beyond the `krea2Variant` +
+  `krea2Creativity` + `krea2Result` fields on chat message
+  envelopes. The chat `data/chat_sessions.json` is the existing
+  lifecycle owner.
+- License boundary: same as ADR 0021 — the app emits Krea-2-
+  shaped prompts via MiniMax M3. Per manual §12.3, Krea 2's
+  community licence permits prompt-engineering for non-commercial
+  use; the app does not redistribute weights, host inference, or
+  integrate with paid APIs.
+
+### A8 — Why this is small
+
+- **Three modules, ~50 LOC each** in `server.js`. Each is a thin
+  shell over one MiniMax M3 vision call (the LLM emits the Krea-2
+  prose) with a JSON schema. Pattern mirrors `callKiloAnimaAnalysis`
+  (Slice 2.2).
+- **One new route, ~30 LOC.** Mirrors `POST /api/anima`'s
+  validation shape.
+- **Reuses `validatePromptPreservation`** (ADR 0012) — same anchor-
+  preservation contract as the Z-Image + Anima chat paths.
+- **Reuses the Slice 2 pattern end-to-end** for picker / dispatch /
+  per-session chat / apply-rewrite. K.1 is structurally identical
+  to Slice 2.1; K.2 to 2.2; K.3 to 2.3; K.4 to 2.4.
+
+### A9 — Why now
+
+The user explicitly asked for a third pre-Generate model option,
+identified the target as Krea 2, and noted the manual is compiled
+(see BACKLOG entry 2026-10-07; the manual is `docs/KREA-2-
+PROMPTING-MANUAL.md`, committed in this session's earlier H0).
+The shape of the slice is fixed by ADR 0021's precedent; the
+novel decisions are (a) variant is orthogonal to the prompt
+contract, and (b) creativity defaults to 50 per manual §2.
+
+The Slice 2 pattern's existence makes this slice comparable in
+effort to UI-R-series slices (1-2 sessions, additive, no schema
+migration, no symbol rename). The largest risk is the chat-Apply
+branch — covered by ADR 0021's 2026-08-04 lesson (apply-path drift
+must mirror state.shape with display.shape for every mutation).
+That lesson is enforced in the K.4 DoD.

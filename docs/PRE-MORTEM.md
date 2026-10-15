@@ -754,3 +754,155 @@ Companion to SPEC §25 and ARCH §30.
 
 - **K-1:** Any baseline test flips red → helper or migration
   changed semantics; revert and replan.
+
+## §30 pre-mortem — Krea 2 picker (SPEC §30 / ADR 0030)
+
+### Risks
+
+- **R-1 (HIGH):** Krea 2's "creativity" slider is a brand-new UI
+  concept the app doesn't have today. The LLM contract for
+  `creativity=0` (Raw) vs `creativity=100` (High) is different,
+  and the LLM may not actually condition on the bucket reliably
+  with a one-line per-bucket instruction in the system prompt.
+  *Mitigation:* lock the four creativity bucket labels (Raw / Low
+  / Medium / High — per manual §4, **exact numeric boundaries not
+  published**) and per-bucket prompt branches in K.2's
+  `DEFAULT_KREA2_PROMPT` constant. K.2 includes a test that the
+  constant contains all four bucket labels verbatim. K.3 includes
+  a visual demo where creativity is moved from 0 to 100 and the
+  resulting prose's tone visibly shifts (manual §8 worked examples
+  cite characteristic phrase atoms — "photorealistic 35 mm film
+  photograph" for low creativity, "stylised, artistic,
+  interpretive" for high; a test asserts these phrase atoms are
+  present in the appropriate LLM-response branch). Kill
+  criterion: K-1 below.
+
+- **R-2 (HIGH):** Chat Apply for Krea 2 hits the same class of bug
+  ADR 0021 hit in 2026-08-04 (issue #22): the apply handler
+  updates server-side state but the Krea-2 textarea doesn't
+  refresh. *Mitigation:* apply the lesson in K.4's DoD — the
+  `applyChatRevision` branch for Krea 2 **must** mirror the
+  write to `state.krea2Result.prompt` + `dom.krea2ResultPrompt.value`
+  in lockstep. Enforced as a test in K.4. Mirrors the
+  `scripts/smoke/anima-chat-apply-sync.js` static-source armour
+  added during the Anima fix.
+
+- **R-3 (MEDIUM):** The Krea 2 contract is prose-only. The
+  existing per-field "Populate with AI" buttons (subject, actions,
+  mood, lighting, texture) write back to the shared per-field
+  store. A user might click "Populate with AI" on a field, then
+  generate through Krea 2, and expect that field's LLM-refreshed
+  value to flow into the Krea-2 prompt. It does — the per-field
+  store is shared (Slice 2's "shared per-field artifacts"
+  principle, ADR 0021 decision #4). But the test coverage should
+  verify this end-to-end. *Mitigation:* K.4 includes a test that
+  `/api/subject` (per-field) updates `state.subject` AND the next
+  `/api/krea2` request carries the new `subject` in its shared
+  per-field payload. Mirrors the Slice 2.4 Apply regression test.
+
+- **R-4 (MEDIUM):** Variant (Turbo / Medium / Large) is recorded
+  on the chat session but does NOT modify the system prompt. A
+  future reader might assume variant changes contract. *Mitigation:*
+  K.2's `DEFAULT_KREA2_PROMPT` includes an inline comment "Variant
+  is capacity, not contract — see manual §2 and ADR 0030."
+  K.4's chat-session-state test asserts the variant field is
+  preserved through the chat session but does NOT appear in
+  the LLM-facing system prompt.
+
+- **R-5 (MEDIUM):** License boundary. Krea 2's distribution
+  licence permits prompt-engineering for non-commercial use but
+  restricts hosting the model behind a paid API (manual §12.3).
+  The slice ships prompts only — no weights, no hosted inference,
+  no paid API hooks. *Mitigation:* documented inline in ADR 0030
+  decision #6 and in `callMiniMaxKrea2Analysis`'s docstring.
+  Smoke script `scripts/smoke/krea2-license-boundary.js` asserts
+  the constant + helper do not reference paid API endpoints.
+
+- **R-6 (MEDIUM):** The 5-layer formula structure (Subject /
+  Setting / Lighting / Style / Composition) requires the LLM to
+  produce prose that *covers* all five layers. If the LLM
+  collapses to "Subject + Style" only, the output is
+  zip-code-incomplete. *Mitigation:* the system prompt's per-
+  bucket branch includes "All five layers must be present and
+  covered in this order." A test asserts the constant references
+  all five layer names verbatim. This mirrors ADR 0021's 2026-08-04
+  coverage-categories sharpening for Anima.
+
+- **R-7 (LOW):** The picker gains a third option. The existing
+  pre-Generate render target (`dom.modelSelector`) was sized for
+  two buttons. The CSS may need to accommodate three side-by-side
+  buttons at the project's standard widths. *Mitigation:* the
+  renderer uses `.model-selector__button` flexbox + width auto;
+  three buttons fit at ≥768px viewport. K.1's visual demo
+  verifies at 768px (the test threshold for tight layouts in
+  the project).
+
+- **R-8 (MEDIUM):** Krea 2 has **no negative prompt** — manual §10
+  (troubleshooting R8) and §11 are explicit: default CFG=0
+  means negative prompts have no effect. The Krea-2 dispatch
+  must NOT emit a `negative` field on its response envelope,
+  and the result panel must render exactly one textarea
+  (positive prose). *Mitigation:* `callMiniMaxKrea2Analysis`'s
+  JSON schema explicit keys are `{ prompt, variant, creativity,
+  generated_at, model: 'krea2' }` — no `negative`. The frontend
+  result-panel markup (`dom.krea2ResultPrompt`) is one textarea,
+  not a pair. K.3 includes a static-source test that the response
+  envelope does not carry a `negative` field and the result
+  panel renders a single textarea.
+
+### Pre-commitments
+
+- **P-1:** `DEFAULT_KREA2_PROMPT` MUST contain references to all
+  five layers (Subject / Setting / Lighting / Style / Composition)
+  verbatim + the four creativity bucket labels (Raw / Low / Medium
+  / High). Test coverage in K.2.
+- **P-2:** `applyChatRevision`'s Krea-2 branch MUST write to
+  `state.krea2Result.prompt` AND `dom.krea2ResultPrompt.value` in
+  lockstep (mirroring the Anima fix). Test coverage in K.4.
+- **P-3:** Krea-2 variant MUST persist through chat session
+  creation and Apply, but MUST NOT appear in the LLM-facing system
+  prompt. Test coverage in K.4.
+- **P-4:** No regression in the 678-test baseline. The 678 includes
+  Slice 2 (Anima), Slice 26 (cross-provider), Slice 27 (clear
+  chat history), IR-1…IR-7 (iterative refinement), SPEC §29
+  (destructive fixtures). Each K sub-slice's gate run asserts
+  678 → 678 + new-for-that-sub-slice.
+- **P-5:** Picker render quality at 768px viewport (the project's
+  tight-layout threshold). Visual demo recorded for K.1.
+- **P-6:** License-boundary constants + helpers do not reference
+  paid Krea 2 APIs. Smoke script verifies.
+- **P-7:** Krea-2 response envelope MUST NOT carry a `negative`
+  field. The result panel MUST render exactly one prose textarea
+  (not a positive + negative pair). Krea-2 chat Apply MUST NOT
+  attempt to apply to a non-existent `negative` field. Test
+  coverage in K.2 (response envelope), K.3 (panel markup), K.4
+  (Apply branch).
+
+### Kill criteria
+
+- **K-1:** If creativity-tier differentiation is not visible in
+  the LLM response shape on a captured fixture pair (creativity=0
+  vs creativity=100 produce visibly different prose in tone,
+  vocabulary, or rendering style), the slice does not merge;
+  redesign `DEFAULT_KREA2_PROMPT` or kill the creativity feature.
+
+- **K-2:** If the chat Apply for Krea-2 does not visibly update
+  the Krea-2 result panel (mirroring the Anima issue #22 bug),
+  the slice does not merge; the K.4 DoD test catches this in
+  advance.
+
+- **K-3:** If `validatePromptPreservation` (ADR 0012) rejects
+  more than 30% of valid Krea-2 prose revisions (the prose-only
+  contract interacts with the keyword/bigram retention metric
+  differently from the Anima tag contract), the slice does not
+  merge; investigate threshold re-tuning OUTSIDE this slice
+  (a future `docs/POLISH-AUDIT-K.md` would surface it).
+
+- **K-4:** If any of the 678 baseline tests flips red during
+  K.1 → K.4, that sub-slice does not merge. The new feature is
+  additive; existing flows must not break.
+
+- **K-5:** If the Krea-2 response envelope gains a `negative`
+  field at any point during K.1 → K.4 implementation, the slice
+  does not merge; the contract is single-positive-prose per
+  manual §10 + §11.
