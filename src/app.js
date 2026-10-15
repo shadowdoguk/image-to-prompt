@@ -56,8 +56,10 @@
     // chooses which contract runs (Z-Image Turbo or Anima). Anima mode
     // exposes a variant selector (Base / Aesthetic / Turbo). Both fields
     // are persisted (localStorage) and mirrored in the URL (?model=...&variant=...).
-    model: 'zimage_turbo',       // 'zimage_turbo' | 'anima'
+    model: 'zimage_turbo',       // 'zimage_turbo' | 'anima' | 'krea2' — Slice K.1 extends the picker (ADR 0030 / SPEC §30)
     animaVariant: 'base',        // 'base' | 'aesthetic' | 'turbo' (only meaningful when model === 'anima')
+    krea2Variant: 'medium',      // 'turbo' | 'medium' | 'large' — Slice K.1. Capacity tier, NOT contract (manual §2). Only meaningful when model === 'krea2'.
+    krea2Creativity: 50,         // integer 0-100, default 50 = Medium. Slice K.1. Raw / Low / Medium / High bucket labels per manual §4. Only meaningful when model === 'krea2'.
     animaResult: null,           // Slice 2.3 — { positive, negative, variant, model } | null. Parallel to state.finalPrompt but for the Anima contract.
     // Slice 3.3 — ADR 0022 — LLM model picker (Kilo Code gateway model id).
     // The id is a string the Kilo Code API accepts verbatim
@@ -2025,16 +2027,32 @@
   // land in Slices 2.3 + 2.4; this slice ships only the state plumbing
   // + the UI control. Deletion test: delete this block and the app
   // behaves as before (Z-Image Turbo only).
-  const ALLOWED_MODELS = ['zimage_turbo', 'anima'];
+  const ALLOWED_MODELS = ['zimage_turbo', 'anima', 'krea2'];  // Slice K.1 — ADR 0030 — three-way picker
   const ALLOWED_ANIMA_VARIANTS = ['base', 'aesthetic', 'turbo'];
+  const ALLOWED_KREA2_VARIANTS = ['turbo', 'medium', 'large']; // Slice K.1 — capacity tier (manual §2), NOT contract. Default 'medium'.
   const MODEL_STORAGE_KEY = 'i2p.state.model';
   const VARIANT_STORAGE_KEY = 'i2p.state.animaVariant';
+  const KREA2_VARIANT_STORAGE_KEY = 'i2p.state.krea2Variant';  // Slice K.1
+  const KREA2_CREATIVITY_STORAGE_KEY = 'i2p.state.krea2Creativity';  // Slice K.1 — integer 0-100, default 50 (Medium).
 
   const validateModel = (raw) => {
     return ALLOWED_MODELS.includes(raw) ? raw : 'zimage_turbo';
   };
   const validateVariant = (raw) => {
     return ALLOWED_ANIMA_VARIANTS.includes(raw) ? raw : 'base';
+  };
+  // Slice K.1 — capacity tier validator. Defaults to 'medium' per manual §2 + ADR 0030 decision #2.
+  const validateKrea2Variant = (raw) => {
+    return ALLOWED_KREA2_VARIANTS.includes(raw) ? raw : 'medium';
+  };
+  // Slice K.1 — creativity validator. Clamps to integer 0-100. Default 50 (Medium).
+  // Manual §4 publishes the four bucket labels (Raw/Low/Medium/High) without numeric
+  // boundaries; the integer is the fine-grained control and the LLM prompt branches
+  // per bucket label.
+  const validateKrea2Creativity = (raw) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return 50;
+    return Math.max(0, Math.min(100, Math.round(n)));
   };
 
   // ─── Slice 3.3 — ADR 0022 — LLM model picker (Kilo Code) ─────────────
@@ -2091,6 +2109,8 @@
     try {
       localStorage.setItem(MODEL_STORAGE_KEY, state.model);
       localStorage.setItem(VARIANT_STORAGE_KEY, state.animaVariant);
+      localStorage.setItem(KREA2_VARIANT_STORAGE_KEY, state.krea2Variant);  // Slice K.1
+      localStorage.setItem(KREA2_CREATIVITY_STORAGE_KEY, String(state.krea2Creativity));  // Slice K.1
       localStorage.setItem(LLM_MODEL_STORAGE_KEY, state.llmModel);
       localStorage.setItem(PROVIDER_STORAGE_KEY, state.provider);
     } catch (_) {
@@ -2103,10 +2123,14 @@
     try {
       const m = localStorage.getItem(MODEL_STORAGE_KEY);
       const v = localStorage.getItem(VARIANT_STORAGE_KEY);
+      const k = localStorage.getItem(KREA2_VARIANT_STORAGE_KEY);  // Slice K.1
+      const c = localStorage.getItem(KREA2_CREATIVITY_STORAGE_KEY);  // Slice K.1
       const l = localStorage.getItem(LLM_MODEL_STORAGE_KEY);
       const p = localStorage.getItem(PROVIDER_STORAGE_KEY);
       if (m !== null) state.model = validateModel(m);
       if (v !== null) state.animaVariant = validateVariant(v);
+      if (k !== null) state.krea2Variant = validateKrea2Variant(k);  // Slice K.1
+      if (c !== null) state.krea2Creativity = validateKrea2Creativity(c);  // Slice K.1
       if (l !== null) state.llmModel = validateLlmModel(l);
       if (p !== null) state.provider = validateProvider(p);
     } catch (_) {
@@ -2126,6 +2150,19 @@
         url.searchParams.set('variant', state.animaVariant);
       } else {
         url.searchParams.delete('variant');
+      }
+      // Slice K.1 — ADR 0030 — mirror Krea-2 variant + creativity in the URL
+      // when the user picks Krea 2 and a non-default capacity / creativity is
+      // selected. Defaults (medium / 50) are omitted to keep URLs canonical.
+      if (state.model === 'krea2' && state.krea2Variant !== 'medium') {
+        url.searchParams.set('krea2_variant', state.krea2Variant);
+      } else {
+        url.searchParams.delete('krea2_variant');
+      }
+      if (state.model === 'krea2' && state.krea2Creativity !== 50) {
+        url.searchParams.set('krea2_creativity', String(state.krea2Creativity));
+      } else {
+        url.searchParams.delete('krea2_creativity');
       }
       // Slice 3.3 — ADR 0022 — mirror the LLM model in ?llm=...
       // so a deep-link to the app lands on the same model the
@@ -2156,10 +2193,14 @@
       const url = new URL(window.location.href);
       const m = url.searchParams.get('model');
       const v = url.searchParams.get('variant');
+      const k = url.searchParams.get('krea2_variant');  // Slice K.1
+      const c = url.searchParams.get('krea2_creativity');  // Slice K.1
       const l = url.searchParams.get('llm');
       const p = url.searchParams.get('provider');
       if (m !== null) state.model = validateModel(m);
       if (v !== null) state.animaVariant = validateVariant(v);
+      if (k !== null) state.krea2Variant = validateKrea2Variant(k);  // Slice K.1
+      if (c !== null) state.krea2Creativity = validateKrea2Creativity(c);  // Slice K.1
       if (l !== null) state.llmModel = validateLlmModel(l);
       if (p !== null) state.provider = validateProvider(p);
     } catch (_) {

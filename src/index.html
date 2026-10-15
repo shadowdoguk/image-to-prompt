@@ -206,6 +206,13 @@
                     </span>
                     <button type="button" class="btn-toggle" data-model="zimage_turbo" aria-pressed="true">Z-Image Turbo</button>
                     <button type="button" class="btn-toggle" data-model="anima" aria-pressed="false">Anima</button>
+                    <!-- Slice K.1 — ADR 0030 — Krea 2 picker option (third sibling).
+                         Prose-only 5-layer formula contract (manual §7), no negative
+                         prompt (default CFG=0 per manual §10). The variant + creativity
+                         slider lives inside the Krea-2 result panel, not here, because
+                         Krea-2 variants are capacity tiers (Turbo/Medium/Large) and the
+                         creativity slider is a brand-new UI concept not in Slice 2. -->
+                    <button type="button" class="btn-toggle" data-model="krea2" aria-pressed="false">Krea 2</button>
                   </div>
                   <label for="aspect-ratio-select" class="label aspect-ratio-label">
                     Aspect ratio
@@ -550,6 +557,10 @@
             </label>
             <label class="settings-radio-option">
               <input type="radio" name="settings-model" value="anima"> Anima
+            </label>
+            <!-- Slice K.1 — ADR 0030 — third settings-radio option. -->
+            <label class="settings-radio-option">
+              <input type="radio" name="settings-model" value="krea2"> Krea 2
             </label>
           </fieldset>
 

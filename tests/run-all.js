@@ -10039,9 +10039,12 @@ test('Slice 2.1: src/app.js defines validateModel + validateVariant helpers', ()
   assertTrue(/const validateVariant = \(raw\) => \{/.test(js), 'validateVariant helper defined');
   assertTrue(/return ALLOWED_ANIMA_VARIANTS\.includes\(raw\) \? raw : 'base'/.test(js),
     'validateVariant falls back to base on invalid');
-  // ALLOWED enums are exactly the documented values
-  assertTrue(/ALLOWED_MODELS = \['zimage_turbo', 'anima'\]/.test(js),
-    'ALLOWED_MODELS = [zimage_turbo, anima]');
+  // ALLOWED enums are exactly the documented values — Slice 2.1's
+  // documented-values assertion. The Krea-2 picker (Slice K.1, ADR 0030)
+  // extends ALLOWED_MODELS to a 3-way enum; this slice-2.1 invariant
+  // is preserved by an explicit SPEC §30 K.1 test below.
+  assertTrue(/ALLOWED_MODELS = \['zimage_turbo', 'anima', 'krea2'\]/.test(js),
+    'ALLOWED_MODELS = [zimage_turbo, anima, krea2] (Slice 2.1 extended by K.1)');
   assertTrue(/ALLOWED_ANIMA_VARIANTS = \['base', 'aesthetic', 'turbo'\]/.test(js),
     'ALLOWED_ANIMA_VARIANTS = [base, aesthetic, turbo]');
 });
@@ -14317,4 +14320,115 @@ test('SPEC §29: helper is non-reentrant (nesting is rejected)', () => {
   } finally {
     if (fs.existsSync(fileAbs)) fs.unlinkSync(fileAbs);
   }
+});
+
+// ─── SPEC §30 — Krea-2 picker slice (K.1 sub-slice) ───────────────────
+//
+// Slice K.1 ships state + UI selector for the third pre-Generate
+// option (Krea 2). Does NOT yet implement /api/krea2 (that's K.2);
+// does NOT yet render the Krea-2 result panel (that's K.3); does
+// NOT yet thread chat-Apply through the Krea-2 contract (that's
+// K.4). K.1 is state + UI only.
+
+test('SPEC §30 K.1: src/index.html has the third Krea 2 picker button', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/id="model-selector"/.test(html), 'index.html has model-selector container');
+  assertTrue(/data-model="zimage_turbo"/.test(html), 'index.html has Z-Image Turbo button');
+  assertTrue(/data-model="anima"/.test(html), 'index.html has Anima button');
+  assertTrue(/data-model="krea2"/.test(html), 'index.html has Krea 2 button (Slice K.1)');
+  // The Krea 2 button is sibling to Z-Image / Anima, not nested.
+  assertTrue(/<button[^>]*data-model="krea2"/.test(html), 'Krea 2 button is a <button> (not nested in a select)');
+});
+
+test('SPEC §30 K.1: src/index.html has the Krea 2 radio in settings', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/name="settings-model"[\s\S]*value="krea2"/.test(html),
+    'settings-model radio has a krea2 value');
+});
+
+test('SPEC §30 K.1: src/app.js exposes ALLOWED_KREA2_VARIANTS + ALLOWED_MODELS contains krea2', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/ALLOWED_KREA2_VARIANTS = \['turbo', 'medium', 'large'\]/.test(js),
+    'ALLOWED_KREA2_VARIANTS = [turbo, medium, large]');
+  assertTrue(/ALLOWED_MODELS = \['zimage_turbo', 'anima', 'krea2'\]/.test(js),
+    'ALLOWED_MODELS extended to 3-way');
+});
+
+test('SPEC §30 K.1: src/app.js defines validateKrea2Variant + validateKrea2Creativity', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/const validateKrea2Variant = \(raw\) => \{/.test(js),
+    'validateKrea2Variant helper defined');
+  assertTrue(/return ALLOWED_KREA2_VARIANTS\.includes\(raw\) \? raw : 'medium'/.test(js),
+    'validateKrea2Variant falls back to medium on invalid');
+  assertTrue(/const validateKrea2Creativity = \(raw\) => \{/.test(js),
+    'validateKrea2Creativity helper defined');
+  // Default is 50 (Medium bucket). Clamp [0, 100]. Round.
+  assertTrue(/return Math\.max\(0, Math\.min\(100, Math\.round\(n\)\)/.test(js),
+    'validateKrea2Creativity clamps to [0, 100] and rounds');
+});
+
+test('SPEC §30 K.1: state.krea2Variant + state.krea2Creativity exist with correct defaults', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/krea2Variant:\s*'medium'/.test(js),
+    'state.krea2Variant default = medium (capacity tier, manual §2)');
+  assertTrue(/krea2Creativity:\s*50/.test(js),
+    'state.krea2Creativity default = 50 (Medium bucket, manual §4)');
+});
+
+test('SPEC §30 K.1: KREA2_VARIANT_STORAGE_KEY + KREA2_CREATIVITY_STORAGE_KEY are persisted', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/KREA2_VARIANT_STORAGE_KEY = 'i2p\.state\.krea2Variant'/.test(js),
+    'KREA2_VARIANT_STORAGE_KEY defined');
+  assertTrue(/KREA2_CREATIVITY_STORAGE_KEY = 'i2p\.state\.krea2Creativity'/.test(js),
+    'KREA2_CREATIVITY_STORAGE_KEY defined');
+  // writeStateToLocalStorage writes both keys.
+  assertTrue(
+    /localStorage\.setItem\(KREA2_VARIANT_STORAGE_KEY, state\.krea2Variant\)/.test(js),
+    'writeStateToLocalStorage writes krea2Variant'
+  );
+  assertTrue(
+    /localStorage\.setItem\(KREA2_CREATIVITY_STORAGE_KEY, String\(state\.krea2Creativity\)\)/.test(js),
+    'writeStateToLocalStorage writes krea2Creativity (as string)'
+  );
+  // readStateFromLocalStorage reads both keys.
+  assertTrue(
+    /state\.krea2Variant = validateKrea2Variant\(k\)/.test(js),
+    'readStateFromLocalStorage reads krea2Variant'
+  );
+  assertTrue(
+    /state\.krea2Creativity = validateKrea2Creativity\(c\)/.test(js),
+    'readStateFromLocalStorage reads krea2Creativity'
+  );
+});
+
+test('SPEC §30 K.1: syncStateToURL + readStateFromURL round-trip krea2_variant + krea2_creativity', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // syncStateToURL includes the param names.
+  assertTrue(/krea2_variant/.test(js), 'syncStateToURL references krea2_variant');
+  assertTrue(/krea2_creativity/.test(js), 'syncStateToURL references krea2_creativity');
+  // readStateFromURL reads them with the validators.
+  assertTrue(/url\.searchParams\.get\('krea2_variant'\)/.test(js),
+    'readStateFromURL reads krea2_variant');
+  assertTrue(/url\.searchParams\.get\('krea2_creativity'\)/.test(js),
+    'readStateFromURL reads krea2_creativity');
+  // Both are omitted from the URL when on defaults (medium / 50) to keep canonical URLs.
+  assertTrue(
+    /state\.model === 'krea2' && state\.krea2Variant !== 'medium'[\s\S]*url\.searchParams\.set\('krea2_variant'/.test(js),
+    'krea2_variant is omitted from URL when model is not krea2 or variant is medium'
+  );
+  assertTrue(
+    /state\.model === 'krea2' && state\.krea2Creativity !== 50[\s\S]*url\.searchParams\.set\('krea2_creativity'/.test(js),
+    'krea2_creativity is omitted from URL when model is not krea2 or creativity is 50'
+  );
+});
+
+test('SPEC §30 K.1: renderModelSelector renders all three buttons (K.1 acceptance)', () => {
+  // Static source-grep verification that the existing renderer covers
+  // any [data-model] element. The third button (krea2) inherits the same
+  // render path; no special-case branch needed.
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(
+    /dom\.modelSelector\.querySelectorAll\('\[data-model\]'\)/.test(js),
+    'renderModelSelector queries [data-model] (covers all three)'
+  );
 });
