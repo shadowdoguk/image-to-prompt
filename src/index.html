@@ -316,6 +316,74 @@
             </div>
           </section>
 
+          <!-- Krea 2 result (Slice K.3 — ADR 0030). Sibling panel to the
+               Z-Image + Anima panels. Single-positive prose output (no
+               negative — manual §10 R8 + §11 default CFG=0). Variant
+               + creativity controls live INSIDE this panel because
+               they are Krea-2-internal (manual §2: variant = capacity
+               tier, not contract). -->
+          <section class="panel" id="step-krea2-result" aria-label="Krea 2 prompt result" hidden>
+            <div class="panel-body">
+              <header class="panel-header">
+                <h2 class="panel-title">Krea 2 prompt result</h2>
+                <p class="panel-subtitle">
+                  Single-prose output following the 5-layer formula
+                  (Subject and action / Setting and environment / Lighting and
+                  mood / Style reference / Composition notes). Copy into the
+                  Krea web app, krea.ai REST API, Replicate, fal.ai, or a
+                  self-hosted ComfyUI / InvokeAI pipeline.
+                </p>
+              </header>
+
+              <div class="krea2-variant-selector" id="krea2-variant-selector" role="group" aria-label="Krea 2 capacity tier">
+                <span class="label krea2-variant-selector-label">
+                  Variant
+                  <span class="label-hint">— capacity tier (Turbo / Medium / Large). Same prompt format; changes inference cost.</span>
+                </span>
+                <button type="button" class="btn-toggle" data-krea2-variant="turbo" aria-pressed="false">Turbo</button>
+                <button type="button" class="btn-toggle" data-krea2-variant="medium" aria-pressed="true">Medium</button>
+                <button type="button" class="btn-toggle" data-krea2-variant="large" aria-pressed="false">Large</button>
+              </div>
+
+              <label for="krea2-creativity-slider" class="label">
+                Creativity
+                <span class="label-hint">— Raw / Low / Medium / High bucket. Drives rendering tone (manual §4).</span>
+              </label>
+              <div class="krea2-creativity-row">
+                <input
+                  id="krea2-creativity-slider"
+                  class="krea2-creativity-slider"
+                  type="range"
+                  min="0" max="100" step="1"
+                  value="50"
+                  aria-label="Krea 2 creativity slider (0-100, bucket-mapped to Raw / Low / Medium / High)"
+                />
+                <span id="krea2-creativity-readout" class="krea2-creativity-readout">50 / Medium</span>
+              </div>
+
+              <label for="krea2-result-prompt" class="label">
+                Prompt
+                <span class="label-hint">— single short prose paragraph (no negative prompt — manual §10 R8 + §11)</span>
+              </label>
+              <textarea
+                id="krea2-result-prompt"
+                class="textarea krea2-result-prompt"
+                rows="6"
+                aria-label="Krea 2 prompt"
+              ></textarea>
+
+              <div class="result-meta">
+                <span id="krea2-result-meta-info" class="result-meta-info"></span>
+              </div>
+
+              <div class="result-actions">
+                <button type="button" id="krea2-copy-btn" class="btn-copy">Copy to clipboard</button>
+                <button type="button" id="krea2-regenerate-btn" class="btn-secondary">Regenerate</button>
+                <a id="krea2-refine-in-chat-link" class="btn-secondary" href="#/chat">Refine in chat →</a>
+              </div>
+            </div>
+          </section>
+
         </div>
       </div>
     </section>

@@ -1595,6 +1595,53 @@ body {
   margin-bottom: 0.75rem;
 }
 
+/* Slice K.3 — ADR 0030 — Krea-2 result panel siblings. */
+.krea2-variant-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0.5rem 0;
+}
+.krea2-variant-selector-label {
+  display: block;
+  width: 100%;
+  margin-bottom: 0.25rem;
+  color: var(--text-muted);
+}
+.krea2-variant-selector-label .label-hint {
+  color: var(--text-muted);
+}
+.krea2-creativity-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+}
+.krea2-creativity-slider {
+  flex: 1 1 auto;
+  min-width: 12rem;
+  accent-color: var(--color-accent, #4a8ed6);
+}
+.krea2-creativity-readout {
+  flex: 0 0 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  min-width: 8.5rem;
+  text-align: right;
+}
+.krea2-result-prompt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 6rem;
+  margin-bottom: 0.75rem;
+}
+
 /* ADR 0019 Issue #15 — 1024-token reminder banner in the chat panel.
    Hidden by default; surfaced when the current prompt hits
    STAGE2_HARD_MAX_WORDS (750 words). Yellow-tinted to mirror the

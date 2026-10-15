@@ -14579,3 +14579,279 @@ test('SPEC §30 K.2: SPEC §30 + ADR 0030 cross-references present in source', (
   // Slice K.2 markers identify the helper + route + constant.
   assertTrue(/Slice K\.2/.test(serverText), 'server.js identifies Slice K.2 markers');
 });
+
+// ─── SPEC §30 — Krea-2 picker slice (K.3 sub-slice) ───────────────────
+//
+// Slice K.3 ships the frontend dispatch + Krea-2 result panel + the
+// variant + creativity internal selectors. Sibling pattern to Anima
+// (displayAnimaResult, onAnimaVariantChange). Does NOT yet implement
+// chat-Apply branching (that's K.4).
+
+test('SPEC §30 K.3: src/app.js exposes runKrea2Generate + displayKrea2Result', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/const runKrea2Generate = async \(\) => \{/.test(js),
+    'runKrea2Generate defined as async function');
+  assertTrue(/const displayKrea2Result = \(data\) => \{/.test(js),
+    'displayKrea2Result defined');
+});
+
+test('SPEC §30 K.3: src/app.js wires /api/krea2 dispatch from runGeneratePrompt', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The dispatch branch lives in the same runGeneratePrompt function
+  // that handles Z-Image and Anima. Mirrors the existing `if
+  // (state.model === 'anima')` branch with a sibling `if (state.model
+  // === 'krea2')` branch.
+  assertTrue(/if \(state\.model === 'krea2'\) \{[\s\S]{0,200}runKrea2Generate/.test(js),
+    'runGeneratePrompt branches on state.model === "krea2" → runKrea2Generate');
+});
+
+test('SPEC §30 K.3: src/app.js forwards creativity + variant to /api/krea2', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/fd\.append\('creativity', String\(state\.krea2Creativity\)\)/.test(js),
+    '/api/krea2 request carries creativity');
+  assertTrue(/fd\.append\('variant', state\.krea2Variant\)/.test(js),
+    '/api/krea2 request carries variant');
+});
+
+test('SPEC §30 K.3: src/app.js state.krea2Result mirrors the Anima state.animaResult pattern', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // state.krea2Result shape: prompt + variant + creativity + model
+  // (no negative — manual §10 R8 + §11). Anchor on the runKrea2Generate
+  // block + a 1500-char window.
+  const anchor = js.indexOf('runKrea2Generate = async () => {');
+  const window = js.slice(anchor, anchor + 1500);
+  assertTrue(/krea2Result\s*=\s*\{[\s\S]{0,500}prompt: data\.prompt/.test(window),
+    'state.krea2Result.prompt set');
+  assertTrue(/krea2Result\s*=\s*\{[\s\S]{0,500}variant: data\.variant/.test(window),
+    'state.krea2Result.variant set');
+  assertTrue(/krea2Result\s*=\s*\{[\s\S]{0,500}creativity: data\.creativity/.test(window),
+    'state.krea2Result.creativity set');
+  assertTrue(!/krea2Result\s*=\s*\{[\s\S]{0,500}negative:/.test(window),
+    'state.krea2Result has NO "negative:" field (K.2 invariant P-7)');
+});
+
+test('SPEC §30 K.3: src/app.js displayKrea2Result hides Z-Image + Anima panels', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Sibling pattern: hide the other two result panels, show Krea-2.
+  assertTrue(/displayKrea2Result[\s\S]{0,200}dom\.resultSection\.hidden = true/.test(js),
+    'displayKrea2Result hides Z-Image result panel');
+  assertTrue(/displayKrea2Result[\s\S]{0,200}dom\.animaResultSection\.hidden = true/.test(js),
+    'displayKrea2Result hides Anima result panel');
+  assertTrue(/displayKrea2Result[\s\S]{0,200}dom\.krea2ResultSection\.hidden = false/.test(js),
+    'displayKrea2Result shows Krea-2 result panel');
+});
+
+test('SPEC §30 K.3: src/app.js hides the negative-textarea pattern (single-positive)', () => {
+  // Per SPEC §30.4 / PRE-MORTEM §30 P-7 / PRE-MORTEM §30 K-5, Krea-2
+  // has NO negative prompt. The displayKrea2Result function must NOT
+  // reference a "negative" DOM ref or set a negative value.
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(!/displayKrea2Result[\s\S]{0,400}dom\.[a-zA-Z0-9_-]*negative/i.test(js),
+    'displayKrea2Result does not set a negative field');
+});
+
+test('SPEC §30 K.3: src/index.html has the Krea-2 result panel', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/id="step-krea2-result"/.test(html),
+    'Krea-2 result panel present (id="step-krea2-result")');
+  assertTrue(/id="krea2-result-prompt"/.test(html),
+    'Krea-2 result textarea present (id="krea2-result-prompt")');
+  assertTrue(/id="krea2-variant-selector"/.test(html),
+    'Krea-2 internal variant selector present');
+  assertTrue(/id="krea2-creativity-slider"/.test(html),
+    'Krea-2 internal creativity slider present');
+  assertTrue(/id="krea2-creativity-readout"/.test(html),
+    'Krea-2 creativity readout present');
+  // Three variant buttons present.
+  assertTrue(/data-krea2-variant="turbo"/.test(html),
+    'Turbo variant button');
+  assertTrue(/data-krea2-variant="medium"/.test(html),
+    'Medium variant button');
+  assertTrue(/data-krea2-variant="large"/.test(html),
+    'Large variant button');
+  // Variant buttons are inside the Krea-2 panel, not next to the
+  // model picker (variant is intra-Krea-2, not at the model level).
+  const krea2Panel = html.match(/<section[^>]*id="step-krea2-result"[\s\S]*?<\/section>/);
+  assertTrue(krea2Panel && /krea2-variant-selector/.test(krea2Panel[0]),
+    'variant selector lives INSIDE the Krea-2 panel');
+});
+
+test('SPEC §30 K.3: src/index.html Krea-2 panel has NO negative-prompt textarea', () => {
+  // Per manual §10 R8 + §11: Krea-2 has no negative prompt. The
+  // Krea-2 result panel must render exactly one textarea (positive).
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  const krea2Panel = html.match(/<section[^>]*id="step-krea2-result"[\s\S]*?<\/section>/);
+  assertTrue(krea2Panel !== null, 'Krea-2 panel section found');
+  const textareaMatches = krea2Panel[0].match(/<textarea\b/g) || [];
+  assertEqual(textareaMatches.length, 1,
+    `expected 1 <textarea> in the Krea-2 panel, got ${textareaMatches.length}`);
+  // The label-hint text mentions "no negative prompt" as an
+  // explanation of the Krea-2 contract — that is acceptable.
+  // What's NOT acceptable is a SECOND textarea labelled
+  // "negative" (a real input field). The label-hint text
+  // describing the contract is allowed because it surfaces the
+  // invariant for the user.
+  assertTrue(!/<label[^>]*>\s*[Nn]egative\s*</.test(krea2Panel[0]),
+    'Krea-2 panel has no <label>Negative</label> (no input field named "negative")');
+  assertTrue(!/<textarea[^>]*negative/i.test(krea2Panel[0]),
+    'Krea-2 panel has no <textarea with id/name "negative">');
+});
+
+test('SPEC §30 K.3: src/styles.css has Krea-2 panel CSS', () => {
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  assertTrue(/\.krea2-variant-selector\s*\{/.test(css), '.krea2-variant-selector rule');
+  assertTrue(/\.krea2-creativity-slider\s*\{/.test(css), '.krea2-creativity-slider rule');
+  assertTrue(/\.krea2-creativity-readout\s*\{/.test(css), '.krea2-creativity-readout rule');
+  assertTrue(/\.krea2-result-prompt\s*\{/.test(css), '.krea2-result-prompt rule');
+});
+
+test('SPEC §30 K.3: src/app.js exports runKrea2Generate + displayKrea2Result + activateKrea2ChatForResult', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The test hook block at the bottom of init() exposes the K.3 helpers.
+  assertTrue(/runKrea2Generate,/.test(js), 'runKrea2Generate exported');
+  assertTrue(/displayKrea2Result,/.test(js), 'displayKrea2Result exported');
+  assertTrue(/activateKrea2ChatForResult/.test(js), 'activateKrea2ChatForResult exported');
+  assertTrue(/onKrea2VariantChange,/.test(js), 'onKrea2VariantChange exported');
+  assertTrue(/onKrea2CreativityChange,/.test(js), 'onKrea2CreativityChange exported');
+});
+
+// ─── SPEC §30 — Krea-2 picker slice (K.4 sub-slice) ───────────────────
+//
+// Slice K.4 ships the chat-Apply branch for Krea-2. Mirrors the
+// Anima pattern from ADR 0021's 2026-08-04 consequences: every
+// mutation point writes both state.slice AND the visible DOM ref.
+// This is the lesson from issue #22 ("Apply does not update Anima
+// result panel"); the same lesson applied here in advance.
+
+test('SPEC §30 K.4: src/app.js applyChatRevision handles Krea-2 branch', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The apply path branches on state.model + state.<model>Result.
+  // The Krea-2 branch mirrors the Anima + Z-Image branches.
+  assertTrue(
+    /applyChatRevision[\s\S]{0,2500}state\.model === 'krea2' && state\.krea2Result/.test(js),
+    "applyChatRevision branches on state.model === 'krea2' && state.krea2Result"
+  );
+  // The Krea-2 branch writes BOTH state.slice AND the visible DOM
+  // ref. This is the lesson from ADR 0021 issue #22.
+  assertTrue(
+    /state\.model === 'krea2' && state\.krea2Result[\s\S]{0,500}state\.krea2Result = \{[\s\S]{0,200}\.\.\.state\.krea2Result,[\s\S]{0,100}prompt:/.test(js),
+    'Krea-2 Apply branch updates state.krea2Result.prompt'
+  );
+  assertTrue(
+    /state\.model === 'krea2' && state\.krea2Result[\s\S]{0,500}dom\.krea2ResultPrompt\.value/.test(js),
+    'Krea-2 Apply branch updates dom.krea2ResultPrompt.value'
+  );
+});
+
+test('SPEC §30 K.4: src/app.js chat-stream sync mirrors Krea-2 result', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Same lesson: every chat-stream sync that mutates the result
+  // panel must mirror to the Krea-2 branch.
+  assertTrue(
+    /state\.model === 'krea2' && state\.krea2Result && payload\.session\.current_prompt/.test(js),
+    'chat-stream sync branches on Krea-2'
+  );
+  assertTrue(
+    /state\.krea2Result = \{ \.\.\.state\.krea2Result, prompt: payload\.session\.current_prompt \}/.test(js),
+    'chat-stream sync writes state.krea2Result.prompt in lockstep'
+  );
+  assertTrue(
+    /dom\.krea2ResultPrompt\.value = payload\.session\.current_prompt/.test(js),
+    'chat-stream sync writes dom.krea2ResultPrompt.value in lockstep'
+  );
+});
+
+test('SPEC §30 K.4: src/app.js activateKrea2ChatForResult is wired', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/const activateKrea2ChatForResult = async \(data\) => \{/.test(js),
+    'activateKrea2ChatForResult defined as async function');
+  // POST /api/chat/sessions is the chat-session mint call.
+  assertTrue(/apiCall\(['"]\/api\/chat\/sessions['"]/.test(js),
+    'activateKrea2ChatForResult POSTs to /api/chat/sessions');
+  assertTrue(/model:\s*['"]krea2['"]/.test(js),
+    "activateKrea2ChatForResult tags model: 'krea2'");
+  assertTrue(/variant:/.test(js), 'activateKrea2ChatForResult forwards variant on session');
+  assertTrue(/creativity:/.test(js), 'activateKrea2ChatForResult forwards creativity on session');
+});
+
+// ─── SPEC §30 — K.5 aggregate ─────────────────────────────────────────
+
+test('SPEC §30 K.5: aggregate — all K sub-slices landed', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'src/styles.css'), 'utf8');
+  // K.1
+  assertTrue(/data-model="krea2"/.test(html), 'K.1: third picker button present');
+  assertTrue(/ALLOWED_MODELS = \['zimage_turbo', 'anima', 'krea2'\]/.test(js), 'K.1: 3-way enum');
+  // K.2 (server-side exports land in server.js, not app.js)
+  const server = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/DEFAULT_KREA2_PROMPT/.test(server), 'K.2: DEFAULT_KREA2_PROMPT in server.js');
+  assertTrue(/callKiloKrea2Analysis/.test(server), 'K.2: callKiloKrea2Analysis in server.js');
+  assertTrue(/creativityIntToBucketLabel/.test(server), 'K.2: creativityIntToBucketLabel in server.js');
+  assertTrue(/app\.post\(['"]\/api\/krea2['"]/.test(server), 'K.2: route registered');
+  // K.3
+  assertTrue(/id="step-krea2-result"/.test(html), 'K.3: result panel landed');
+  assertTrue(/const runKrea2Generate = async \(\) => \{/.test(js), 'K.3: generate path');
+  assertTrue(/const displayKrea2Result = \(data\) => \{/.test(js), 'K.3: display path');
+  assertTrue(/\.krea2-variant-selector\s*\{/.test(css), 'K.3: CSS rule');
+  assertTrue(/\.krea2-creativity-slider\s*\{/.test(css), 'K.3: creativity slider CSS');
+  // K.4
+  assertTrue(/activateKrea2ChatForResult/.test(js), 'K.4: chat activation wired');
+  assertTrue(
+    /state\.model === 'krea2' && state\.krea2Result[\s\S]{0,500}state\.krea2Result = \{[\s\S]{0,200}\.\.\.state\.krea2Result/.test(js),
+    'K.4: chat-Apply branch mirrors state.shape + display.shape'
+  );
+});
+
+test('SPEC §30 K.5: aggregate — Slice K contract is single-positive across the stack', () => {
+  // The headline invariant: no `negative` field anywhere in the
+  // Krea-2 dispatch path. Enforced in code (5 places), HTML (1
+  // place: no <textarea id="...negative..."> in the panel), server
+  // JSON schema (1 place), README (1 place).
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  // The Krea-2 panel has no negative textarea.
+  const krea2Panel = html.match(/<section[^>]*id="step-krea2-result"[\s\S]*?<\/section>/);
+  assertTrue(krea2Panel !== null, 'Krea-2 panel found');
+  assertTrue(!/id="[a-zA-Z0-9_-]*negative"/.test(krea2Panel[0]),
+    'Krea-2 panel has no <element id="...negative">');
+  // displayKrea2Result does not reference a negative DOM. Anchored
+  // on the function declaration + a 4000-char window (the function
+  // body is ~110 lines including the chat-activation guard at the
+  // end). Comment lines mentioning "negative" (the WHY-not-closed
+  // comments documenting the K.2 invariant P-7) are tolerated —
+  // the test is "no DOM mutation or setAttribute on a negative
+  // field", not "no string containing the word negative".
+  const displayStart = js.indexOf('const displayKrea2Result = (data) => {');
+  assertTrue(displayStart !== -1, 'displayKrea2Result declared');
+  const displayWindow = js.slice(displayStart, displayStart + 4000);
+  assertTrue(!/negative:/i.test(displayWindow),
+    'displayKrea2Result body has no "negative:" identifier (comment-free)');
+  assertTrue(!/dom\.[a-zA-Z0-9_-]*negative/i.test(displayWindow),
+    'displayKrea2Result body does not reference dom.*Negative');
+});
+
+test('SPEC §30 K.5: README documents POST /api/krea2 + the 3-way picker', () => {
+  const md = fs.readFileSync(path.join(PROJECT_ROOT, 'README.md'), 'utf8');
+  // Heading format in README uses backticks around the path; tolerate
+  // either backtick form or plain text form.
+  assertTrue(/POST.*\/api\/krea2/.test(md),
+    'README documents POST /api/krea2');
+  assertTrue(/Slice K\.2/.test(md),
+    'README identifies the section as Slice K.2 / ADR 0030');
+});
+
+test('SPEC §30 K.5: SPEC §30 + ADR 0030 + K.1/K.2/K.3/K.4 markers all present in source', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const server = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  // SPEC §30 cross-references appear in both src/app.js and server.js.
+  assertTrue(/SPEC §30/.test(js), 'src/app.js references SPEC §30');
+  assertTrue(/SPEC §30/.test(server), 'server.js references SPEC §30');
+  assertTrue(/ADR 0030/.test(server), 'server.js references ADR 0030');
+  assertTrue(/Slice K\.1/.test(js), 'src/app.js identifies Slice K.1');
+  assertTrue(/Slice K\.2/.test(server), 'server.js identifies Slice K.2');
+  assertTrue(/Slice K\.3/.test(js), 'src/app.js identifies Slice K.3');
+  assertTrue(/Slice K\.4/.test(js), 'src/app.js identifies Slice K.4');
+  assertTrue(/ADR 0030/.test(html), 'src/index.html references ADR 0030');
+});

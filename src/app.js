@@ -61,6 +61,7 @@
     krea2Variant: 'medium',      // 'turbo' | 'medium' | 'large' — Slice K.1. Capacity tier, NOT contract (manual §2). Only meaningful when model === 'krea2'.
     krea2Creativity: 50,         // integer 0-100, default 50 = Medium. Slice K.1. Raw / Low / Medium / High bucket labels per manual §4. Only meaningful when model === 'krea2'.
     animaResult: null,           // Slice 2.3 — { positive, negative, variant, model } | null. Parallel to state.finalPrompt but for the Anima contract.
+    krea2Result: null,           // Slice K.3 — { prompt, variant, creativity, model } | null. Parallel to state.finalPrompt + state.animaResult but for the Krea-2 contract (single-positive prose; no `negative` field per manual §10 R8 + §11).
     // Slice 3.3 — ADR 0022 — LLM model picker (Kilo Code gateway model id).
     // The id is a string the Kilo Code API accepts verbatim
     // (e.g. 'minimax/minimax-m3'). Persisted (localStorage) and
@@ -139,6 +140,12 @@
     animaResultNegative: $('anima-result-negative'),
     animaResultMetaInfo: $('anima-result-meta-info'),
     animaVariantSelector: $('anima-variant-selector'),
+    krea2ResultSection: $('step-krea2-result'),           // Slice K.3 — ADR 0030
+    krea2ResultPrompt: $('krea2-result-prompt'),          // Slice K.3 — single prose textarea, no pair (manual §10 R8 + §11)
+    krea2ResultMetaInfo: $('krea2-result-meta-info'),     // Slice K.3 — variant + creativity + model + char count
+    krea2VariantSelector: $('krea2-variant-selector'),    // Slice K.3 — capacity tier (turbo/medium/large), INSIDE the Krea-2 panel
+    krea2CreativitySlider: $('krea2-creativity-slider'),  // Slice K.3 — integer 0-100, default 50 (Medium)
+    krea2CreativityReadout: $('krea2-creativity-readout'), // Slice K.3 — "Raw / Low / Medium / High" readout for the slider value
     animaCopyBtn: $('anima-copy-btn'),
     animaRegenerateBtn: $('anima-regenerate-btn'),
 
@@ -1791,6 +1798,17 @@
       return;
     }
 
+    // Slice K.3 — ADR 0030 — Krea-2 dispatch. Sibling to the Anima
+    // path. /api/krea2 takes creativity (integer 0-100) + variant
+    // (turbo/medium/large). No presetId required — the Krea-2
+    // contract is final-prompt only (per SPEC §30.4 + ADR 0030
+    // decision #5: shared per-field store + model-specific final
+    // assembly).
+    if (state.model === 'krea2') {
+      await runKrea2Generate();
+      return;
+    }
+
     if (!state.selectedPresetId) return;
     const analysis = collectAnalysisFromEditor();
     const directives = dom.directivesInput.value.trim();
@@ -1997,6 +2015,118 @@
     activateAnimaChatForResult(data).catch((e) => {
       console.warn('Failed to activate Anima chat console:', e.message);
     });
+  };
+
+  /**
+   * Slice K.3 — ADR 0030 — Krea-2-mode generate path.
+   * Sibling to runAnimaGenerate. Calls /api/krea2 with the current
+   * image + creativity (integer 0-100, default 50 = Medium) +
+   * variant (turbo/medium/large, default medium), stores the result
+   * in state.krea2Result, and renders via displayKrea2Result.
+   *
+   * The /api/krea2 endpoint already clamps creativity server-side
+   * and validates variant against the whitelist; this client path
+   * mirrors it as defensive duplication (the helper clamps again
+   * via validateKrea2Creativity).
+   */
+  const runKrea2Generate = async () => {
+    try {
+      const file = state.currentFile;
+      if (!file) {
+        showError('No image uploaded. Upload an image first.');
+        return;
+      }
+      const fd = new FormData();
+      fd.append('image', file);
+      fd.append('creativity', String(state.krea2Creativity));
+      fd.append('variant', state.krea2Variant);
+      // Slice 3.4 — forward the LLM model + provider so the server
+      // routes /api/krea2 through the user's chosen model + vendor.
+      fd.append('llmModel', state.llmModel);
+      fd.append('provider', state.provider);
+      const data = await apiCall('/api/krea2', { method: 'POST', body: fd });
+      state.krea2Result = {
+        prompt: data.prompt,
+        variant: data.variant,
+        creativity: data.creativity,
+        model: data.model
+      };
+      displayKrea2Result(state.krea2Result);
+      hideError();
+    } catch (e) {
+      showError(`Krea 2 generation failed: ${e.message}`);
+    } finally {
+      state.isGenerating = false;
+      setButtonLoading(dom.generatePromptBtn, false, 'Generate prompt');
+      updateButtons();
+    }
+  };
+
+  /**
+   * Slice K.3 — ADR 0030 — Krea-2 result panel renderer.
+   *
+   * Sibling to displayAnimaResult. Hides Z-Image + Anima panels,
+   * shows the Krea-2 panel. Renders:
+   *  - Single prose <textarea> (single-positive; no `negative`
+   *    field per manual §10 R8 + §11 default CFG=0)
+   *  - Variant badge mirroring the active krea2Variant
+   *  - Creativity readout "Raw / Low / Medium / High" for the
+   *    current integer
+   *  - Char count + model in the meta line
+   */
+  const displayKrea2Result = (data) => {
+    if (!dom.krea2ResultSection) return;
+    if (dom.resultSection) dom.resultSection.hidden = true;
+    if (dom.animaResultSection) dom.animaResultSection.hidden = true;
+    dom.krea2ResultSection.hidden = false;
+
+    // Populate the single prose textarea.
+    if (dom.krea2ResultPrompt) dom.krea2ResultPrompt.value = data.prompt || '';
+
+    // Active variant indicator (capacity tier, INSIDE the Krea-2 panel).
+    if (dom.krea2VariantSelector) {
+      const buttons = dom.krea2VariantSelector.querySelectorAll('[data-krea2-variant]');
+      buttons.forEach((btn) => {
+        const isActive = btn.dataset.krea2Variant === (data.variant || state.krea2Variant);
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+    }
+
+    // Creativity slider position + readout.
+    if (dom.krea2CreativitySlider) {
+      // Sync the slider to the value that was actually used server-side.
+      const creativity = Number(data.creativity ?? state.krea2Creativity);
+      dom.krea2CreativitySlider.value = String(creativity);
+      if (dom.krea2CreativityReadout) {
+        const bucket = creativityIntToBucketLabelClient(creativity);
+        dom.krea2CreativityReadout.textContent = `${creativity} / ${bucket}`;
+      }
+    }
+
+    // Meta line. Note: explicit that the response had NO `negative`
+    // — useful for the visual demo's K.5 invariant check.
+    if (dom.krea2ResultMetaInfo) {
+      const meta = [
+        `Variant: ${data.variant || state.krea2Variant}`,
+        `Creativity: ${data.creativity ?? state.krea2Creativity}`,
+        `Model: ${data.model || 'MiniMax-M3'}`,
+        `Prose: ${(data.prompt || '').length} chars`
+      ];
+      dom.krea2ResultMetaInfo.textContent = meta.join(' • ');
+    }
+
+    // Scroll the user into the result panel.
+    dom.krea2ResultSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // Slice K.4 stub — chat activation for Krea-2 lands here in
+    // the next sub-slice. The function exists; activation body is
+    // wired in K.4 (mirror activateAnimaChatForResult pattern).
+    if (typeof activateKrea2ChatForResult === 'function') {
+      activateKrea2ChatForResult(data).catch((e) => {
+        console.warn('Failed to activate Krea 2 chat console:', e.message);
+      });
+    }
   };
 
   const setButtonLoading = (btn, loading, text) => {
@@ -2388,6 +2518,130 @@
       onAnimaVariantChange(btn.dataset.animaVariant);
     });
   }
+
+  // ─── Slice K.3 — ADR 0030 — Krea-2 internal selectors (variant + creativity) ───
+  //
+  // Variant (capacity tier) + creativity (Raw/Low/Medium/High) live
+  // INSIDE the Krea-2 result panel, NOT next to the model picker.
+  // Variant is capacity per manual §2, creativity is the brand-new
+  // rendering-tone contract lever per manual §4. Both write to state
+  // only; the actual /api/krea2 call reads them on the next Generate
+  // click (no auto-regenerate).
+
+  // Slice K.3 — client-side mirror of server's creativityIntToBucketLabel
+  // (server.js exports the helper, but we keep a client copy here so the
+  // readout updates immediately on slider input without an extra round
+  // trip). Same operational default mapping (Raw 0-20 / Low 21-45 /
+  // Medium 46-65 / High 66-100); per manual §4 Krea publishes the four
+  // bucket labels without numeric boundaries.
+  const creativityIntToBucketLabelClient = (raw) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return 'Medium';
+    const i = Math.round(n);
+    if (i <= 20) return 'Raw';
+    if (i <= 45) return 'Low';
+    if (i <= 65) return 'Medium';
+    return 'High';
+  };
+
+  const onKrea2VariantChange = (nextVariant) => {
+    const validated = validateKrea2Variant(nextVariant);
+    if (validated === state.krea2Variant) return;
+    state.krea2Variant = validated;
+    writeStateToLocalStorage();
+    syncStateToURL();
+    if (dom.krea2VariantSelector) {
+      const buttons = dom.krea2VariantSelector.querySelectorAll('[data-krea2-variant]');
+      buttons.forEach((btn) => {
+        const isActive = btn.dataset.krea2Variant === state.krea2Variant;
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+    }
+    // Variant change ends the current chat session (per-model sessions,
+    // ADR 0021 decision #5 + Slice 2.4). The mid-model switch the user
+    // has been doing; variant is intra-model but the contract layer
+    // treats it as model-equivalent for chat-anchor purposes.
+    if (state.chatSessionId) {
+      state.chatSessionId = null;
+      if (typeof renderChatSessionSelect === 'function') renderChatSessionSelect();
+      if (typeof updateChatSendButton === 'function') updateChatSendButton();
+    }
+  };
+
+  const onKrea2CreativityChange = (nextCreativity) => {
+    const validated = validateKrea2Creativity(nextCreativity);
+    if (validated === state.krea2Creativity) return;
+    state.krea2Creativity = validated;
+    writeStateToLocalStorage();
+    syncStateToURL();
+    if (dom.krea2CreativityReadout) {
+      dom.krea2CreativityReadout.textContent = `${validated} / ${creativityIntToBucketLabelClient(validated)}`;
+    }
+  };
+
+  if (dom.krea2VariantSelector) {
+    dom.krea2VariantSelector.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-krea2-variant]');
+      if (!btn) return;
+      onKrea2VariantChange(btn.dataset.krea2Variant);
+    });
+  }
+
+  if (dom.krea2CreativitySlider) {
+    dom.krea2CreativitySlider.addEventListener('input', (e) => {
+      onKrea2CreativityChange(e.target.value);
+    });
+    // Sync initial readout on init() — if the user lands with creativity
+    // already in state (persisted from a previous session), the readout
+    // must reflect it.
+    if (dom.krea2CreativityReadout) {
+      dom.krea2CreativityReadout.textContent = `${state.krea2Creativity} / ${creativityIntToBucketLabelClient(state.krea2Creativity)}`;
+    }
+    if (dom.krea2CreativitySlider.value !== String(state.krea2Creativity)) {
+      dom.krea2CreativitySlider.value = String(state.krea2Creativity);
+    }
+  }
+
+  // ─── Slice K.4 stub — chat activation for Krea-2 ───
+  // K.4 mirrors activateAnimaChatForResult. K.3 ships the function
+  // shell + the `if (typeof ... === 'function')` guard in
+  // displayKrea2Result so the chat-activation call is wired but
+  // doesn't ship as a no-op. K.4 lands the helper body.
+  const activateKrea2ChatForResult = async (data) => {
+    if (!data || !data.prompt) return;
+    // K.4 — chat session anchor: POST /api/chat/sessions with
+    // model='krea2', variant=data.variant, creativity=data.creativity,
+    // current_prompt=data.prompt. Mirrors activateAnimaChatForResult
+    // in slice 2.4.
+    try {
+      const session = await apiCall('/api/chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          preset_id: null,
+          preset_name: 'Krea 2',
+          original_prompt: data.prompt,
+          current_prompt: data.prompt,
+          pending_prompt: null,
+          model: 'krea2',
+          variant: data.variant || state.krea2Variant,
+          creativity: data.creativity ?? state.krea2Creativity,
+          metadata: { provider: state.provider, llm_model: state.llmModel }
+        })
+      });
+      state.chatSessionId = session.id;
+      if (typeof renderChatSessionSelect === 'function') renderChatSessionSelect();
+      if (typeof updateChatSendButton === 'function') updateChatSendButton();
+      // Update token reminder banner only if the user has the
+      // Z-Image banner active (Krea-2 doesn't have one).
+    } catch (e) {
+      // Chat activation is best-effort; a 4xx/5xx here must not
+      // clobber the displayed result. Surface as console.warn
+      // (mirrors activateAnimaChatForResult's catch).
+      console.warn(`[krea2 chat activation] ${e.message}`);
+    }
+  };
 
   // Slice 2.3 — Anima regenerate button re-uses the same dispatch path.
   if (dom.animaRegenerateBtn) {
@@ -6351,6 +6605,12 @@
             if (state.model === 'anima' && state.animaResult && payload.session.current_prompt) {
               state.animaResult = { ...state.animaResult, positive: payload.session.current_prompt };
               if (dom.animaResultPositive) dom.animaResultPositive.value = payload.session.current_prompt;
+            } else if (state.model === 'krea2' && state.krea2Result && payload.session.current_prompt) {
+              // Slice K.4 — ADR 0030 — Krea-2 mirror. State.shape +
+              // display.shape written in lockstep (ADR 0021 lesson,
+              // 2026-08-04 consequences).
+              state.krea2Result = { ...state.krea2Result, prompt: payload.session.current_prompt };
+              if (dom.krea2ResultPrompt) dom.krea2ResultPrompt.value = payload.session.current_prompt;
             } else if (payload.session.current_prompt) {
               state.finalPrompt = payload.session.current_prompt;
               if (dom.resultPrompt) dom.resultPrompt.textContent = payload.session.current_prompt;
@@ -6500,6 +6760,19 @@
         };
         if (dom.animaResultPositive) {
           dom.animaResultPositive.value = updated.current_prompt;
+        }
+      } else if (state.model === 'krea2' && state.krea2Result) {
+        // Slice K.4 — ADR 0030 — Krea-2 branch. Mirrors the Anima
+        // pattern: write the updated current_prompt into the
+        // krea2Result state slice + the prose textarea in lockstep.
+        // ADR 0021's 2026-08-04 lesson: state.shape and
+        // display.shape MUST be mirrored at every mutation point.
+        state.krea2Result = {
+          ...state.krea2Result,
+          prompt: updated.current_prompt
+        };
+        if (dom.krea2ResultPrompt) {
+          dom.krea2ResultPrompt.value = updated.current_prompt;
         }
       } else {
         // Z-Image branch — update the live result prompt text. This
@@ -6828,6 +7101,24 @@
     // any UI is rendered. State precedence: URL > localStorage > defaults.
     restoreStateFromUrlOrStorage();
     renderModelSelector();
+    // Slice K.3 — ADR 0030 — render the Krea-2 internal selectors
+    // (variant + creativity) against the resolved state. Runs after
+    // renderModelSelector so the model-side click handler is set
+    // up before any state-restore cascade.
+    if (dom.krea2VariantSelector) {
+      const buttons = dom.krea2VariantSelector.querySelectorAll('[data-krea2-variant]');
+      buttons.forEach((btn) => {
+        const isActive = btn.dataset.krea2Variant === state.krea2Variant;
+        btn.classList.toggle('is-active', isActive);
+        btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+      });
+    }
+    if (dom.krea2CreativitySlider) {
+      dom.krea2CreativitySlider.value = String(state.krea2Creativity);
+    }
+    if (dom.krea2CreativityReadout) {
+      dom.krea2CreativityReadout.textContent = `${state.krea2Creativity} / ${creativityIntToBucketLabelClient(state.krea2Creativity)}`;
+    }
     // Slice 4 — ADR 0023 — render the provider <select> against the
     // resolved state.provider. Call BEFORE renderLlmModelSelector so
     // the model list rebuilds against the right provider on first load.
@@ -6853,6 +7144,14 @@
     updateDirectivesActions();
     updateChatInputCount();
     updateButtons();
+    // Slice K.3 — re-render selectors after state.llmModel /
+    // state.provider resolves so the Krea-2 internal selectors
+    // reflect any URL-mirror override for those fields too. (Above
+    // init render reads state.krea2Variant + state.krea2Creativity
+    // only; these fields are independent.)
+    // No re-render needed — the Krea-2 selectors do not consume
+    // state.llmModel / state.provider. (Intentionally; the variant
+    // + creativity are model-internal, not LLM-provider-internal.)
 
     // Test hook — exposed ONLY when ?test-hook=1 is in the URL so the
     // production app surface stays untouched. Used by the cross-browser
@@ -6894,7 +7193,15 @@
           displayAnimaResult,
           onAnimaVariantChange,
           // Slice 2.4 — ADR 0021 — Anima chat activation
-          activateAnimaChatForResult
+          activateAnimaChatForResult,
+          // Slice K.3 — ADR 0030 — Krea-2 dispatch
+          runKrea2Generate,
+          displayKrea2Result,
+          onKrea2VariantChange,
+          onKrea2CreativityChange,
+          creativityIntToBucketLabelClient,
+          // Slice K.4 — chat activation for Krea-2 (mirrors Anima)
+          activateKrea2ChatForResult
         };
       }
     } catch (_) {
