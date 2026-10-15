@@ -698,3 +698,59 @@ Companion to SPEC §25 and ARCH §30.
   time during IR-1…IR-6, that slice does not merge. The new
   feature is additive; existing chat must not break.
 
+
+## §29 pre-mortem — Destructive-endpoint test fixtures (HOUSEKEEPING H1)
+
+### Risks
+
+- **R-1 (MEDIUM):** The helper is misused (nested calls). Outer
+  helper restores the file mid-test, inner helper restores on top,
+  the user's file gets overwritten by the inner pre-snapshot.
+  *Mitigation:* lock the helper as non-reentrant for v1 (no
+  nested calls). A test comment + the helper's own guard
+  (`assert(!inFlight, 'withDataFileSnapshotted is non-reentrant;
+  do not nest')`) makes the contract explicit. If a real
+  nested-call case arises, this gets revisited.
+
+- **R-2 (MEDIUM):** The helper swallows `body()`'s throw and re-throws
+  AFTER restore — meaning a test that asserts on the throw will
+  see both the original throw AND a restore side-effect. Currently
+  no test asserts on throw; if one is added later, this contract
+  holds because restore happens before re-throw. The helper's
+  `onError` hook (optional) gives the caller a side channel for
+  observation without altering the re-throw semantics.
+
+- **R-3 (LOW):** The helper accidentally removes an existing
+  tracked file because the `data/` directory also holds
+  `data/presets.json` (tracked, not gitignored). *Mitigation:* the
+  helper's documented contract is "use only on gitignored files
+  under `data/`." Initial unit tests verify the helper against a
+  gitignored path (`chat_sessions.json`) and the absent-file
+  case. A future PR can add an automated `.gitignore`-intersect
+  guard if regressions occur.
+
+- **R-4 (LOW):** Two helpers coexist post-slice (`snapshotChatFile`
+  + `withDataFileSnapshotted`). If a future destructive slice
+  accidentally uses the legacy pattern instead of the new one,
+  it inherits the Session #19 class of bug. *Mitigation:* the
+  helper's docstring points future destructive tests at
+  `withDataFileSnapshotted`; the BACKLOG entry that motivated
+  this slice (test fixtures for destructive endpoints) is left
+  open as the "follow-up migration" item.
+
+### Pre-commitments
+
+- **P-1:** The helper MUST always restore the file, even if
+  `body()` throws synchronously. Test coverage:
+  throws-and-restores case.
+- **P-2:** The helper MUST handle the pre-absent-file case
+  (file does not exist before test, body creates it, helper
+  must remove it on exit if file is now present). Test coverage:
+  absent-to-present-to-absent.
+- **P-3:** No existing test may flip red. 672/672 baseline stays
+  green. The legacy helpers are unchanged in behaviour.
+
+### Kill criteria
+
+- **K-1:** Any baseline test flips red → helper or migration
+  changed semantics; revert and replan.

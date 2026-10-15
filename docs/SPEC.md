@@ -1779,6 +1779,116 @@ ships with 0 blocking findings.
 
 ---
 
+## §29 — Destructive-endpoint test fixtures (BACKLOG "Test fixtures for destructive endpoints")
+
+### 29.1 Reframe
+
+The destructive smoke that wiped the user's `data/chat_sessions.json`
+in Session #19 (Slice 27 — Clear chat history) is a class of bug, not
+a one-off. Every destructive endpoint (`DELETE /api/chat/sessions/:id`,
+`DELETE /api/chat/sessions` bulk, future `DELETE /api/notes`, future
+`DELETE /api/note-attachments/:id`, future palette / preset mutations)
+can fire the same way when a developer runs a smoke test against the
+live data file. Today each destructive endpoint has zero test-fence
+between the test runner and the user's real, gitignored state.
+
+This slice adds a single general-purpose test-fence helper that
+snapshots any gitignored data file, runs the destructive test against
+the snapshot, and restores on exit — regardless of test outcome. The
+helper is generic so future destructive tests can adopt it with a
+one-line import.
+
+### 29.2 Scope
+
+**In scope (Slice H1):**
+
+- One new helper: `withDataFileSnapshotted(fileRel, body)` in
+  `tests/run-all.js`. Snapshots the file before `body` runs, restores
+  the original (or removes the snapshot if the file didn't exist)
+  afterwards — even if `body` throws.
+- The legacy `snapshotChatFile` / `restoreChatFile` /
+  `resetChatFile` helpers stay alongside the new helper. Many
+  existing chat tests live inside async bodies (`await startTestServer()`)
+  with nested try/finally patterns; migrating them is a separate
+  follow-up (see "Out of scope" below).
+- ≥3 new tests in `tests/run-all.js`:
+  1. Helper restores the file on a normal exit.
+  2. Helper restores the file on an exception.
+  3. Helper removes the file if it didn't exist before the test.
+- A static-source test that the helper is defined in `tests/run-all.js`
+  (anchor for future destructive-endpoint tests to use it).
+- A docstring block on the helper pointing future destructive tests at
+  the helper.
+
+**Out of scope (deferred — separate follow-up):**
+
+- Migration of the existing 30+ chat-snapshot call sites to the new
+  helper. Many live inside async test bodies with nested try/finally
+  patterns that need careful rewrite, not a blanket regex conversion.
+  The new helper is sync; the legacy helpers remain as the migration
+  target for the future cleanup slice.
+- Migration of `data/directives.json`, `data/palettes.json`,
+  `data/notes.json` test patterns — same reason.
+- New destructive endpoints. The helper is the foundation; the next
+  destructive slice is its own work item.
+- A process guard (pre-commit hook, smoke-script linter) that bans
+  destructive-endpoint smoke tests without a fixture. Out of scope
+  for the helper-itself slice.
+
+### 29.3 User stories
+
+- **As a developer writing a destructive test,** I write `withDataFileSnapshotted('chat_sessions.json', () => { ... })` and trust that the user's real file is safe.
+- **As a developer running an end-to-end smoke against a destructive endpoint,** I have one helper to reach for (no per-test ad-hoc copy-paste of snapshot/restore logic).
+- **As the user,** I trust that `node tests/run-all.js` will not modify my gitignored state in a way that survives the test run.
+
+### 29.4 Behaviour contract
+
+- `withDataFileSnapshotted(fileRel, body, onError)` — synchronous helper.
+  - Resolves `fileRel` against `path.join(PROJECT_ROOT, 'data')`.
+  - Captures the original file contents (`fs.readFileSync`) and mode
+    (existed: true | false). If the file didn't exist, the helper
+    will remove it on restore.
+  - Invokes `body()` synchronously. If `body()` throws, the helper
+    swallows the throw, calls `onError(err)` if provided (default:
+    `console.error`), and re-throws after restore.
+  - After `body()` returns (success or failure), restores the file:
+    existed → write back original contents; didn't exist → unlink if
+    present.
+  - Returns the value `body()` returned.
+
+- Edge cases:
+  - `body()` synchronously throws → helper still restores.
+  - `body()` synchronously mutates file then throws → restored to
+    pre-test state (because we re-read the file before restoring, not
+    just keep an in-memory copy).
+  - Helper runs nested → outer helper's snapshot is replaced by the
+    inner helper's restore. **Decision:** lock helper as non-reentrant
+    for the first version; tests must not nest.
+
+### 29.5 Testing
+
+- ≥3 new test groups in `tests/run-all.js` under a `SPEC §29` header.
+- Migration of `snapshotChatFile` / `restoreChatFile` / `resetChatFile`
+  call sites in `tests/run-all.js` (the unified helper subsumes them).
+- 672/672 baseline must remain green.
+
+### 29.6 DoD
+
+1. `withDataFileSnapshotted` exported from `tests/run-all.js`.
+2. All chat-file tests use the new helper.
+3. Helper covers: normal-exit restore, exception-throw restore,
+   pre-absent-file restore.
+4. ≥3 SPEC §29 tests pass under `node tests/run-all.js`.
+5. No regressions: 672/672 baseline green.
+
+### 29.7 Open questions
+
+None. The session #19 disclosure establishes the why; the existing
+`snapshotChatFile` pattern establishes the how; this slice is the
+unification.
+
+---
+
 ## Change Log
 
 - §28 added 2026-09-16 — iterative refinement: "Analyze Generated Image"
@@ -1786,3 +1896,8 @@ ships with 0 blocking findings.
   criteria K1/K2/K3, locked iteration cap 8, locked provider
   (existing MiniMax M3 vision), locked references (existing
   chat attachment system + ADR 0012 anchor-preservation).
+- §29 added 2026-10-15 — destructive-endpoint test fixtures (HOUSEKEEPING
+  H1). One general-purpose `withDataFileSnapshotted` helper in
+  `tests/run-all.js` replaces the per-test `snapshotChatFile` /
+  `restoreChatFile` ad-hoc pattern. Closes the Session #19
+  data-wipe class of bug.

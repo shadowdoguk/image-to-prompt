@@ -5443,9 +5443,63 @@ test('Frontend JS: openSaveDirectiveModal, openDirectivesManagerModal, openEditD
   }
 });
 
+// ─── SPEC §29 — destructive-endpoint test fixtures ─────────────────────
+//
+// Synchronous helper. Snapshots a gitignored data file at entry, runs
+// `body()`, restores the file (or removes it if it was absent) on exit,
+// even if `body()` throws. Locked non-reentrant for v1 — nested calls
+// would have the inner helper overwrite the outer's restore. Tests must
+// not nest.
+//
+// SCOPE NOTE: Slice H1 ships the helper. Migrating the 30+ existing
+// chat-snapshot call sites is split into a separate follow-up because
+// many are inside async-test bodies with nested try/finally patterns
+// that need careful rewrite. The legacy `snapshotChatFile` /
+// `restoreChatFile` pair stays alongside the new helper for that
+// migration; new destructive-endpoint tests should adopt
+// `withDataFileSnapshotted` directly.
+
+let __i2pWithDataFileSnapshottedInFlight = false;
+
+const withDataFileSnapshotted = (fileRel, body, onError) => {
+  assertTrue(
+    !__i2pWithDataFileSnapshottedInFlight,
+    'withDataFileSnapshotted is non-reentrant; do not nest'
+  );
+  __i2pWithDataFileSnapshottedInFlight = true;
+
+  const fileAbs = path.join(PROJECT_ROOT, 'data', fileRel);
+  const existedBefore = fs.existsSync(fileAbs);
+  const originalContents = existedBefore ? fs.readFileSync(fileAbs, 'utf8') : null;
+
+  try {
+    return body();
+  } catch (err) {
+    if (typeof onError === 'function') {
+      try { onError(err); } catch (_) { /* swallow onError failures */ }
+    }
+    throw err;
+  } finally {
+    try {
+      if (existedBefore) {
+        fs.writeFileSync(fileAbs, originalContents, 'utf8');
+      } else if (fs.existsSync(fileAbs)) {
+        fs.unlinkSync(fileAbs);
+      }
+    } finally {
+      __i2pWithDataFileSnapshottedInFlight = false;
+    }
+  }
+};
+
 // ─── ADR 0011 — post-generation chat ────────────────────────────────────
 
 const CHAT_FILE = path.join(PROJECT_ROOT, 'data', 'chat_sessions.json');
+
+// Legacy helpers retained for the async / multi-file test bodies where
+// the new sync helper is a poor fit. New destructive-endpoint tests
+// should adopt withDataFileSnapshotted directly (see SPEC §29 scope
+// note above).
 
 const snapshotChatFile = () => {
   if (fs.existsSync(CHAT_FILE)) return fs.readFileSync(CHAT_FILE, 'utf8');
@@ -14137,5 +14191,130 @@ test('SPEC §28 IR-6: regression — CR-2 attachment serve still works', async (
       `session carries ir_iteration_count (got ${json.data.ir_iteration_count})`);
   } finally {
     server.close();
+  }
+});
+
+// ─── SPEC §29 — destructive-endpoint test fixtures ─────────────────────
+
+test('SPEC §29: withDataFileSnapshotted is exported and references SPEC §29', () => {
+  assertEqual(
+    typeof withDataFileSnapshotted,
+    'function',
+    'withDataFileSnapshotted is a function'
+  );
+  const text = fs.readFileSync(path.join(PROJECT_ROOT, 'tests/run-all.js'), 'utf8');
+  assertTrue(text.includes('SPEC §29'), 'tests/run-all.js references SPEC §29');
+});
+
+test('SPEC §29: helper restores the file on a normal exit (no throw)', () => {
+  const fileRel = '__spec29_normal_exit.json';
+  const fileAbs = path.join(PROJECT_ROOT, 'data', fileRel);
+  // Seed the user's "current state" so we can verify restoration.
+  fs.writeFileSync(fileAbs, 'BEFORE\n', 'utf8');
+  try {
+    withDataFileSnapshotted(fileRel, () => {
+      // Body replaces the file with different content.
+      fs.writeFileSync(fileAbs, 'AFTER\n', 'utf8');
+      assertEqual(fs.readFileSync(fileAbs, 'utf8'), 'AFTER\n', 'body sees AFTER');
+    });
+    // After exit, the file is back to BEFORE (the user's state).
+    assertEqual(fs.readFileSync(fileAbs, 'utf8'), 'BEFORE\n', 'file restored to BEFORE');
+  } finally {
+    if (fs.existsSync(fileAbs)) fs.unlinkSync(fileAbs);
+  }
+});
+
+test('SPEC §29: helper restores the file even when body throws', () => {
+  const fileRel = '__spec29_throw_exit.json';
+  const fileAbs = path.join(PROJECT_ROOT, 'data', fileRel);
+  fs.writeFileSync(fileAbs, 'BEFORE\n', 'utf8');
+  let observedError = null;
+  try {
+    try {
+      withDataFileSnapshotted(fileRel, () => {
+        fs.writeFileSync(fileAbs, 'AFTER\n', 'utf8');
+        throw new Error('boom');
+      }, (err) => { observedError = err; });
+    } catch (e) {
+      // expected re-throw
+    }
+    assertTrue(observedError !== null, 'onError hook received the throw');
+    assertEqual(
+      observedError && observedError.message,
+      'boom',
+      'onError saw the original message'
+    );
+    assertEqual(
+      fs.readFileSync(fileAbs, 'utf8'),
+      'BEFORE\n',
+      'file restored to BEFORE despite body throwing'
+    );
+  } finally {
+    if (fs.existsSync(fileAbs)) fs.unlinkSync(fileAbs);
+  }
+});
+
+test('SPEC §29: helper removes the file if it was absent before body ran', () => {
+  const fileRel = '__spec29_absent_before.json';
+  const fileAbs = path.join(PROJECT_ROOT, 'data', fileRel);
+  if (fs.existsSync(fileAbs)) fs.unlinkSync(fileAbs);
+  assertTrue(!fs.existsSync(fileAbs), 'file does not exist before test');
+  withDataFileSnapshotted(fileRel, () => {
+    // Body creates the file.
+    fs.writeFileSync(fileAbs, 'CREATED\n', 'utf8');
+    assertTrue(fs.existsSync(fileAbs), 'file exists mid-body');
+  });
+  assertTrue(
+    !fs.existsSync(fileAbs),
+    'file is removed after body exits because it was absent before'
+  );
+});
+
+test('SPEC §29: helper returns whatever body returns', () => {
+  const fileRel = '__spec29_return_value.json';
+  const fileAbs = path.join(PROJECT_ROOT, 'data', fileRel);
+  fs.writeFileSync(fileAbs, 'BEFORE\n', 'utf8');
+  try {
+    const out = withDataFileSnapshotted(fileRel, () => {
+      fs.writeFileSync(fileAbs, 'AFTER\n', 'utf8');
+      return { tag: 'returned' };
+    });
+    assertEqual(out.tag, 'returned', 'helper returns body() return value');
+  } finally {
+    if (fs.existsSync(fileAbs)) fs.unlinkSync(fileAbs);
+  }
+});
+
+test('SPEC §29: helper is non-reentrant (nesting is rejected)', () => {
+  const fileRel = '__spec29_non_reentrant.json';
+  const fileAbs = path.join(PROJECT_ROOT, 'data', fileRel);
+  fs.writeFileSync(fileAbs, 'BEFORE\n', 'utf8');
+  try {
+    let innerReached = false;
+    let outerThrew = false;
+    try {
+      withDataFileSnapshotted(fileRel, () => {
+        // Try to nest inside the running helper.
+        try {
+          withDataFileSnapshotted(fileRel, () => { innerReached = true; });
+        } catch (e) {
+          assertTrue(
+            /non-reentrant/.test(String(e && e.message)),
+            `nested call rejected with non-reentrant message (got: ${e && e.message})`
+          );
+        }
+      });
+    } catch (e) {
+      outerThrew = true;
+    }
+    assertTrue(!outerThrew, 'outer helper did not throw');
+    assertTrue(!innerReached, 'nested body did not run');
+    assertEqual(
+      fs.readFileSync(fileAbs, 'utf8'),
+      'BEFORE\n',
+      'file restored by outer helper'
+    );
+  } finally {
+    if (fs.existsSync(fileAbs)) fs.unlinkSync(fileAbs);
   }
 });

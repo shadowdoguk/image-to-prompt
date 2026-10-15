@@ -1558,3 +1558,56 @@ message audit). p95 measured in the IR-6 smoke script.
 
 Total server.js delta: ~260 LOC. Total frontend delta: ~100 LOC
 (HTML 25, CSS 5, shell.js 30, app.js 40). Total tests: ≥23.
+
+## §29 architecture — Destructive-endpoint test fixtures (SPEC §29 / HOUSEKEEPING H1)
+
+### A1 — Helper signature and shape
+
+- One new helper in `tests/run-all.js`:
+  `withDataFileSnapshotted(fileRel, body, onError?)`.
+- `fileRel` is resolved against `path.join(PROJECT_ROOT, 'data')`
+  — i.e. the file must live under the gitignored `data/` directory
+  (this preserves the invariant that tracked files are not
+  test-mutated).
+- Synchronous. Tests are synchronous.
+- Returns whatever `body()` returns.
+
+### A2 — Why this is small
+
+- ~30 LOC in `tests/run-all.js`. One new helper. No new
+  dependencies. No `server.js` / `src/*` changes.
+- Test count delta: +3 (helper unit tests) + 1 (static-source
+  anchor).
+- **The legacy `snapshotChatFile` / `restoreChatFile` /
+  `resetChatFile` are kept (not removed).** Many existing
+  chat-snapshot call sites live inside async-test bodies with
+  nested try/finally patterns that need careful rewrite, not a
+  blanket regex conversion. They are explicitly carved out of
+  Slice H1 (see SPEC §29 scope).
+
+### A3 — Why now (architectural case)
+
+- The class of bug (Session #19 disclosure: smoke test wiped
+  user's `data/chat_sessions.json`) is preventable. Every new
+  destructive endpoint that ships before the helper exists is a
+  data-loss lottery ticket.
+- The helper is a foundation for every future destructive endpoint
+  (delete palette, delete notes, etc.). Building it now means
+  those slices arrive with the safety net already in place.
+- The legacy helpers stay because they're correct — the new
+  helper is additive. There is no urgency to migrate the 30+
+  existing chat-snapshot sites; that migration is its own
+  slice (deferred).
+
+### A4 — What this slice does NOT do
+
+- Does NOT migrate the existing 30+ chat-snapshot call sites to
+  the new helper (out of scope; many are inside async bodies
+  with nested try/finally).
+- Does NOT migrate `data/directives.json`, `data/palettes.json`,
+  etc. test patterns (out of scope per SPEC §29.2).
+- Does NOT add a pre-commit or smoke-linter hook (out of scope;
+  tooling, not a slice). A new destructive slice would be the
+  trigger to revisit.
+- Does NOT change behaviour of any existing test (helper is
+  opt-in; legacy helpers untouched).
