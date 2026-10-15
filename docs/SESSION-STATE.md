@@ -1915,3 +1915,30 @@ The override is **per-message + confirmation** rather than a sticky toggle becau
 
 
 | 2026-10-15 | Appended: Slice H1 — destructive-endpoint test fixtures (BACKLOG un-park) | Session #21+ (HOUSEKEEPING H1). New `withDataFileSnapshotted(fileRel, body, onError?)` helper in `tests/run-all.js`. Sync, opt-in, non-reentrant (v1). Snapshots a gitignored `data/` file at entry, runs `body()`, restores (or removes if absent) at exit — even on throw. Closes the Session #19 data-wipe hazard class for future destructive-endpoint tests. Legacy `snapshotChatFile` / `restoreChatFile` / `resetChatFile` trio retained unchanged (an attempted regex migration of the 30+ existing call sites failed — many are inside async test bodies with nested try/finally patterns; migration is its own follow-up slice). 6 SPEC §29 tests (export-anchor + normal-exit + throw-exit + absent-before + return-value + non-reentrant). **Tests: 678 / 0** (was 672; +6 net new). **Files:** `tests/run-all.js` (~50 LOC new helper + tests), `docs/SPEC.md` §29 added, `docs/ARCHITECTURE.md` §29 added (A1–A4), `docs/PRE-MORTEM.md` §29 added (R-1 to R-4; P-1 to P-3; K-1), `docs/CODE-REVIEW-29-destructive-endpoint-fixtures.md` (verdict pass), `docs/POLISH-AUDIT-29-destructive-endpoint-fixtures.md` (12 findings, 0 blocking — **PASS**), `scripts/migrate-snapshot-helper.py` (retained for future regex-migration retry). **No new dependencies.** **No new ADR** — helpers added below the ADR-filing bar (no architectural commitment, no schema change, single-purpose, opt-in). |
+
+| 2026-10-15 | End-of-session handoff — backlog drain paused mid-way | Session #21+ close. **H1 (destructive-endpoint test fixtures) shipped via G5.** **H0 (chore + Krea-2 manual) shipped.** Slices H2/H3/H4/K parked. SESSION-STATE backs the partial completion honestly per methodology: a half-implemented Krea-2 spec would be worse than a parked one. **Working tree clean.** **4 commits ahead of origin/main** (all local; not pushed). **Tests: 678/0** (was 672 baseline; +6 net new SPEC §29 tests). **Next session: start with Slice K — Krea-2 picker.** Manual on disk (`docs/KREA-2-PROMPTING-MANUAL.md`), G1 yes implied by user's "i want it all done," and `withDataFileSnapshotted` (SPEC §29) is ready to fence the destructive-test risk in any future destructive slice. |
+
+---
+
+## How to use this file
+
+**Opening the project:**
+
+1. Read the At-a-glance table.
+2. Read §1 (project summary) and §7 (mood).
+3. Check §2 frontier — empty right now; we're at Phase C.
+4. Check §4 blockers — none.
+5. Check §5 open questions — 3, awaiting user.
+
+**During the session:**
+
+- Update at end of every slice, not end of session.
+- Append any new ADRs to `docs/adr/` **inline** the moment a decision crystallises.
+- Create `docs/CODE-REVIEW-{{N}}-{{SLICE}}.md` per slice before committing.
+
+**At end of session:**
+
+- Refresh the At-a-glance table.
+- Append any new ADRs.
+- Update the Mood line.
+- If a wide refactor is in progress (PRINCIPLES.md §6.3), note where the Expand / Migrate batches / Contract sequence sits.
