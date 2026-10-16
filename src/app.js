@@ -148,6 +148,14 @@
     krea2CreativityReadout: $('krea2-creativity-readout'), // Slice K.3 — "Raw / Low / Medium / High" readout for the slider value
     animaCopyBtn: $('anima-copy-btn'),
     animaRegenerateBtn: $('anima-regenerate-btn'),
+    // Slice K.6 — Krea-2 result-panel actions (K.3 follow-up).
+    // K.3 shipped the panel + handlers but missed the dom lookups
+    // and click listeners for these two buttons. Regenerate re-fires
+    // runKrea2Generate, which reads state.krea2Variant +
+    // state.krea2Creativity at call time so the slider/selector
+    // values are forwarded automatically.
+    krea2CopyBtn: $('krea2-copy-btn'),
+    krea2RegenerateBtn: $('krea2-regenerate-btn'),
 
     errorToast: $('error-toast'),
     errorMessage: $('error-message'),
@@ -2036,6 +2044,13 @@
         showError('No image uploaded. Upload an image first.');
         return;
       }
+      // Slice K.6 — set loading on the Krea-2 regenerate button so the
+      // user sees a spinner on the button they actually clicked. The
+      // primary generatePromptBtn is in a different panel; setting
+      // loading on it gives no visible feedback from inside the Krea-2
+      // result panel. Both buttons are reset in the finally.
+      setButtonLoading(dom.krea2RegenerateBtn, true, 'Regenerating…');
+      setButtonLoading(dom.generatePromptBtn, true, 'Generating…');
       const fd = new FormData();
       fd.append('image', file);
       fd.append('creativity', String(state.krea2Creativity));
@@ -2057,6 +2072,7 @@
       showError(`Krea 2 generation failed: ${e.message}`);
     } finally {
       state.isGenerating = false;
+      setButtonLoading(dom.krea2RegenerateBtn, false, 'Regenerate');
       setButtonLoading(dom.generatePromptBtn, false, 'Generate prompt');
       updateButtons();
     }
@@ -2646,6 +2662,37 @@
   // Slice 2.3 — Anima regenerate button re-uses the same dispatch path.
   if (dom.animaRegenerateBtn) {
     dom.animaRegenerateBtn.addEventListener('click', runAnimaGenerate);
+  }
+
+  // Slice K.6 — Krea-2 result-panel regenerate + copy (K.3 follow-up).
+  // K.3 shipped the panel HTML but never wired these two buttons; the
+  // reported bug was "clicking Regenerate does nothing". runKrea2Generate
+  // reads state.krea2Variant + state.krea2Creativity at call time, so
+  // the slider + variant-selector values are forwarded on every click
+  // without extra plumbing.
+  if (dom.krea2RegenerateBtn) {
+    dom.krea2RegenerateBtn.addEventListener('click', runKrea2Generate);
+  }
+  if (dom.krea2CopyBtn) {
+    dom.krea2CopyBtn.addEventListener('click', async () => {
+      // Krea-2 is single-positive prose only (manual §10 R8 + §11,
+      // ADR 0030 decision #7). No `negative` field; we copy the
+      // single textarea verbatim.
+      const text = dom.krea2ResultPrompt ? dom.krea2ResultPrompt.value : '';
+      try {
+        await navigator.clipboard.writeText(text);
+        const origTextSpan = dom.krea2CopyBtn.querySelector('.btn-text');
+        const orig = origTextSpan ? origTextSpan.textContent : dom.krea2CopyBtn.textContent;
+        if (origTextSpan) origTextSpan.textContent = 'Copied!';
+        else dom.krea2CopyBtn.textContent = 'Copied!';
+        setTimeout(() => {
+          if (origTextSpan) origTextSpan.textContent = orig;
+          else dom.krea2CopyBtn.textContent = orig;
+        }, 1500);
+      } catch (e) {
+        showError(`Copy failed: ${e.message}`);
+      }
+    });
   }
 
   // Slice 2.3 — Anima copy button copies both positive + negative as

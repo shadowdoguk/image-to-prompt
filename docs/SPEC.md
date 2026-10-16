@@ -2142,6 +2142,80 @@ None at G1. Resolved at SPEC time:
   Apply branch mirrors Anima pattern. ≥6 tests pass.
 - **K.5:** Aggregate `docs/CODE-REVIEW-K.md` verdict `pass`.
 
+### 30.6.1 Sub-slice K.6 — Krea-2 result-panel button wiring (K.3 follow-up)
+
+**Status:** Added 2026-10-16 as a K.3 ship-without-wiring fix
+(see BACKLOG H5 + SESSION-STATE Session #22+).
+
+**Reframe.** K.3 shipped the Krea-2 result-panel HTML
+(`#krea2-copy-btn` + `#krea2-regenerate-btn` at the bottom of
+`#step-krea2-result`) and shipped `runKrea2Generate`. But the
+`dom` lookups (`dom.krea2CopyBtn`, `dom.krea2RegenerateBtn`)
+and the click listeners were **not** wired. Result: clicking
+the Regenerate button did nothing — no spinner, no fetch, no
+error. The user reported this on 2026-10-16.
+
+**Scope.**
+
+- In scope: wire the two Krea-2 result-panel buttons
+  (Regenerate + Copy to clipboard). Add `btn-text` +
+  `btn-spinner` markup so the user sees a working spinner
+  during regeneration. The Regenerate handler is the
+  existing `runKrea2Generate` (reads `state.krea2Variant` +
+  `state.krea2Creativity` at call time — slider + selector
+  values are forwarded automatically with no extra plumbing).
+- Out of scope: Z-Image + Anima regenerate button spinners
+  (same cosmetic gap, but the user did not report them — parked
+  for a future polish pass). `setButtonLoading` refactor to
+  accept a button list. No backend change. No new endpoint.
+  No new contract. No SPEC contract change.
+
+**Behaviour contract.**
+
+- Click Regenerate → `runKrea2Generate` fires → POST /api/krea2
+  with the current `state.krea2Variant` + `state.krea2Creativity`
+  + the existing image. Spinner on the Krea-2 regenerate
+  button. Spinner on the primary generatePromptBtn (defensive
+  — it stays consistent with the prior K.2/K.3 behaviour).
+- Click Copy to clipboard → `navigator.clipboard.writeText`
+  with the verbatim `dom.krea2ResultPrompt.value` (single-
+  positive prose, no `negative` field — manual §10 R8 + §11).
+  Button label swaps to "Copied!" for 1500ms then back. Mirrors
+  the Slice 2.3 Anima copy pattern.
+
+**DoD.**
+
+- 6 new tests pass (SPEC §30 K.6: dom lookups + click listener
+  + copy handler + runKrea2Generate sets loading on the
+  krea2 regenerate button + HTML has btn-text/btn-spinner
+  + K.6 marker). Total: 712 → 718 / 0 green.
+- Code review per K.1 cadence (`docs/CODE-REVIEW-30-k6-krea2-
+  wiring.md`, two-axis Standards + Spec). Polish audit
+  (`docs/POLISH-AUDIT-30-k6.md`).
+- SESSION-STATE Session #22+ row appended.
+- Commit `fix(slice-k.6): wire Krea-2 regenerate + copy buttons;
+  add spinners`.
+
+**Constraints preserved.**
+
+- The K.5 no-negative-envelope invariant (manual §10 R8 + §11)
+  is preserved — `runKrea2Generate` already produced no
+  `negative` field, and the copy handler copies the single
+  positive prose verbatim, not a `Positive:\n${pos}\n\nNegative:
+  \n${neg}` block.
+- The 712-test baseline is preserved (K.6 is additive; no test
+  was modified or removed).
+- The K.4 chat-Apply branch is unaffected (K.6 only touches
+  the result-panel buttons, not the chat path).
+- The pre-Generate picker dispatch is unaffected (K.6 only
+  touches the result-panel buttons, not the picker).
+
+**Open questions.** None. K.6 is a small, isolated, additive
+fix. If a future slice adds a fourth model with a result-panel
+button, mirror this K.6 pattern (`dom.<model>CopyBtn`,
+`dom.<model>RegenerateBtn`, two click listeners, runXxxGenerate
++ a copy helper).
+
 ### 30.9 References
 
 - `docs/KREA-2-PROMPTING-MANUAL.md` — the Krea 2 contract source
@@ -2179,3 +2253,14 @@ None at G1. Resolved at SPEC time:
   options; Krea-2 contract is prose-only 5-layer formula with
   a creativity slider (0-100) and capacity-tier variant
   (Turbo / Medium / Large); per-model chat sessions preserved.
+- §30.6.1 added 2026-10-16 — K.6 sub-slice (K.3 follow-up).
+  Closes a K.3 ship-without-wiring defect: the Krea-2 result
+  panel's Regenerate + Copy buttons were rendered but had no
+  `dom` lookups and no click listeners. The Regenerate button
+  fired nothing. K.6 adds the wiring (Regenerate →
+  `runKrea2Generate`, which already reads
+  `state.krea2Variant` + `state.krea2Creativity` at call time;
+  Copy → `navigator.clipboard.writeText` of the single
+  positive-prose textarea), adds a working `.btn-spinner` to
+  the Regenerate button, and locks both behaviours with 6 new
+  tests. 712 → 718 / 0 green.

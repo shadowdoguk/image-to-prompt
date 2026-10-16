@@ -1747,3 +1747,66 @@ migration, no symbol rename). The largest risk is the chat-Apply
 branch — covered by ADR 0021's 2026-08-04 lesson (apply-path drift
 must mirror state.shape with display.shape for every mutation).
 That lesson is enforced in the K.4 DoD.
+
+### A10 — K.6 wiring: Krea-2 result-panel buttons (K.3 follow-up)
+
+Added 2026-10-16 as a K.3 ship-without-wiring fix. K.3 rendered
+the Krea-2 result panel's `Copy to clipboard` + `Regenerate`
+buttons in `src/index.html` but did not declare `dom` lookups for
+them in `src/app.js` and did not register click listeners. The
+Regenerate button was a dead element. K.6 closes the gap.
+
+| Element | File | Lines | Pattern mirrored |
+|---------|------|-------|------------------|
+| `dom.krea2CopyBtn` lookup | `src/app.js` | `dom` block (sibling of `animaCopyBtn`) | Slice 2.3 |
+| `dom.krea2RegenerateBtn` lookup | `src/app.js` | `dom` block (sibling of `animaRegenerateBtn`) | Slice 2.3 |
+| `krea2CopyBtn` click listener | `src/app.js` | alongside `animaCopyBtn` wiring | Slice 2.3 Anima copy |
+| `krea2RegenerateBtn` click listener | `src/app.js` | alongside `animaRegenerateBtn` wiring | Slice 2.3 Anima regen |
+| `runKrea2Generate` loading flip on `krea2RegenerateBtn` | `src/app.js` | inside the `try` (true) and `finally` (false) of the function body | New — K.6 added |
+| `btn-text` + `btn-spinner` markup | `src/index.html` | inside the two button tags in the Krea-2 result panel | Slice 2.3 HTML |
+| K.6 tests (6 new) | `tests/run-all.js` | new test block at end of file | Slice 2.3 / K.5 |
+
+**Why the regenerate click is "free" of slider/selector plumbing.**
+`runKrea2Generate` reads `state.krea2Variant` and
+`state.krea2Creativity` from the global state at call time
+(`src/app.js:2041-2042`), not from closure-captured values.
+The K.6 wiring therefore forwards the live slider + selector
+values on every click without any extra plumbing. This is the
+same pattern the pre-Generate picker uses for the model's own
+forwarding in `runGeneratePrompt` (`src/app.js:1782-1814`).
+
+**Why the copy is single-positive only.** The Krea-2 contract
+is prose-only with no `negative` field (manual §10 R8 + §11,
+ADR 0030 decision #7, P-7 invariant). The K.6 copy handler
+reads `dom.krea2ResultPrompt.value` (the single prose textarea
+in the Krea-2 panel) verbatim. It does not assemble a
+`Positive:\n${pos}\n\nNegative:\n${neg}` block — there is no
+`negative` field on the Krea-2 response envelope. This is the
+canonical divergence from the Slice 2.3 Anima copy handler.
+
+**Why the loading state lives on the Krea-2 button too.** The
+primary `dom.generatePromptBtn` is in the Create view's Stage
+03 panel. The Krea-2 result panel is a sibling in Stage 04
+(`.result-actions`). Setting `setButtonLoading` only on the
+primary gives no visible feedback to a user who clicked the
+Krea-2 panel's Regenerate button. K.6 adds the secondary
+`setButtonLoading(dom.krea2RegenerateBtn, ...)` so the spinner
+appears on the button the user actually clicked. The primary
+button is also kept in sync (defensive consistency with K.2 /
+K.3's prior behaviour).
+
+**Out of scope (intentional).**
+
+- Z-Image + Anima regenerate buttons lack `.btn-spinner` markup
+  (same cosmetic gap as K.6 closes for Krea-2). The buttons
+  fire the right handlers; they just don't show a spinner.
+  The user reported only the Krea-2 symptom. Parked for a
+  future polish pass.
+- `setButtonLoading` is not refactored to accept a list of
+  buttons. A future slice could lift it to
+  `setButtonsLoading([btn1, btn2], state, text)`. Out of
+  scope for K.6 (would be a wide refactor — AGENTS.md gate
+  says "Adopt a new dependency, change the stack, or rename
+  a shared symbol" requires explicit approval).
+- The `#krea2-refine-in-chat-link` is an `<a href="#/chat">`
+  and works without JS wiring. No change needed.

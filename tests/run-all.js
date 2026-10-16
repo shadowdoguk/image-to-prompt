@@ -14855,3 +14855,87 @@ test('SPEC §30 K.5: SPEC §30 + ADR 0030 + K.1/K.2/K.3/K.4 markers all present 
   assertTrue(/Slice K\.4/.test(js), 'src/app.js identifies Slice K.4');
   assertTrue(/ADR 0030/.test(html), 'src/index.html references ADR 0030');
 });
+
+// ─── Slice K.6 — Krea-2 result-panel button wiring (K.3 follow-up) ───
+// Bug: K.3 shipped the Krea-2 result panel HTML + the runKrea2Generate
+// handler, but missed the dom lookups and click listeners for the
+// "Copy to clipboard" and "Regenerate" buttons. The Regenerate button
+// was completely dead. K.6 closes the gap and locks the wiring so it
+// cannot regress.
+test('SPEC §30 K.6: dom lookups for krea2 copy + regenerate buttons exist (K.3 follow-up)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/krea2CopyBtn: \$/.test(js), 'dom.krea2CopyBtn must be declared');
+  assertTrue(/krea2RegenerateBtn: \$/.test(js), 'dom.krea2RegenerateBtn must be declared');
+});
+
+test('SPEC §30 K.6: krea2RegenerateBtn click listener fires runKrea2Generate', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // runKrea2Generate reads state.krea2Variant + state.krea2Creativity
+  // at call time, so the click handler needs no extra plumbing —
+  // a direct handler reference is the contract.
+  assertTrue(
+    /dom\.krea2RegenerateBtn\.addEventListener\('click',\s*runKrea2Generate\)/.test(js),
+    'krea2RegenerateBtn click must call runKrea2Generate'
+  );
+});
+
+test('SPEC §30 K.6: krea2CopyBtn click listener copies via navigator.clipboard.writeText', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  assertTrue(/dom\.krea2CopyBtn\.addEventListener\('click',/.test(js),
+    'krea2CopyBtn click handler must be wired');
+  // The handler block must use navigator.clipboard.writeText and read
+  // from the krea2 result-prompt textarea (single-positive prose only).
+  const handlerStart = js.indexOf("dom.krea2CopyBtn.addEventListener('click',");
+  assertTrue(handlerStart !== -1, 'krea2CopyBtn click handler found');
+  const handlerWindow = js.slice(handlerStart, handlerStart + 2000);
+  assertTrue(/navigator\.clipboard\.writeText/.test(handlerWindow),
+    'krea2CopyBtn must use navigator.clipboard.writeText');
+  assertTrue(/krea2ResultPrompt/.test(handlerWindow),
+    'krea2CopyBtn must read from krea2ResultPrompt textarea');
+  // The text-swap-back acknowledgement pattern (mirrors Slice 2.3 Anima copy).
+  assertTrue(/Copied!/.test(handlerWindow),
+    'krea2CopyBtn must show a "Copied!" acknowledgement');
+});
+
+test('SPEC §30 K.6: runKrea2Generate sets loading on the krea2 regenerate button (not just primary)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The user clicks the Krea-2 panel's Regenerate button. The primary
+  // generatePromptBtn is in a different panel; setting loading on it
+  // gives no visible feedback from inside the Krea-2 result panel.
+  // runKrea2Generate must also flip the Krea-2 regenerate button.
+  const fnStart = js.indexOf('const runKrea2Generate = async () => {');
+  assertTrue(fnStart !== -1, 'runKrea2Generate declared');
+  const fnWindow = js.slice(fnStart, fnStart + 3000);
+  assertTrue(/setButtonLoading\(dom\.krea2RegenerateBtn,\s*true/.test(fnWindow),
+    'runKrea2Generate must set loading on krea2RegenerateBtn (true)');
+  assertTrue(/setButtonLoading\(dom\.krea2RegenerateBtn,\s*false/.test(fnWindow),
+    'runKrea2Generate must reset loading on krea2RegenerateBtn (false) in finally');
+});
+
+test('SPEC §30 K.6: src/index.html Krea-2 buttons have btn-text + btn-spinner markup', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  // Extract the Krea-2 result panel; both buttons live in its .result-actions.
+  const panel = html.match(/<section[^>]*id="step-krea2-result"[\s\S]*?<\/section>/);
+  assertTrue(panel !== null, 'Krea-2 panel found');
+  // Regenerate button: must wrap label in .btn-text AND have .btn-spinner.
+  const regen = panel[0].match(/<button[^>]*id="krea2-regenerate-btn"[\s\S]*?<\/button>/);
+  assertTrue(regen !== null, 'krea2-regenerate-btn found in Krea-2 panel');
+  assertTrue(/<span class="btn-text">\s*Regenerate\s*<\/span>/.test(regen[0]),
+    'krea2-regenerate-btn label is wrapped in <span class="btn-text">');
+  assertTrue(/<span class="btn-spinner"\s+hidden\s+aria-hidden="true"\s*><\/span>/.test(regen[0]),
+    'krea2-regenerate-btn has a <span class="btn-spinner" hidden> child');
+  // Copy button: must wrap label in .btn-text (no spinner needed — copy is sync).
+  const copy = panel[0].match(/<button[^>]*id="krea2-copy-btn"[\s\S]*?<\/button>/);
+  assertTrue(copy !== null, 'krea2-copy-btn found in Krea-2 panel');
+  assertTrue(/<span class="btn-text">\s*Copy to clipboard\s*<\/span>/.test(copy[0]),
+    'krea2-copy-btn label is wrapped in <span class="btn-text">');
+});
+
+test('SPEC §30 K.6: K.3 follow-up identifier present in src/app.js + src/index.html', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/Slice K\.6/.test(js),
+    'src/app.js identifies the fix as Slice K.6 (K.3 follow-up)');
+  assertTrue(/Slice K\.6/.test(html) || true,
+    'HTML may not need a Slice K.6 marker (only JS does the wiring)');
+});

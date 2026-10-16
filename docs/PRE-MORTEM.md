@@ -906,3 +906,107 @@ Companion to SPEC §25 and ARCH §30.
   field at any point during K.1 → K.4 implementation, the slice
   does not merge; the contract is single-positive-prose per
   manual §10 + §11.
+
+## §30.6.1 pre-mortem — K.6 wiring (K.3 follow-up)
+
+Added 2026-10-16 as a K.3 ship-without-wiring fix. The
+Krea-2 result panel's Regenerate + Copy buttons were rendered
+in `src/index.html` but had no `dom` lookups and no click
+listeners — the Regenerate button was a dead element. The user
+reported the bug on 2026-10-16.
+
+### Risks
+
+- **R-9 (LOW):** Wiring the click listener as a direct
+  reference (`runKrea2Generate`) rather than an inline closure
+  could miss the `state.krea2Variant` /
+  `state.krea2Creativity` updates the user just made on the
+  slider + selector if any state mutation were happening
+  in-flight. *Mitigation:* `runKrea2Generate` reads both
+  fields from the global `state` object at call time
+  (`src/app.js:2041-2042`), not from closure-captured values.
+  The same pattern is used by the pre-Generate picker dispatch
+  in `runGeneratePrompt` (`src/app.js:1782-1814`). K.6 test
+  `runKrea2Generate sets loading on the krea2 regenerate
+  button` locks the function's read-from-state contract. No
+  regression risk.
+
+- **R-10 (LOW):** Adding `setButtonLoading` on the secondary
+  `krea2RegenerateBtn` could create a state inconsistency if
+  the user starts a regeneration from the primary button
+  (the pre-Generate picker) while a regeneration from the
+  panel button is in flight (or vice versa). *Mitigation:*
+  `state.isGenerating` is a single boolean; both call sites
+  set it true at entry and false in `finally`. The primary
+  button's `disabled` state is gated on `state.isGenerating`
+  via `updateButtons()` (`src/app.js:357-361`). K.6 does not
+  change this. No regression risk.
+
+- **R-11 (LOW):** The HTML markup change adds
+  `<span class="btn-text">` wrapping the button label. The
+  existing Z-Image + Anima copy buttons do NOT have this
+  wrapping — only the Anima regenerate button does (Slice
+  2.3). If a future polish audit searches for "all copy
+  buttons use btn-text wrapping", the Krea-2 + Z-Image copy
+  buttons will be the only two without the wrapper. *Mitigation:*
+  out of scope for K.6 (the Krea-2 copy button gets the
+  wrapper because K.6's copy handler reads the inner `.btn-text`
+  span to do the text-swap-back; the Z-Image copy button has
+  a different pattern). Documented here so the next
+  consistency pass knows to handle the Z-Image copy button
+  separately. No immediate risk.
+
+### Pre-commitments
+
+- **P-8:** K.6's regenerate handler MUST be the direct
+  reference `runKrea2Generate` (not an inline closure that
+  re-reads `state.krea2Variant` / `state.krea2Creativity`),
+  so the function is the single source of truth for the
+  forward-to-API contract. Test coverage: K.6 test
+  `krea2RegenerateBtn click listener fires
+  runKrea2Generate`.
+
+- **P-9:** K.6's copy handler MUST read from
+  `dom.krea2ResultPrompt.value` only (the single prose
+  textarea), not assemble a `Positive:\n${pos}\n\nNegative:
+  \n${neg}` block. The Krea-2 contract is prose-only (P-7
+  invariant). Test coverage: K.6 test
+  `krea2CopyBtn click listener copies via
+  navigator.clipboard.writeText` (asserts the handler window
+  references `krea2ResultPrompt`).
+
+- **P-10:** K.6's loading-state changes MUST NOT regress
+  the existing primary-button loading behaviour. The primary
+  `dom.generatePromptBtn` is still set to loading at entry
+  and reset in `finally`, exactly as K.2 / K.3 left it. K.6
+  adds a parallel pair on `dom.krea2RegenerateBtn`. The
+  existing K.5 aggregate test still asserts the baseline
+  invariant.
+
+### Kill criteria
+
+- **K-6:** If any of the 712 baseline tests flips red during
+  K.6 (K.6 is additive — it adds 6 new tests but must not
+  break any existing one), the slice does not merge. K.6
+  verified at 718 / 0 green on 2026-10-16; criterion met.
+
+- **K-7:** If clicking the Krea-2 Regenerate button does NOT
+  fire a POST /api/krea2 with the current
+  `state.krea2Variant` + `state.krea2Creativity` on a
+  captured browser session (i.e. a manual smoke test fails),
+  the slice does not merge. The user's 2026-10-16 report was
+  the failure that triggered this slice; the fix is verified
+  by the unit tests that lock the wiring + the read-from-
+  state contract. Manual browser smoke (the G4 demo gate) is
+  recommended before merging to a public branch.
+
+### Out of scope (intentional)
+
+- Z-Image + Anima regenerate button `.btn-spinner` markup
+  (same cosmetic gap, but the user reported only the
+  Krea-2 symptom). Parked for a future polish pass.
+- `setButtonLoading` refactor to accept a button list. Wide
+  refactor, would cross the AGENTS.md "rename a shared
+  symbol" gate. Parked.
+- `#krea2-refine-in-chat-link` is an `<a href="#/chat">` and
+  needs no JS wiring. No change.
