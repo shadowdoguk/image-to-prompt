@@ -2364,6 +2364,80 @@ new model is one `runXxxGenerate` + one
 buttons + one set of result-panel listeners + the
 K.6/K.7 panel-show post-success block.
 
+### 30.6.3 Sub-slice K.8 — H5 close — Z-Image + Anima regenerate button spinners
+
+**Status:** Added 2026-10-16 as a parallel-to-K.6
+cosmetic-gap fix (see BACKLOG H5 + SESSION-STATE Session
+#22+).
+
+**Reframe.** K.6 added `<span class="btn-spinner" hidden
+aria-hidden="true">` markup to the Krea-2 Regenerate
+button so the user sees a working spinner during
+regeneration. The same gap existed on the Z-Image
+(`#regenerate-btn` at src/index.html:255) and Anima
+(`#anima-regenerate-btn` at src/index.html:314)
+Regenerate buttons — they fired the right handlers and
+`setButtonLoading` updated the text, but no spinner
+element existed so no spinner was visible. K.8 closes
+the gap.
+
+**Scope.**
+
+- In scope: 2 × ~6-line HTML markup additions to
+  `#regenerate-btn` (Z-Image) and `#anima-regenerate-btn`
+  (Anima). Wrap the "Regenerate" label in
+  `<span class="btn-text">` and add
+  `<span class="btn-spinner" hidden aria-hidden="true"></span>`
+  as a sibling. Pure HTML; no JS change, no CSS change,
+  no contract change.
+- Out of scope: a lifted `setButtonLoading(buttons, ...)`
+  helper (parked); the `setButtonLoading` refactor
+  (parked).
+- No new endpoint. No new dependency. No SPEC contract
+  change.
+
+**Behaviour contract.**
+
+- Click Z-Image Regenerate → existing
+  `runGeneratePrompt` fires → during the in-flight
+  window, the spinner element on the Z-Image
+  Regenerate button is visible (was: text updated
+  but no spinner).
+- Click Anima Regenerate → existing `runAnimaGenerate`
+  fires → during the in-flight window, the spinner
+  element on the Anima Regenerate button is visible
+  (was: text updated but no spinner).
+- No regression in button click behaviour, no change
+  to button label text, no change to button
+  positioning or styling.
+
+**DoD.**
+
+- 3 new markup-presence tests pass. Total: 722 → 725
+  / 0 green.
+- Code review `docs/CODE-REVIEW-30-k8-h5-zimage-anima-spinners.md`
+  (2-axis Standards + Spec). Polish audit
+  `docs/POLISH-AUDIT-30-k8.md`.
+- SESSION-STATE Session #22+ row appended.
+- BACKLOG H5 closure — parked entry closed as
+  SHIPPED 2026-10-16.
+- Commit
+  `fix(slice-k.8): add regenerate spinners to Z-Image
+  + Anima (H5 close)`.
+
+**Constraints preserved.**
+
+- The K.6 Krea-2 markup pattern is the literal source
+  pattern K.8 mirrors. No divergence.
+- The 722-test baseline is preserved (K.8 is additive;
+  no test was modified or removed).
+- The Z-Image + Anima regenerate handlers are not
+  modified. K.8 only touches the markup.
+
+**Open questions.** None. K.8 is a tiny HTML-only
+fix. After K.8 lands, all three Regenerate buttons
+(Z-Image, Anima, Krea-2) have the same markup shape.
+
 ### 30.9 References
 
 - `docs/KREA-2-PROMPTING-MANUAL.md` — the Krea 2 contract source
@@ -2413,6 +2487,37 @@ K.6/K.7 panel-show post-success block.
   the Regenerate button, and locks both behaviours with 6 new
   tests. 712 → 718 / 0 green.
 - §30.6.2 added 2026-10-16 — K.7 sub-slice (K.4 follow-up).
+  Closes a K.4 ship-without-wiring defect:
+  `activateKrea2ChatForResult` (src/app.js:2627) was a
+  half-complete helper. It POSTed `/api/chat/sessions` and
+  set `state.chatSessionId` but skipped the post-success
+  block that the Anima parallel helper does — prepending
+  the session to `state.chatSessions`, calling
+  `renderChatMessages(session)`, un-hiding `#step-chat`,
+  populating the session status, enabling the delete
+  button, and focusing the input. Consequence: clicking
+  the "Refine in chat →" link on the Krea-2 result panel
+  sent the user to `#/chat`, where they saw only the view
+  title + view-sub on a black background — the chat
+  panel was hidden, no message area, no input, no
+  session rail. K.7 mirrors the Anima helper's
+  post-success block into the Krea-2 helper, ~5 lines,
+  and locks the four critical post-success steps with
+  4 new tests. 718 → 722 / 0 green (target). Companion
+  to K.6; together they mean the Krea-2 path is end-to-
+  end functional: generate → regenerate (K.6) → refine in
+  chat (K.7).
+- §30.6.3 added 2026-10-16 — K.8 sub-slice (H5 close).
+  Closes the parallel cosmetic gap K.6 left open: K.6
+  added `btn-text` + `btn-spinner` markup to the Krea-2
+  Regenerate button so the user sees a working spinner
+  during regeneration. The same gap existed on the
+  Z-Image and Anima Regenerate buttons — they fired
+  the right handlers and `setButtonLoading` updated the
+  text, but no spinner element existed so no spinner
+  was visible. K.8 is a tiny HTML-only fix: add
+  `btn-text` + `btn-spinner` to both buttons. 3 new
+  markup-presence tests. 722 → 725 / 0 green.
   Closes a K.4 ship-without-wiring defect:
   `activateKrea2ChatForResult` (src/app.js:2627) was a
   half-complete helper. It POSTed `/api/chat/sessions` and

@@ -15012,3 +15012,46 @@ test('SPEC §30 K.7: activateKrea2ChatForResult focuses the chat input (K.4 foll
   assertTrue(/if\s*\(\s*dom\.chatInput\s*\)/.test(fnBody),
     'dom.chatInput.focus() must be guarded by an existence check');
 });
+
+// ─── SPEC §30 — K.8 (H5 close): Z-Image + Anima regenerate spinners ──
+// K.6 closed the same cosmetic gap for the Krea-2 Regenerate button.
+// H5 picks up the parallel Z-Image + Anima work. Both buttons fire
+// the right handlers, but lacked the .btn-spinner markup so
+// setButtonLoading only updated the text (no visible spinner).
+// K.8 is a tiny HTML-only fix; tests assert the markup is present.
+
+test('SPEC §30 K.8: src/index.html Z-Image regenerate button has btn-text + btn-spinner markup', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  // Extract the Z-Image result panel; the regenerate button lives in
+  // its .result-actions.
+  const panel = html.match(/<section[^>]*id="step-result"[\s\S]*?<\/section>/);
+  assertTrue(panel !== null, 'Z-Image panel found');
+  const regen = panel[0].match(/<button[^>]*id="regenerate-btn"[\s\S]*?<\/button>/);
+  assertTrue(regen !== null, 'regenerate-btn found in Z-Image panel');
+  assertTrue(/<span class="btn-text">\s*Regenerate\s*<\/span>/.test(regen[0]),
+    'regenerate-btn label is wrapped in <span class="btn-text">');
+  assertTrue(/<span class="btn-spinner"\s+hidden\s+aria-hidden="true"\s*><\/span>/.test(regen[0]),
+    'regenerate-btn has a <span class="btn-spinner" hidden> child');
+});
+
+test('SPEC §30 K.8: src/index.html Anima regenerate button has btn-text + btn-spinner markup', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  // Extract the Anima result panel; the regenerate button lives in
+  // its .result-actions.
+  const panel = html.match(/<section[^>]*id="step-anima-result"[\s\S]*?<\/section>/);
+  assertTrue(panel !== null, 'Anima panel found');
+  const regen = panel[0].match(/<button[^>]*id="anima-regenerate-btn"[\s\S]*?<\/button>/);
+  assertTrue(regen !== null, 'anima-regenerate-btn found in Anima panel');
+  assertTrue(/<span class="btn-text">\s*Regenerate\s*<\/span>/.test(regen[0]),
+    'anima-regenerate-btn label is wrapped in <span class="btn-text">');
+  assertTrue(/<span class="btn-spinner"\s+hidden\s+aria-hidden="true"\s*><\/span>/.test(regen[0]),
+    'anima-regenerate-btn has a <span class="btn-spinner" hidden> child');
+});
+
+test('SPEC §30 K.8: H5 close — slice identifier present in src/index.html', () => {
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  // Both buttons should carry the K.8 marker comment so the next
+  // pass can grep for it.
+  assertTrue(/Slice K\.8/.test(html) || /H5 close/.test(html),
+    'src/index.html identifies the fix as Slice K.8 (H5 close)');
+});

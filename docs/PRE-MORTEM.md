@@ -1120,3 +1120,65 @@ message area, no input. Black background underneath.
 - `setButtonLoading` refactor (parked).
 - A lifted `activateChatForResult(model, data)` helper
   (would cross the "rename a shared symbol" gate; parked).
+
+## §30.6.3 pre-mortem — K.8 markup (H5 close)
+
+Added 2026-10-16 as a parallel-to-K.6 cosmetic-gap fix.
+K.6 added `btn-text` + `btn-spinner` markup to the
+Krea-2 Regenerate button. The same gap existed on the
+Z-Image and Anima Regenerate buttons. K.8 is a tiny
+HTML-only fix that brings the two buttons to parity.
+
+### Risks
+
+- **R-15 (LOW):** Wrapping the existing button label
+  ("Regenerate") in a `<span class="btn-text">` could
+  shift the button's visual position if the surrounding
+  CSS depends on direct text content (no whitespace
+  control). *Mitigation:* the Krea-2 K.6 markup uses the
+  same wrapper and the visual did not shift (the
+  Krea-2 panel was verified in K.6's polish audit).
+  The Z-Image + Anima result-action blocks use the
+  same `.btn-secondary` class so the CSS rule is
+  shared. No visual regression expected.
+
+- **R-16 (LOW):** A future CSS change that targets
+  `.btn-secondary > *` (direct children) could now
+  match the new `<span>` children instead of the bare
+  text. *Mitigation:* no such rule exists in
+  `src/styles.css` as of 2026-10-16. If a future slice
+  adds one, the test for the inner `.btn-text` /
+  `.btn-spinner` would catch any regression that
+  breaks the spinner toggle. No immediate risk.
+
+### Pre-commitments
+
+- **P-14:** K.8's markup MUST be a literal mirror of
+  the K.6 Krea-2 markup. The `btn-text` span wraps
+  the button label verbatim, and the `btn-spinner`
+  span is a sibling with the same `hidden
+  aria-hidden="true"` attributes. No stylistic
+  divergence.
+
+### Kill criteria
+
+- **K-10:** If any of the 722 baseline tests flips
+  red during K.8 (K.8 is additive — it adds 3 new
+  tests but must not break any existing one), the
+  slice does not merge. K.8 verified at 725 / 0
+  green on 2026-10-16; criterion met.
+
+- **K-11:** If clicking the Z-Image or Anima
+  Regenerate button does NOT show a visible spinner
+  during the in-flight window on a captured browser
+  session (i.e. manual smoke fails), the slice does
+  not merge. The unit tests lock the markup
+  presence; the smoke confirms the markup is wired
+  to the right CSS animation. Manual browser smoke
+  is recommended before merging to a public branch.
+
+### Out of scope (intentional)
+
+- `setButtonLoading` refactor to accept a button
+  list. Wide refactor, would cross the AGENTS.md
+  "rename a shared symbol" gate. Parked.

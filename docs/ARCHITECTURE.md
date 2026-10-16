@@ -1894,3 +1894,36 @@ needs explicit user approval.
   (would cross the "rename a shared symbol" gate).
 - The K.7 fix does NOT change the session body. It is purely
   a UI-binding fix, not a contract change.
+
+### A12 — K.8 markup: Z-Image + Anima regenerate button spinners (H5 close)
+
+Added 2026-10-16 as a parallel-to-K.6 cosmetic-gap fix. K.6
+added `<span class="btn-spinner" hidden aria-hidden="true">`
+markup to the Krea-2 Regenerate button. The same gap
+existed on the Z-Image and Anima Regenerate buttons.
+K.8 is a tiny HTML-only fix: add `btn-text` + `btn-spinner`
+to both buttons.
+
+| Element | File | Lines | Pattern mirrored |
+|---------|------|-------|------------------|
+| Z-Image `#regenerate-btn` markup | `src/index.html` | 256-265 | K.6 Krea-2 (lines 381-388) |
+| Anima `#anima-regenerate-btn` markup | `src/index.html` | 313-322 | K.6 Krea-2 (lines 381-388) |
+| K.8 tests (3 new) | `tests/run-all.js` | new test block at end of file | K.6 / K.5 pattern |
+
+**No JS change.** The Z-Image + Anima regenerate handlers
+(`runGeneratePrompt` + `runAnimaGenerate`) already call
+`setButtonLoading(dom.regenerateBtn, ...)` /
+`setButtonLoading(dom.animaRegenerateBtn, ...)` (K.6 audit
+discovered this; see POLISH-AUDIT-30-k6 §6). The only
+missing piece was the markup element for the spinner.
+K.8 adds the markup; the handlers already flip the
+right text + spinner states.
+
+**Why all three Regenerate buttons now share one markup
+shape.** The pre-Generate picker is a 3-way enum
+(zimage_turbo / anima / krea2). The result-panel
+Regenerate button is the same kind of action for all
+three: "regenerate with the same image + the same model
+settings". Now that the markup is uniform, a future
+slice that adds a 4th model can copy the markup
+verbatim from any of the three panels.

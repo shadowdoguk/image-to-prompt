@@ -254,7 +254,13 @@
                 </div>
                 <div class="result-actions">
                   <button type="button" id="copy-btn" class="btn-copy">Copy to clipboard</button>
-                  <button type="button" id="regenerate-btn" class="btn-secondary">Regenerate</button>
+                  <!-- Slice K.8 (H5 close) — Z-Image Regenerate button gets
+                       btn-text + btn-spinner so the user sees a working
+                       spinner during regeneration (parity with Krea-2 K.6). -->
+                  <button type="button" id="regenerate-btn" class="btn-secondary">
+                    <span class="btn-text">Regenerate</span>
+                    <span class="btn-spinner" hidden aria-hidden="true"></span>
+                  </button>
                   <a id="refine-in-chat-link" class="btn-secondary" href="#/chat">Refine in chat →</a>
                 </div>
               </div>
@@ -310,7 +316,13 @@
 
               <div class="result-actions">
                 <button type="button" id="anima-copy-btn" class="btn-copy">Copy both to clipboard</button>
-                <button type="button" id="anima-regenerate-btn" class="btn-secondary">Regenerate</button>
+                <!-- Slice K.8 (H5 close) — Anima Regenerate button gets
+                     btn-text + btn-spinner so the user sees a working
+                     spinner during regeneration (parity with Krea-2 K.6). -->
+                <button type="button" id="anima-regenerate-btn" class="btn-secondary">
+                  <span class="btn-text">Regenerate</span>
+                  <span class="btn-spinner" hidden aria-hidden="true"></span>
+                </button>
                 <a id="anima-refine-in-chat-link" class="btn-secondary" href="#/chat">Refine in chat →</a>
               </div>
             </div>
