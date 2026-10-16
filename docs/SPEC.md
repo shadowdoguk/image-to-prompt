@@ -2769,6 +2769,44 @@ verbatim.
   0 green. No new ADR, no HTML/JS change, no contract
   change. The `STATIC_ASSET_CACHE_MS` const is
   surfaced for one-line tuning later.
+- §30.6.7 added 2026-10-16 — K.14 sub-slice (H8 close).
+  Closes the user-reported bug "When I generate a prompt
+  and then click on refining chat, I don't get a chat and
+  it doesn't take the prompt over to the chat to develop."
+  Root cause: the three "Refine in chat →" links in
+  `src/index.html` (Z-Image, Anima, Krea-2) are bare
+  `<a href="#/chat">` anchors with no JS handler. The
+  auto-activation path in `displayResult` /
+  `displayAnimaResult` / `displayKrea2Result` POSTs to
+  `/api/chat/sessions`, but its fire-and-forget catch
+  swallows any failure (a 400 from the server's
+  `validateChatSessionCreate` for body-shape drift; a
+  200 that lands in state but loses to a later
+  re-render). Either way, the user lands on the chat
+  view with `state.chatSessionId === null` and the K.9
+  empty-state helper shows "No chat session yet." K.14
+  is the click-side fix: wire all three links as JS
+  click handlers that explicitly call the matching
+  per-model body builder (`activateChatForResult` /
+  `activateAnimaChatForResult` /
+  `activateKrea2ChatForResult`) and await the session
+  before navigating, then surface the previously-silent
+  failure as a toast. 4 new SPEC §30 K.14 tests lock:
+  all three links have click listeners; the click
+  handler routes to the right per-model builder based
+  on which result section is visible; the click handler
+  awaits the activation before navigating; the failure
+  path now toasts (no more silent `console.warn`).
+  **Tests: 736 → 740 / 0 green** (was 736; +4 net new).
+  No new dependency, no contract change, no HTML
+  structural change (the `href="#/chat"` stays so the
+  link is still a real anchor for keyboard nav and
+  right-click "open in new tab"). No new ADR (this is
+  a UI wiring bug, not a contract decision).
+  **Docs:** SPEC §30.6.7 + Change Log row, ARCH §30
+  A15, PRE-MORTEM §30.6.7, `docs/CODE-REVIEW-30-k14-
+  refine-link.md` (verdict pass), `docs/POLISH-AUDIT-30-
+  k14.md` (verdict pass).
 
 ## §30.6.6 sub-slice K.13 — server perf (POLISH-AUDIT P1/P2 close)
 
@@ -2866,3 +2904,213 @@ together with a single new dependency.
   change when content hashing lands.
 - HTTP/2 push. Out of scope; needs an HTTP/2
   server (project is on plain HTTP/1.1).
+
+## §30.6.7 sub-slice K.14 — Refine in chat link wiring (H8 close)
+
+### Reframe
+
+The user reports: "When I generate a prompt and then
+click on refining chat, I don't get a chat and it
+doesn't take the prompt over to the chat to develop."
+This is the H8 entry — the third in the chat-anchor
+bug family (after H5 in K.6 and H7 in K.9). K.7 closed
+the half-complete helper case (POST fires, panel stays
+hidden). K.9 closed the top-nav no-session case. K.14
+closes the link-click case: clicking a result-panel
+"Refine in chat →" link should land the user on a
+chat view with the just-generated prompt as the working
+prompt, a fresh chat session anchored to it, and the
+chat input focused. None of that happens today.
+
+The proximate cause is independent of K.7 and K.9:
+all three "Refine in chat →" links (Z-Image, Anima,
+Krea-2) in `src/index.html` are bare `<a href="#/chat">`
+anchors. There is no JS handler. The hash router fires
+on `#/chat` and `__i2pShowEmptyChatState` runs; if
+`state.chatSessionId` is null, the user sees the K.9
+empty-state paragraph ("No chat session yet…") which
+directly contradicts their just-completed action.
+
+There is a secondary cause: the auto-activation path
+in `displayResult` / `displayAnimaResult` /
+`displayKrea2Result` calls `activateChatForResult(data)`
+or the per-model twin via fire-and-forget. The catch
+silently swallows any error (line 1973 / 2025 / 2153).
+The Krea-2 path also sends `model: 'krea2'`, which
+the server's `validateChatSessionCreate` rejects
+(`server.js:8015-8017`, allowlist is `['zimage_turbo',
+'anima']`). So even if K.14 fixed only the Z-Image
+link, Krea-2 chat would still silently 400. The
+correct fix is the click-side anchor — make the link
+do the right thing regardless of auto-activation
+state.
+
+### Scope
+
+1. Wire `#refine-in-chat-link` (Z-Image),
+   `#anima-refine-in-chat-link`, and
+   `#krea2-refine-in-chat-link` as JS click handlers
+   in `src/app.js` (in the same addEventListener
+   block that already wires the regenerate / copy
+   buttons — the existing per-panel wiring block at
+   the bottom of the file).
+2. Each handler:
+   - Identifies the matching result panel by
+     visibility (`dom.resultSection.hidden` /
+     `dom.animaResultSection.hidden` /
+     `dom.krea2ResultSection.hidden`).
+   - Calls the matching per-model body builder
+     (`activateChatForResult` /
+     `activateAnimaChatForResult` /
+     `activateKrea2ChatForResult`) and awaits it.
+   - If the activation returns a session, navigates
+     to `#/chat` (or stays on the current view if
+     the user has already navigated, since the chat
+     view is in the same tab — the hash change is
+     idempotent).
+   - If the activation fails (returns null because
+     the server rejected the body), toasts the error
+     so the user sees actionable feedback instead of
+     a silent black screen. The chat-limit toast
+     already exists in `runChatActivationSession` —
+     K.14 adds the non-limit toast path.
+3. The HTML is unchanged. The `href="#/chat"` stays
+   so the link remains a real anchor (right-click
+   "open in new tab" still works; keyboard nav still
+   works; the URL bar still shows where the link
+   goes). The JS handler calls `preventDefault()`
+   only when it succeeds, so the URL bar still
+   updates via the hash change.
+4. 4 new SPEC §30 K.14 tests locking the wiring.
+
+### Behaviour
+
+- After Generate on the Z-Image panel, user clicks
+  the "Refine in chat →" link: the JS handler awaits
+  `activateChatForResult`, the session is created,
+  the chat view opens, the just-generated prompt is
+  the working prompt, the chat input is focused. URL
+  bar shows `#/chat`. The same flow works for Anima
+  and Krea-2 (with the caveat that the Krea-2 path
+  currently 400s on the server's model allowlist —
+  K.14 surfaces that 400 as a toast; the server
+  allowlist fix is a separate, parked slice).
+- If the user clicks the link before generating
+  anything: the handler detects no visible result
+  panel, does nothing, the bare-anchor fallback
+  navigates to `#/chat`, and the K.9 empty-state
+  helper shows its friendly message. (Same UX as
+  the top-nav tab path — K.14 doesn't regress K.9.)
+- If the server rejects the body: the handler shows
+  a toast ("Chat console unavailable: …") instead
+  of silently failing. The user can refresh and
+  retry. The result panel is still functional.
+- If the user clicks the link after a session is
+  already active: the handler detects the visible
+  panel, calls the body builder, the server
+  creates a NEW session (the existing
+  `runChatActivationSession` always creates a new
+  session and prepends it to the picker), the user
+  lands on a fresh conversation anchored to the
+  current result. This is a slight behaviour change
+  vs. the bare-anchor path (which would have
+  re-anchored to the existing session), but the
+  change matches the link's intent ("refine THIS
+  prompt in chat" → start a new conversation about
+  THIS prompt).
+
+### Definition of done
+
+- [ ] All three refine-in-chat links have
+      `addEventListener('click', …)` wiring in
+      `src/app.js`.
+- [ ] The click handler identifies the visible
+      result panel and calls the matching per-model
+      body builder.
+- [ ] The click handler awaits the activation
+      before navigating (no race between the POST
+      and the route change).
+- [ ] The failure path toasts the error message
+      instead of `console.warn`-ing.
+- [ ] The HTML `href="#/chat"` is unchanged.
+- [ ] 4 SPEC §30 K.14 tests pass; baseline
+      preserved (736 → 740 / 0 green).
+- [ ] `node --check src/app.js` passes.
+
+### Constraints
+
+- No server change. The Krea-2 model allowlist fix
+  (`'krea2'` not in the `['zimage_turbo', 'anima']`
+  list at `server.js:8015`) is real and will surface
+  as a toast after K.14, but is parked for a
+  separate slice. K.14 must not silently swallow
+  the Krea-2 400 — the toast is the explicit
+  "this is broken, here's why" affordance.
+- The click handler must be a thin wire — no new
+  business logic, no new state machine, no
+  per-model branching beyond "which body builder
+  to call." The per-model body builders already
+  exist; K.14 just routes to them.
+- The HTML keeps `<a href="#/chat">` (not
+  `<button>`). The link must remain a real anchor
+  for accessibility, keyboard nav, and right-click
+  semantics. `e.preventDefault()` only fires on
+  successful activation, so the URL bar still
+  updates on the rare failure path (where the
+  hash change is the best the user can get).
+- The failure toast must use the existing
+  `showError` helper (severity: 'warning') so the
+  tone matches the chat-limit toast at
+  `runChatActivationSession:2680`. No new
+  toast-style primitives.
+- The activation body must reuse the same
+  per-model builders — no third "click-handler
+  body builder" introduced. The whole point of
+  K.14 is to route through the existing
+  auto-activation path, not to create a parallel
+  one.
+
+### Out of scope (intentional)
+
+- The Krea-2 model allowlist server change. K.14
+  closes the user-visible bug; the Krea-2 400 will
+  still appear as a toast, but that's strictly
+  better than the silent black screen. The server
+  allowlist fix is parked as a new BACKLOG entry
+  (and may be paired with the Krea-2 regenerate
+  button investigation from the stale planning
+  notes, depending on the next session's bandwidth).
+- The Krea-2 regenerate button + copy button
+  spinners (the stale planning notes describe a
+  different bug that the K.10 refactor may have
+  already addressed; the next session should
+  re-investigate before scoping). Parked in
+  BACKLOG.md.
+- Refactor of the three body builders into one
+  parameterized function. K.14 routes through the
+  existing builders; the parameterization is
+  attractive but adds a new abstraction the
+  project doesn't need yet. Parked in BACKLOG.md.
+- Auto-activation's silent-failure path on the
+  per-model Generate flows (the three
+  fire-and-forget catches at lines 1973 / 2025 /
+  2153). K.14 fixes the user-visible link bug; the
+  auto-activation silent failure is a latent bug
+  that would only matter if a user generated a
+  prompt and then navigated directly to the chat
+  view without clicking the link. The link fix
+  makes this case unreachable for the link
+  surface; the auto-activation is left as a
+  belt-and-braces backup. If the auto-activation
+  ever fails in the wild, the user still has the
+  link as a retry. Parked in BACKLOG.md.
+- The stale planning notes about the Krea-2
+  regenerate button. The notes are wrong about
+  the diagnosis (`krea2RegenerateBtn` is already
+  referenced at lines 2054, 2082, 2740 of
+  `src/app.js`); either the notes describe a
+  prior state, or they describe a different fix
+  that's already partially landed. The next
+  session should reproduce the reported Krea-2
+  regenerate bug (if it still exists) before
+  scoping. Parked in BACKLOG.md.

@@ -2049,3 +2049,138 @@ extension regex is the only stable key the
 middleware can use to distinguish "static asset"
 from "API response" without touching the route
 table.
+### A15 — K.14 wiring: Refine in chat link click handlers (H8 close)
+
+Added 2026-10-16 as the close of H8 — the third in the
+chat-anchor bug family (K.6 / K.7 / K.9 / K.14). K.14 is
+the click-side anchor: the three "Refine in chat →" links
+in `src/index.html` (lines 264, 326, 399) are bare
+`<a href="#/chat">` anchors with no JS handler. Combined
+with the auto-activation path's fire-and-forget catch
+that silently swallows errors (`src/app.js:1973`, `:2025`,
+`:2153`), the user lands on `#/chat` with
+`state.chatSessionId === null`, and K.9's empty-state
+helper shows the "No chat session yet…" paragraph — which
+directly contradicts their just-completed action.
+
+| Element | File | Lines | Pattern mirrored |
+|---------|------|-------|------------------|
+| 3 `refine-in-chat-link` dom lookups | `src/app.js` | new entries alongside the existing `regenerateBtn` / `animaRegenerateBtn` / `krea2RegenerateBtn` lookups (lines 136, 150, 158) | existing `dom.*` block |
+| 3 click handlers + visible-panel dispatch | `src/app.js` | new block immediately after the Anima copy button wiring (~line 2798) | existing per-panel regenerate/copy wiring (K.6 / Slice 2.3) |
+| 4 SPEC §30 K.14 tests | `tests/run-all.js` | new test block at end of file | K.6 / K.7 / K.8 / K.9 / K.13 pattern |
+
+**Request flow (the click side):**
+
+```
+User clicks "Refine in chat →" on a visible result panel
+  ↓
+click handler (Z-Image / Anima / Krea-2)
+  ↓
+detects which panel is visible
+  ↓
+calls the matching per-model body builder
+   (activateChatForResult / activateAnimaChatForResult
+    / activateKrea2ChatForResult)
+  ↓
+body builder → runChatActivationSession
+  ↓
+POST /api/chat/sessions
+  ↓
+on success → un-hide #step-chat + focus #chat-input
+on failure → showError(message, { severity: 'warning' })
+  ↓
+if success: location.hash = '#/chat'  (or no-op if already there)
+if failure: bare-anchor fallback navigates to #/chat anyway
+            (K.9 empty-state shows; user sees actionable error toast)
+```
+
+**Key decisions:**
+
+- **Click handler is a thin wire — no new body
+  builder.** Each handler dispatches to one of the
+  three existing per-model body builders
+  (`activateChatForResult` / `activateAnimaChatForResult`
+  / `activateKrea2ChatForResult`). The whole point of
+  K.14 is to route through the existing auto-activation
+  path, not to create a parallel one. A future slice
+  may parameterize the three builders (parked in
+  BACKLOG); K.14 does not.
+- **`e.preventDefault()` only on success.** The
+  link must remain a real anchor for accessibility,
+  keyboard nav, and right-click semantics. On the rare
+  failure path (server 4xx), the bare-anchor fallback
+  navigates to `#/chat` and the K.9 empty-state helper
+  shows its friendly message — the user is never left
+  on the current view after clicking the link.
+- **Visible-panel dispatch via the `hidden` flag.**
+  `dom.resultSection.hidden` / `dom.animaResultSection.hidden`
+  / `dom.krea2ResultSection.hidden` is the canonical
+  "which result is showing right now" signal. The
+  handler checks all three in order; only one can be
+  visible at a time (the dispatch in `displayResult` /
+  `displayAnimaResult` / `displayKrea2Result` hides
+  the other two). If none is visible, the handler
+  is a no-op and the bare-anchor fallback runs.
+- **No new toast-style primitives.** The failure
+  path uses the existing `showError(msg, { severity:
+  'warning' })` helper, the same one
+  `runChatActivationSession` uses for the chat-limit
+  warning at `src/app.js:2680`. Tone matches; no
+  visual regression.
+- **No server change.** The Krea-2 model allowlist
+  at `server.js:8015` (`['zimage_turbo', 'anima']`)
+  still rejects `model: 'krea2'`. K.14 will surface
+  that 400 as a toast — strictly better than the
+  silent black screen. The server allowlist fix is
+  parked as a separate BACKLOG entry.
+- **HTML is unchanged.** `href="#/chat"` stays on
+  all three links. The JS handler intercepts the
+  click and routes through the body builders; the
+  URL bar still updates on the rare failure path
+  via the hash change.
+
+**Why the same handler shape for all three links.**
+The pre-Generate picker is a 3-way enum (zimage_turbo
+/ anima / krea2) and each model has its own result
+panel with its own "Refine in chat →" link. The
+three click handlers differ only in which per-model
+body builder they call. The visible-panel dispatch
+is the single source of truth for "which model did
+the user just generate with" — and the dispatcher
+already hides the other two panels on each Generate
+success. No new state needed.
+
+**Why no new event-listener bus / pub-sub.** The
+three click handlers live next to the existing
+per-panel regenerate/copy wiring (the bottom of
+the IIFE in `src/app.js`). They follow the same
+guarded pattern (`if (dom.linkEl) { ... }`) as the
+K.6 / K.7 / K.8 / K.9 wiring. Adding a new dispatch
+mechanism for three handlers would be over-engineered.
+
+**Out of scope (intentional):**
+
+- The Krea-2 model allowlist server change
+  (`server.js:8015`). K.14 closes the user-visible
+  bug; the Krea-2 400 will appear as a toast, but
+  that's strictly better than the silent black
+  screen. The server allowlist fix is parked.
+- Refactor of the three body builders into one
+  parameterized function. Attractive but adds a
+  new abstraction the project doesn't need yet.
+  K.14 routes through the existing builders; the
+  parameterization is a future slice (BACKLOG).
+- Auto-activation's silent-failure path on the
+  per-model Generate flows (the three
+  fire-and-forget catches at lines 1973 / 2025 /
+  2153). K.14 fixes the user-visible link bug; the
+  auto-activation is left as a belt-and-braces
+  backup. If the auto-activation ever fails in the
+  wild, the user still has the link as a retry.
+- The Krea-2 regenerate button + copy button
+  spinners (stale planning notes from the prior
+  session describe a different bug; parked).
+- Replacing the `<a href="#/chat">` with a
+  `<button>`. The link must remain a real anchor
+  for accessibility, keyboard nav, and right-click
+  semantics.

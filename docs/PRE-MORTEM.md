@@ -1336,3 +1336,127 @@ explicitly deferred.
   separate slice).
 - Service worker for offline / instant-load
   (separate, much larger scope).
+
+## §30.6.7 pre-mortem — K.14 wiring (H8 close)
+
+### Risks
+
+- **R-23: Click handler dispatches to the wrong
+  per-model body builder.** The dispatch is keyed
+  on which result panel is visible at click time.
+  The current `displayResult` / `displayAnimaResult`
+  / `displayKrea2Result` implementations hide the
+  other two panels on each Generate success, so
+  exactly one panel is visible at a time. If a
+  future slice breaks that invariant (e.g. shows
+  all three side-by-side), the dispatch order
+  matters. K.14 dispatches Z-Image → Anima → Krea-2
+  (the order the panels appear in `src/index.html`).
+  Risk: low (invariant is well-tested in K.5); impact:
+  low (wrong body builder would 400 on the server
+  with a typed error; the toast makes it visible).
+
+- **R-24: `e.preventDefault()` race with the bare-
+  anchor hash change.** The link is `<a href="#/chat">`.
+  If the click handler calls `preventDefault()` on
+  failure, the URL bar doesn't update and the user
+  thinks the link is broken. If it doesn't call
+  `preventDefault()` on success, the hash change
+  fires before the body builder's POST returns and
+  K.9's empty-state helper briefly shows before the
+  session is created. K.14 mitigates by:
+  (a) calling `preventDefault()` BEFORE the await
+  on the body builder, so the bare-anchor fallback
+  never fires on success; (b) NOT calling
+  `preventDefault()` on failure, so the bare-anchor
+  fallback navigates to `#/chat` and the K.9
+  empty-state helper shows + the toast overlays.
+  Risk: low; impact: low.
+
+- **R-25: Krea-2 path still 400s on the server's
+  model allowlist.** The K.14 body builder still
+  sends `model: 'krea2'` (unchanged from K.7), and
+  `server.js:8015` still rejects it. K.14 surfaces
+  the 400 as a toast — strictly better than the
+  silent black screen, but Krea-2 users will see
+  the toast every time they click the link. The
+  server allowlist fix is parked; if the next
+  session picks it up, the Krea-2 path becomes
+  fully functional. Risk: medium (visible to
+  every Krea-2 user); impact: low (the toast is
+  the explicit "broken, here's why" affordance;
+  the result panel is still functional; the user
+  can refresh + retry).
+
+- **R-26: Visible-panel dispatch races a fast
+  click after a hide animation.** If a future
+  slice adds a fade-out on result-panel hide,
+  the `hidden` flag flips immediately but the
+  panel is still painted for ~200 ms. A user
+  could click a still-painted-but-`hidden=true`
+  panel's "Refine in chat →" link and trigger
+  the wrong body builder. Current code: no fade,
+  no race. Future-code risk: low (no fade is
+  planned); impact: low (same as R-23).
+
+### Pre-commitments
+
+- **P-19: Thin click handler — no new business
+  logic, no new state machine, no per-model
+  branching beyond "which body builder to call".**
+  The per-model body builders already exist; K.14
+  just routes to them. The handler body is ≤ 30
+  lines per panel (visible-panel check +
+  builder call + success navigate + failure
+  toast).
+
+- **P-20: `showError(msg, { severity: 'warning' })`
+  is the single toast primitive for the failure
+  path.** No new toast-style primitives, no new
+  CSS, no new DOM. The tone matches the existing
+  chat-limit toast at `runChatActivationSession:2680`.
+
+- **P-21: No server change, no HTML change.**
+  The Krea-2 model allowlist fix is parked. The
+  `<a href="#/chat">` stays. The `e.preventDefault()`
+  is the only JS-level behavioral addition.
+
+### Kill criteria
+
+- **K-16:** If any of the 736 baseline tests
+  flips red during K.14 (K.14 is additive — it
+  adds 4 new tests but must not break any
+  existing one), the slice does not merge.
+  K.14 verified at 740 / 0 green on 2026-10-16;
+  criterion met.
+
+- **K-17:** If `node --check src/app.js` fails
+  after the K.14 edits, the slice does not merge.
+  Verified syntax OK on 2026-10-16; criterion met.
+
+- **K-18:** If the click handler introduces
+  silent failure of any kind (uncaught
+  exceptions, swallowed rejections, console.warn
+  without a toast, etc.), the slice does not merge.
+  K.14 surfaces every failure path as a toast
+  (chat-limit already toasts; non-limit now toasts
+  via `showError`). Criterion met.
+
+### Out of scope (intentional)
+
+- The Krea-2 model allowlist server change
+  (`server.js:8015`). Parked as a separate BACKLOG
+  entry. K.14's toast on the 400 is the explicit
+  "this is broken, here's why" affordance.
+- Refactor of the three body builders into one
+  parameterized function. Future slice (BACKLOG).
+- Auto-activation's silent-failure path on the
+  per-model Generate flows. The K.14 click handler
+  is the user-facing retry path; the auto-activation
+  is left as a backup.
+- The Krea-2 regenerate button + copy button
+  spinners (stale planning notes; parked).
+- Replacing the `<a href="#/chat">` with a
+  `<button>`. The link must remain a real anchor
+  for accessibility, keyboard nav, and right-click
+  semantics.

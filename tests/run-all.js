@@ -15342,3 +15342,152 @@ test('SPEC §30 K.13: Cache-Control middleware is wired BEFORE the static handle
     `Cache-Control middleware must be wired BEFORE the static handlers ` +
     `(cache at ${cacheIdx}, static at ${staticIdx}) — express.static writes the response, so the header must be set first`);
 });
+
+// ─── SPEC §30 — K.14 (H8 close): Refine in chat link wiring ─────────
+// K.6 / K.7 / K.9 closed related chat-anchor bugs. K.14 closes the
+// third: the three "Refine in chat →" links in src/index.html were
+// bare <a href="#/chat"> anchors with no JS handler. After Generate,
+// clicking the link landed on the chat view with no session
+// (state.chatSessionId === null) and K.9's empty-state helper
+// showed — which directly contradicted the just-completed action.
+// K.14 wires all three links as click handlers that:
+//   (a) detect the visible result panel,
+//   (b) call the matching per-model body builder and await it,
+//   (c) navigate to #/chat on success,
+//   (d) surface failures as a toast (no silent console.warn).
+// These 4 tests lock the four critical invariants. HTML is unchanged
+// (href="#/chat" stays for keyboard nav + right-click semantics).
+// The 4 new tests push the count 736 → 740 / 0 green.
+//
+// Test window: the K.14 wiring block is bounded by the second
+// '// Slice K.14 — H8 close —' marker (the click-handler one) and the
+// '// ─── Wire up model selector end ───' divider immediately after.
+// Slicing past the divider would include thousands of lines of
+// unrelated pre-existing code with their own console.warn calls
+// (which the K.14 spec is NOT trying to remove).
+
+test('SPEC §30 K.14: src/app.js declares dom lookups for the three refine-in-chat links', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Locate the dom block (the inline `dom = { … }` initializer that
+  // lives in the IIFE opener). The three new entries must be present
+  // alongside the existing per-panel action buttons.
+  const domBlock = js.match(/const dom = \{[\s\S]*?\n  \};/);
+  assertTrue(domBlock !== null, 'dom block found in src/app.js');
+  assertTrue(/refineInChatLink:\s*\$\(['"]refine-in-chat-link['"]\)/.test(domBlock[0]),
+    'dom.refineInChatLink lookup present');
+  assertTrue(/animaRefineInChatLink:\s*\$\(['"]anima-refine-in-chat-link['"]\)/.test(domBlock[0]),
+    'dom.animaRefineInChatLink lookup present');
+  assertTrue(/krea2RefineInChatLink:\s*\$\(['"]krea2-refine-in-chat-link['"]\)/.test(domBlock[0]),
+    'dom.krea2RefineInChatLink lookup present');
+  // Also verify the HTML is unchanged (the href attribute stays).
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'src/index.html'), 'utf8');
+  assertTrue(/<a id="refine-in-chat-link" class="btn-secondary" href="#\/chat">Refine in chat →<\/a>/.test(html),
+    'Z-Image refine-in-chat-link href="#/chat" preserved');
+  assertTrue(/<a id="anima-refine-in-chat-link" class="btn-secondary" href="#\/chat">Refine in chat →<\/a>/.test(html),
+    'Anima refine-in-chat-link href="#/chat" preserved');
+  assertTrue(/<a id="krea2-refine-in-chat-link" class="btn-secondary" href="#\/chat">Refine in chat →<\/a>/.test(html),
+    'Krea-2 refine-in-chat-link href="#/chat" preserved');
+});
+
+test('SPEC §30 K.14: all three refine-in-chat links have addEventListener("click", …) wiring', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The wiring lives in a single block bounded by the second K.14
+  // marker (click handlers) and the model-selector end divider.
+  // Slice the file to that exact block so unrelated pre-existing
+  // console.warn calls outside the wiring block don't false-positive
+  // the K.14 invariants.
+  const firstMarker = js.indexOf('// Slice K.14 — H8 close — "Refine in chat →"');
+  assertTrue(firstMarker !== -1, 'Slice K.14 marker comment present in src/app.js');
+  const k14Start = js.indexOf('// Slice K.14 — H8 close — "Refine in chat →"', firstMarker + 1);
+  assertTrue(k14Start !== -1, 'Slice K.14 wiring-block marker present (second occurrence)');
+  const k14End = js.indexOf('// ─── Wire up model selector end ───', k14Start);
+  assertTrue(k14End !== -1, 'model-selector end divider present after K.14 wiring block');
+  const k14Window = js.slice(k14Start, k14End);
+  assertTrue(k14Window.length > 1000,
+    'K.14 wiring block is substantive (got ' + k14Window.length + ' chars)');
+  // The three wire calls must each reference the matching dom entry.
+  assertTrue(/wireRefineInChatLink\(dom\.refineInChatLink,\s*['"]zimage_turbo['"]\)/.test(k14Window),
+    'Z-Image link wired via wireRefineInChatLink(dom.refineInChatLink, "zimage_turbo")');
+  assertTrue(/wireRefineInChatLink\(dom\.animaRefineInChatLink,\s*['"]anima['"]\)/.test(k14Window),
+    'Anima link wired via wireRefineInChatLink(dom.animaRefineInChatLink, "anima")');
+  assertTrue(/wireRefineInChatLink\(dom\.krea2RefineInChatLink,\s*['"]krea2['"]\)/.test(k14Window),
+    'Krea-2 link wired via wireRefineInChatLink(dom.krea2RefineInChatLink, "krea2")');
+  // The wireRefineInChatLink helper itself must call addEventListener('click', …).
+  assertTrue(/linkEl\.addEventListener\(\s*['"]click['"]\s*,/.test(k14Window),
+    'wireRefineInChatLink helper attaches a click listener');
+});
+
+test('SPEC §30 K.14: click handler dispatches to the per-model body builder based on the visible result panel', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const firstMarker = js.indexOf('// Slice K.14 — H8 close — "Refine in chat →"');
+  const k14Start = js.indexOf('// Slice K.14 — H8 close — "Refine in chat →"', firstMarker + 1);
+  const k14End = js.indexOf('// ─── Wire up model selector end ───', k14Start);
+  assertTrue(k14End !== -1, 'model-selector end divider present after K.14 wiring block');
+  const k14Window = js.slice(k14Start, k14End);
+  // The visible-panel dispatch is the single source of truth for "which
+  // model did the user just generate with" — it reads the `hidden` flag
+  // on each of the three result panels. All three must be checked.
+  assertTrue(/isPanelVisible\(dom\.resultSection\)/.test(k14Window),
+    'Z-Image resultSection visibility checked');
+  assertTrue(/isPanelVisible\(dom\.animaResultSection\)/.test(k14Window),
+    'Anima animaResultSection visibility checked');
+  assertTrue(/isPanelVisible\(dom\.krea2ResultSection\)/.test(k14Window),
+    'Krea-2 krea2ResultSection visibility checked');
+  // The dispatch must route to the matching per-model body builder. The
+  // K.14 spec locks the existing three builders — no fourth.
+  assertTrue(/activateChatForResult\(/.test(k14Window),
+    'Z-Image dispatch calls activateChatForResult');
+  assertTrue(/activateAnimaChatForResult\(/.test(k14Window),
+    'Anima dispatch calls activateAnimaChatForResult');
+  assertTrue(/activateKrea2ChatForResult\(/.test(k14Window),
+    'Krea-2 dispatch calls activateKrea2ChatForResult');
+});
+
+test('SPEC §30 K.14: click handler awaits activation before navigating; failure path toasts (no silent console.warn)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const firstMarker = js.indexOf('// Slice K.14 — H8 close — "Refine in chat →"');
+  const k14Start = js.indexOf('// Slice K.14 — H8 close — "Refine in chat →"', firstMarker + 1);
+  const k14End = js.indexOf('// ─── Wire up model selector end ───', k14Start);
+  assertTrue(k14End !== -1, 'model-selector end divider present after K.14 wiring block');
+  const k14Window = js.slice(k14Start, k14End);
+  // The click handler must await the body builder (the activation is
+  // async). It must NOT fire-and-forget (no `.catch(console.warn)`).
+  // K.14 surfaces failures as a toast via the existing showError helper.
+  // Locate the click listener body itself. The handler is at 4-space
+  // indent (inside wireRefineInChatLink) and closes with `    });`
+  // (also 4 spaces). The body extraction must be tolerant of either
+  // indent depth — anchor on the addEventListener call and on the
+  // matching close-paren + semicolon.
+  const clickListenerMatch = k14Window.match(/linkEl\.addEventListener\(\s*['"]click['"]\s*,\s*async\s*\(\s*e\s*\)\s*=>\s*\{([\s\S]*?)\n\s{2,6}\}\);/);
+  assertTrue(clickListenerMatch !== null, 'click listener body extracted');
+  const clickBody = clickListenerMatch[1];
+  // The body must call the activator with `await` (not fire-and-forget).
+  assertTrue(/await\s+activator\(/.test(clickBody),
+    'click handler awaits the body builder activation');
+  // Success path: navigates to #/chat (idempotent hash assignment).
+  assertTrue(/window\.location\.hash\s*=\s*['"]#\/chat['"]/.test(clickBody),
+    'success path sets location.hash to #/chat');
+  // Success path: calls preventDefault so the bare-anchor fallback
+  // does not double-navigate.
+  assertTrue(/e\.preventDefault\(\)/.test(clickBody),
+    'success path calls e.preventDefault()');
+  // Failure path: shows a toast via the existing showError helper
+  // (severity: "warning"). The K.14 spec locks the showError helper
+  // — no new toast primitives. The click handler must NOT swallow
+  // errors via console.warn (that was the bug).
+  assertTrue(/showError\([\s\S]*?severity:\s*['"]warning['"]/.test(clickBody),
+    'failure path calls showError(…, { severity: "warning" })');
+  // The K.14 code (excluding comments) must NOT contain a bare
+  // console.warn — the per-model body builders' console.warn lives
+  // elsewhere in the file, not in the K.14 block. Strip JS comments
+  // before searching to avoid false positives from the K.14 spec
+  // comment that mentions console.warn by name.
+  const stripComments = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, '')        // /* … */ block
+    .replace(/^\s*\/\/.*$/gm, '')             // // line (whole line)
+    .replace(/\s+\/\/.*$/gm, '');              // // trailing comment
+  const k14Code = stripComments(k14Window);
+  const inK14 = /console\.warn/.test(k14Code);
+  assertTrue(!inK14,
+    'K.14 wiring code must not contain console.warn (K.14 spec: surface failures, never silently console.warn)');
+});

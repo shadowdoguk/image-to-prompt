@@ -156,6 +156,17 @@
     // values are forwarded automatically.
     krea2CopyBtn: $('krea2-copy-btn'),
     krea2RegenerateBtn: $('krea2-regenerate-btn'),
+    // Slice K.14 — H8 close — "Refine in chat →" link lookups.
+    // The three links in src/index.html (lines 264, 326, 399) are
+    // bare <a href="#/chat"> anchors with no JS handler. K.14 wires
+    // them as click handlers that route to the matching per-model
+    // body builder and surface server failures as a toast. The
+    // href="#/chat" stays in the HTML for keyboard nav + right-click
+    // semantics; the click handler calls preventDefault() only on
+    // success, so the URL bar still updates on the rare failure path.
+    refineInChatLink: $('refine-in-chat-link'),
+    animaRefineInChatLink: $('anima-refine-in-chat-link'),
+    krea2RefineInChatLink: $('krea2-refine-in-chat-link'),
 
     errorToast: $('error-toast'),
     errorMessage: $('error-message'),
@@ -2779,6 +2790,118 @@
       }
     });
   }
+
+  // Slice K.14 — H8 close — "Refine in chat →" link click handlers.
+  // The three links in src/index.html are bare <a href="#/chat"> anchors
+  // with no JS handler. K.14 wires each one as a click handler that:
+  //   1) detects which result panel is visible (single source of truth:
+  //      the dispatch in displayResult/displayAnimaResult/displayKrea2Result
+  //      hides the other two);
+  //   2) calls the matching per-model body builder and awaits it;
+  //   3) on success, navigates to #/chat and prevents the bare-anchor
+  //      fallback (URL bar already updated via the hash change);
+  //   4) on failure, surfaces the error as a toast (no silent console.warn)
+  //      and lets the bare-anchor fallback run so the K.9 empty-state
+  //      helper shows on the chat view.
+  // The handler is a thin wire — no new body builder, no new state
+  // machine, no per-model branching beyond "which body builder to call."
+  // Future slices may parameterize the three body builders; K.14 does not.
+  // Visible-panel dispatch: exactly one of the three result panels is
+  // visible at a time. The click handler reads dom.<panel>.hidden and
+  // routes to the matching per-model body builder. If no panel is
+  // visible (e.g. the user clicked a stale link after navigating away),
+  // the handler is a no-op and the bare-anchor fallback navigates to
+  // #/chat where the K.9 empty-state helper runs.
+  const isPanelVisible = (el) => !!(el && !el.hidden);
+  // Build a body for the per-model chat activator. The shape mirrors
+  // the existing per-model Generate handlers' auto-activation bodies
+  // (src/app.js:1971, :2023, :2151) so K.14 doesn't introduce a
+  // divergent request shape.
+  const buildRefineBody = {
+    zimage_turbo: () => ({
+      prompt: dom.resultPrompt ? dom.resultPrompt.value : '',
+      preset_id: state.currentRunId ? `preset_${state.currentRunId}` : null,
+      preset_name: ''
+    }),
+    anima: () => ({
+      positive: dom.animaResultPositive ? dom.animaResultPositive.value : '',
+      negative: dom.animaResultNegative ? dom.animaResultNegative.value : '',
+      preset_id: state.currentRunId ? `preset_${state.currentRunId}` : null,
+      preset_name: '',
+      variant: state.animaVariant
+    }),
+    krea2: () => ({
+      prompt: dom.krea2ResultPrompt ? dom.krea2ResultPrompt.value : '',
+      variant: state.krea2Variant,
+      creativity: state.krea2Creativity
+    })
+  };
+  const refineInChatActivators = {
+    zimage_turbo: (body) => activateChatForResult(body),
+    anima: (body) => activateAnimaChatForResult(body),
+    krea2: (body) => activateKrea2ChatForResult(body)
+  };
+
+  // Wire a single link. On success, preventDefault so the bare-anchor
+  // fallback doesn't double-navigate. On failure, do NOT preventDefault
+  // so the URL bar still updates to #/chat and the K.9 empty-state
+  // helper can run.
+  const wireRefineInChatLink = (linkEl, modelName) => {
+    if (!linkEl) return;
+    linkEl.addEventListener('click', async (e) => {
+      // Snapshot visibility BEFORE the await — the body builder
+      // un-hides #step-chat via runChatActivationSession, so a
+      // post-await read could see the panel as visible even when
+      // the click was triggered from a different model.
+      const visibleModel = isPanelVisible(dom.resultSection) ? 'zimage_turbo'
+        : isPanelVisible(dom.animaResultSection) ? 'anima'
+        : isPanelVisible(dom.krea2ResultSection) ? 'krea2'
+        : null;
+      // Fall back to the model the link itself represents if no
+      // panel is visible (rare race: user clicks a still-painted
+      // link right as the panel hides; the link model is the
+      // safest guess because the link lives inside that panel).
+      const targetModel = visibleModel || modelName;
+      const buildBody = buildRefineBody[targetModel];
+      const activator = refineInChatActivators[targetModel];
+      if (typeof buildBody !== 'function' || typeof activator !== 'function') {
+        // Defensive: should never happen — all three are wired in
+        // this slice. Surface a toast rather than silently failing.
+        showError(`Refine in chat is unavailable for ${modelName} (no chat activator wired).`, { severity: 'warning' });
+        return;
+      }
+      let succeeded = false;
+      try {
+        const session = await activator(buildBody());
+        succeeded = !!(session && session.id);
+        if (succeeded) {
+          // Navigate to chat view (idempotent — the body builder
+          // already un-hid #step-chat + focused #chat-input via
+          // runChatActivationSession).
+          if (window.location.hash !== '#/chat') {
+            window.location.hash = '#/chat';
+          }
+        }
+        // Failure path: let the bare anchor navigate to #/chat
+        // so K.9's empty-state helper runs. The body builder or
+        // its catch already toasted the error.
+      } catch (err) {
+        // runChatActivationSession catches its own errors and returns
+        // null, but the body builders themselves may throw on
+        // contract-shape errors. Surface here for the same reason:
+        // never silently console.warn.
+        showError(`Chat console unavailable: ${err && err.message ? err.message : String(err)}`, { severity: 'warning' });
+      } finally {
+        if (succeeded) {
+          e.preventDefault();
+        }
+      }
+    });
+  };
+
+  wireRefineInChatLink(dom.refineInChatLink, 'zimage_turbo');
+  wireRefineInChatLink(dom.animaRefineInChatLink, 'anima');
+  wireRefineInChatLink(dom.krea2RefineInChatLink, 'krea2');
 
   // ─── Wire up model selector end ──────────────────────────────────────
 
