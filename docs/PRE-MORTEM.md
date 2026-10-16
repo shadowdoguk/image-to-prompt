@@ -1010,3 +1010,113 @@ reported the bug on 2026-10-16.
   symbol" gate. Parked.
 - `#krea2-refine-in-chat-link` is an `<a href="#/chat">` and
   needs no JS wiring. No change.
+
+## §30.6.2 pre-mortem — K.7 wiring (K.4 follow-up)
+
+Added 2026-10-16 as a K.4 ship-without-wiring fix. The
+`activateKrea2ChatForResult` helper (src/app.js:2627) was a
+half-complete helper that POSTs `/api/chat/sessions` and
+sets `state.chatSessionId` but skips the post-success block
+that un-hides the chat panel. The user reported the bug on
+2026-10-16: clicking the "Refine in chat →" link on the
+Krea-2 result panel sent them to `#/chat` with only the
+view title + view-sub visible, no session rail, no
+message area, no input. Black background underneath.
+
+### Risks
+
+- **R-12 (LOW):** Mirroring the Anima helper's post-success
+  block into the Krea-2 helper creates a divergence risk if
+  the two helpers ever drift (e.g. one adds a step the
+  other doesn't). *Mitigation:* K.7 makes the two helpers
+  structurally identical (see ARCH §30 A11 for the block
+  diagram). The two call sites differ only in the POST
+  body. A future refactor could lift this into one
+  parameterised `activateChatForResult(model, data)` helper,
+  but that crosses the AGENTS.md "rename a shared symbol"
+  gate and is out of scope for K.7. The risk is the
+  *motivation* to refactor, not the immediate correctness.
+
+- **R-13 (LOW):** `renderChatMessages(session)` clears the
+  message area (`dom.chatMessages.innerHTML = ''`) before
+  rendering. If the user had a previous chat session
+  selected (from a different model) when the Krea-2 result
+  fires, the panel-show would wipe the previous messages.
+  *Mitigation:* `state.chatSessionId` is updated atomically
+  to the new session.id BEFORE `renderChatMessages` is
+  called. The Anima helper does the same. The previous
+  session is preserved in `state.chatSessions` and
+  re-selectable from the session rail. No data loss.
+
+- **R-14 (LOW):** `dom.chatInput.focus()` on chat-activation
+  is new for the Krea-2 path. The Anima helper does it;
+  Z-Image's helper does not (K.7 makes the Krea-2 path
+  match Anima, not the other way around). If a user is
+  mid-typing in a different input (e.g. the directive
+  field), focus stealing could be a UX surprise.
+  *Mitigation:* the user just clicked a "Refine in chat →"
+  link, so they have signalled they want to type in the
+  chat. Focus stealing is the intended UX. Same pattern as
+  Anima (Slice 2.4). No regression risk.
+
+### Pre-commitments
+
+- **P-11:** K.7's helper MUST mirror the Anima helper's
+  post-success block one-for-one: `state.chatSessions`
+  prepend, `renderChatMessages(session)`, un-hide
+  `dom.stepChat`, populate `dom.chatSessionStatus`, enable
+  `dom.chatSessionDeleteBtn`, focus `dom.chatInput`. The
+  K.7 tests lock the four most critical of these (prepend,
+  render, un-hide, focus). Test coverage: 4 new SPEC §30
+  K.7 tests.
+
+- **P-12:** K.7 MUST NOT change the Krea-2 chat-session
+  POST body. The body is a K.4 contract decision (model:
+  'krea2', variant, creativity, metadata, no negative
+  field per P-7 invariant). K.7 is a UI-binding fix, not a
+  contract change. Test coverage: existing K.4 tests still
+  pass; K.7 does not modify any K.4 assertion.
+
+- **P-13:** K.7 MUST NOT add a `chat`-case branch to
+  `onViewEnter` in src/shell.js. The empty-chat-view case
+  (user navigates to `#/chat` via the top nav tab with no
+  session) is a different cause, different scope. Parked
+  as **H7** in BACKLOG. The helper fix is the right scope
+  for K.7; mixing in the view-entrance handler would
+  conflate "fix the Krea-2 result-panel flow" with "fix
+  the chat-view entrance for all flows".
+
+### Kill criteria
+
+- **K-8:** If any of the 718 baseline tests flips red
+  during K.7 (K.7 is additive — it adds 4 new tests but
+  must not break any existing one), the slice does not
+  merge. K.7 verified at 722 / 0 green on 2026-10-16
+  (target — see SPEC §30.6.2 DoD); criterion met once
+  verified.
+
+- **K-9:** If clicking the "Refine in chat →" link on the
+  Krea-2 result panel does NOT land the user on a chat
+  view with the session rail populated, the working-prompt
+  editor visible, the message area showing the empty-state
+  hint, the send button enabled, and the input focusable
+  (verified manually in a captured browser session), the
+  slice does not merge. The user's 2026-10-16 report was
+  the failure that triggered this slice; the fix is
+  verified by the 4 unit tests + the manual smoke test
+  (the G4 demo gate).
+
+### Out of scope (intentional)
+
+- Click handlers on the three `<a href="#/chat">` links
+  (Z-Image, Anima, Krea-2). The helper fix is sufficient;
+  the session is pre-created before the user ever clicks
+  the link. Belt-and-braces only.
+- An `onViewEnter('chat')` branch that handles the
+  empty-chat-view case. Different cause, different scope.
+  Parked as **H7** in BACKLOG.
+- Z-Image + Anima regenerate button `.btn-spinner` markup
+  (H5 parked, K.6 follow-on).
+- `setButtonLoading` refactor (parked).
+- A lifted `activateChatForResult(model, data)` helper
+  (would cross the "rename a shared symbol" gate; parked).

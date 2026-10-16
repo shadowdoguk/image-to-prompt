@@ -2647,10 +2647,30 @@
         })
       });
       state.chatSessionId = session.id;
+      // K.7 — K.4 follow-up. K.4 shipped this helper as a stub
+      // that only POSTed + set state.chatSessionId + repainted
+      // the session select. The post-success block that brings
+      // the chat panel to life (mirror of activateAnimaChatForResult
+      // at slice 2.4) was missing. Consequence: clicking
+      // #krea2-refine-in-chat-link sent the user to #/chat where
+      // #step-chat was still hidden and #chat-messages was empty —
+      // view title + view-sub on a black background. K.7 closes
+      // the gap by appending the Anima post-success block.
+      state.chatSessions = [session].concat(
+        state.chatSessions.filter((s) => s.id !== session.id)
+      );
       if (typeof renderChatSessionSelect === 'function') renderChatSessionSelect();
+      if (typeof renderChatMessages === 'function') renderChatMessages(session);
+      if (dom.stepChat) dom.stepChat.hidden = false;
+      if (dom.chatSessionStatus) {
+        dom.chatSessionStatus.hidden = false;
+        dom.chatSessionStatus.textContent = formatChatSessionStatus(session);
+      }
+      if (dom.chatSessionDeleteBtn) {
+        dom.chatSessionDeleteBtn.disabled = false;
+      }
       if (typeof updateChatSendButton === 'function') updateChatSendButton();
-      // Update token reminder banner only if the user has the
-      // Z-Image banner active (Krea-2 doesn't have one).
+      if (dom.chatInput) dom.chatInput.focus();
     } catch (e) {
       // Chat activation is best-effort; a 4xx/5xx here must not
       // clobber the displayed result. Surface as console.warn

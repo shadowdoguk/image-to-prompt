@@ -14939,3 +14939,76 @@ test('SPEC §30 K.6: K.3 follow-up identifier present in src/app.js + src/index.
   assertTrue(/Slice K\.6/.test(html) || true,
     'HTML may not need a Slice K.6 marker (only JS does the wiring)');
 });
+
+// ─── SPEC §30 — K.7 (K.4 follow-up): chat panel-show wiring ─────────
+// K.4 shipped activateKrea2ChatForResult as a half-complete helper
+// that POSTed /api/chat/sessions + set state.chatSessionId but
+// skipped the post-success block that un-hides the chat panel
+// (mirrored from activateAnimaChatForResult at slice 2.4). The
+// user reported: clicking #krea2-refine-in-chat-link sent them to
+// #/chat with only the view title + view-sub visible; the
+// #step-chat panel was hidden and #chat-messages was empty.
+// K.7 closes the gap. These 4 tests lock the four critical
+// post-success steps; 6 more are intentionally not duplicated
+// from Slice 2.4 (formatChatSessionStatus, delete-btn enable,
+// token-reminder banner, etc. are tested there).
+
+test('SPEC §30 K.7: activateKrea2ChatForResult prepends new session to state.chatSessions (K.4 follow-up)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const activateKrea2ChatForResult = async');
+  assertTrue(fnStart !== -1, 'activateKrea2ChatForResult must be defined');
+  const fnBody = js.slice(fnStart, fnStart + 3000);
+  // Mirrors activateAnimaChatForResult's prepend pattern (slice 2.4):
+  //   state.chatSessions = [session].concat(
+  //     state.chatSessions.filter((s) => s.id !== session.id)
+  //   );
+  assertTrue(/state\.chatSessions\s*=\s*\[session\]\.concat\(\s*state\.chatSessions\.filter\(\(s\)\s*=>\s*s\.id\s*!==\s*session\.id\s*\)\s*\)/.test(fnBody),
+    'activateKrea2ChatForResult must prepend the new session to state.chatSessions (mirrors Anima)');
+});
+
+test('SPEC §30 K.7: activateKrea2ChatForResult calls renderChatMessages(session) (K.4 follow-up)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const activateKrea2ChatForResult = async');
+  assertTrue(fnStart !== -1, 'activateKrea2ChatForResult must be defined');
+  const fnBody = js.slice(fnStart, fnStart + 3000);
+  // The K.4 stub forgot to call renderChatMessages, so even if the
+  // panel had been un-hidden, #chat-messages would have been empty.
+  assertTrue(/renderChatMessages\(session\)/.test(fnBody),
+    'activateKrea2ChatForResult must call renderChatMessages(session) so the message area populates');
+  // Guarded by the typeof check pattern (function may be hoisted but
+  // is referenced through the conditional to avoid TDZ in test envs).
+  assertTrue(/typeof renderChatMessages\s*===\s*['"]function['"]/.test(fnBody),
+    'renderChatMessages call must be guarded by typeof check (matches the existing pattern for renderChatSessionSelect + updateChatSendButton)');
+});
+
+test('SPEC §30 K.7: activateKrea2ChatForResult un-hides #step-chat (K.4 follow-up)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const activateKrea2ChatForResult = async');
+  assertTrue(fnStart !== -1, 'activateKrea2ChatForResult must be defined');
+  const fnBody = js.slice(fnStart, fnStart + 3000);
+  // The core bug: #step-chat is hidden by default (src/index.html:433)
+  // and is only un-hidden by the post-success block that K.4 forgot.
+  // Without this line, the user lands on #/chat and sees only the
+  // view title + view-sub on a black background.
+  assertTrue(/dom\.stepChat\.hidden\s*=\s*false/.test(fnBody),
+    'activateKrea2ChatForResult must set dom.stepChat.hidden = false (the core panel-show fix)');
+  // And must guard against the dom lookup being missing.
+  assertTrue(/if\s*\(\s*dom\.stepChat\s*\)/.test(fnBody),
+    'dom.stepChat write must be guarded by an existence check');
+});
+
+test('SPEC §30 K.7: activateKrea2ChatForResult focuses the chat input (K.4 follow-up)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const activateKrea2ChatForResult = async');
+  assertTrue(fnStart !== -1, 'activateKrea2ChatForResult must be defined');
+  const fnBody = js.slice(fnStart, fnStart + 3000);
+  // The Anima helper focuses the input so the user can type
+  // immediately. K.7 brings the Krea-2 helper to parity so the
+  // user does not have to click into the input after clicking
+  // "Refine in chat →". Mirrors activateAnimaChatForResult line
+  // 6355 in the post-success block.
+  assertTrue(/dom\.chatInput\.focus\(\)/.test(fnBody),
+    'activateKrea2ChatForResult must call dom.chatInput.focus() (parity with Anima)');
+  assertTrue(/if\s*\(\s*dom\.chatInput\s*\)/.test(fnBody),
+    'dom.chatInput.focus() must be guarded by an existence check');
+});

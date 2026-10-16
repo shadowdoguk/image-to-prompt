@@ -2216,6 +2216,154 @@ button, mirror this K.6 pattern (`dom.<model>CopyBtn`,
 `dom.<model>RegenerateBtn`, two click listeners, runXxxGenerate
 + a copy helper).
 
+### 30.6.2 Sub-slice K.7 — Krea-2 "Refine in chat" panel-show wiring (K.4 follow-up)
+
+**Status:** Added 2026-10-16 as a K.4 ship-without-wiring fix
+(see BACKLOG H6 — to be opened — + SESSION-STATE Session
+#22+ close).
+
+**Reframe.** K.4 shipped `activateKrea2ChatForResult`
+(src/app.js:2627) as a half-complete helper. It POSTs
+`/api/chat/sessions`, sets `state.chatSessionId`, calls
+`renderChatSessionSelect()` + `updateChatSendButton()`, and
+returns. The Anima parallel helper
+(`activateAnimaChatForResult` at src/app.js:6305) does the
+same PLUS prepends the session to `state.chatSessions`,
+calls `renderChatMessages(session)`, un-hides `#step-chat`
+(`dom.stepChat.hidden = false`), populates the session
+status, enables the delete button, and focuses the input.
+The Krea-2 helper skips every one of those post-success
+steps.
+
+Consequence: when the user clicks the third button at the
+bottom of the Krea-2 result panel — `#krea2-refine-in-chat-link`
+(src/index.html:387), a bare `<a href="#/chat">` — the
+hash router (src/shell.js:269) un-hides `#view-chat`, but
+the inner `#step-chat` panel (src/index.html:433, default
+`hidden`) stays hidden, and the message area is never
+populated. The user sees the view title + view-sub
+("Refine a generated prompt conversationally. Revisions
+stay proposals until you apply them.") and nothing else.
+A black background underneath, because no panel renders.
+
+This is the same shape as K.6: K.4 shipped the call site
++ the POST but skipped the UI binding. K.7 closes it by
+mirroring the Anima helper's post-success block into the
+Krea-2 helper. The intent — the chat is a ChatGPT-style
+art expert that helps the user develop the composition
+(colours, paint handling, generation technique) — is
+preserved end-to-end: the session IS already being created
+correctly; the fix is purely the panel-show + message-render
++ status-display block that the Anima helper does.
+
+**Scope.**
+
+- In scope: 5-line addition to
+  `activateKrea2ChatForResult` that mirrors
+  `activateAnimaChatForResult`'s post-success block.
+  Specifically: prepend the new session to
+  `state.chatSessions`; call `renderChatMessages(session)`;
+  set `dom.stepChat.hidden = false`; populate
+  `dom.chatSessionStatus`; enable
+  `dom.chatSessionDeleteBtn`; focus `dom.chatInput`.
+  `updateChatSendButton()` and `renderChatSessionSelect()`
+  are already called.
+- Out of scope: adding click handlers on the three
+  `<a href="#/chat">` links. The session is already
+  pre-created in `displayKrea2Result` before the user
+  ever clicks the link, so the helper fix alone is
+  sufficient. Wiring link clicks would be belt-and-
+  braces, not a fix.
+- Out of scope: Z-Image + Anima regenerate button
+  spinners (H5 parked, K.6 follow-on).
+- Out of scope: `setButtonLoading` refactor (parked).
+- Out of scope: a chat-view-enter branch in
+  `onViewEnter` that handles the "no session" case
+  (e.g. user navigates to `#/chat` via the top nav
+  tab without first generating a prompt). Different
+  cause, different scope, low frequency. **Parked
+  as H7** in BACKLOG.
+- No backend change. No new endpoint. No new contract.
+  No new dependency. No SPEC contract change.
+
+**Behaviour contract.**
+
+- Click `#krea2-refine-in-chat-link` (or the top nav
+  tab, if a session was just created) → router shows
+  `#view-chat` → `#step-chat` is un-hidden → session
+  rail shows the just-created "Krea 2" session →
+  working-prompt editor shows `original_prompt` (the
+  Krea-2 generated prompt) → message area shows the
+  empty-state hint ("No messages yet. Ask for a
+  tweak, refinement, expansion, or rewrite of any
+  section.") → send button is enabled → input is
+  focused.
+- Type a message, press Send → existing
+  `submitChatMessageStreaming` (src/app.js:6517)
+  streams from `state.llmModel` (the user's selected
+  provider/model) with the Krea-2 constraints block
+  appended server-side per ADR 0030 → streaming
+  response appears in the message area → on stream
+  end, the working prompt updates with the
+  model-suggested revision (proposal), which the user
+  can apply or decline.
+- Behaviour is identical to the Anima "Refine in
+  chat" path: same helper shape, same post-success
+  block, same downstream chat UX. The Krea-2-specific
+  difference is `model: 'krea2'` in the session body,
+  which routes the server-side system prompt through
+  the Krea-2 constraints block (no negative field per
+  P-7 invariant).
+
+**DoD.**
+
+- 4 new tests pass (SPEC §30 K.7: helper prepends to
+  `state.chatSessions` + helper calls
+  `renderChatMessages` + helper un-hides `dom.stepChat`
+  + helper focuses `dom.chatInput`). Total: 718 → 722
+  / 0 green.
+- Code review per K.1 cadence
+  (`docs/CODE-REVIEW-30-k7-krea2-chat-show.md`, two-axis
+  Standards + Spec). Polish audit
+  (`docs/POLISH-AUDIT-30-k7.md`).
+- SESSION-STATE Session #22+ row appended (closes
+  the previous row).
+- BACKLOG H6 entry — "Krea-2 chat panel-show wiring
+  (K.4 follow-up)" — opened with cross-reference to
+  K.7 and a parked H7 entry for the empty-chat-view
+  case.
+- Commit
+  `fix(slice-k.7): un-hide chat panel + render messages
+  after Krea-2 chat-session mint`.
+
+**Constraints preserved.**
+
+- The K.5 no-negative-envelope invariant is preserved.
+  The helper's POST body already includes no `negative`
+  field; the post-success block we're adding has no
+  envelope impact.
+- The K.4 chat-Apply branch is unaffected (K.7 only
+  touches the post-success block of the helper, not
+  the chat-stream / chat-apply path).
+- The pre-Generate picker dispatch is unaffected.
+- The 718-test baseline is preserved (K.7 is additive;
+  no test is modified or removed).
+- Per-model chat-session pattern from ADR 0021 is
+  preserved. The Krea-2 helper now matches the Anima
+  helper's contract one-for-one, so future refactors
+  that lift a "show chat for any model" helper (out
+  of scope for K.7) can collapse both into one
+  parameterised function.
+
+**Open questions.** None. K.7 is a small, isolated,
+additive fix. If a future slice adds a fourth model
+that needs chat activation, the helper shape is now
+settled — the K.6 + K.7 patterns together mean any
+new model is one `runXxxGenerate` + one
+`activateXxxChatForResult` + one set of result-panel
+buttons + one set of result-panel listeners + the
+K.6/K.7 panel-show post-success block.
+
 ### 30.9 References
 
 - `docs/KREA-2-PROMPTING-MANUAL.md` — the Krea 2 contract source
@@ -2264,3 +2412,24 @@ button, mirror this K.6 pattern (`dom.<model>CopyBtn`,
   positive-prose textarea), adds a working `.btn-spinner` to
   the Regenerate button, and locks both behaviours with 6 new
   tests. 712 → 718 / 0 green.
+- §30.6.2 added 2026-10-16 — K.7 sub-slice (K.4 follow-up).
+  Closes a K.4 ship-without-wiring defect:
+  `activateKrea2ChatForResult` (src/app.js:2627) was a
+  half-complete helper. It POSTed `/api/chat/sessions` and
+  set `state.chatSessionId` but skipped the post-success
+  block that the Anima parallel helper does — prepending
+  the session to `state.chatSessions`, calling
+  `renderChatMessages(session)`, un-hiding `#step-chat`,
+  populating the session status, enabling the delete
+  button, and focusing the input. Consequence: clicking
+  the "Refine in chat →" link on the Krea-2 result panel
+  sent the user to `#/chat`, where they saw only the view
+  title + view-sub on a black background — the chat
+  panel was hidden, no message area, no input, no
+  session rail. K.7 mirrors the Anima helper's
+  post-success block into the Krea-2 helper, ~5 lines,
+  and locks the four critical post-success steps with
+  4 new tests. 718 → 722 / 0 green (target). Companion
+  to K.6; together they mean the Krea-2 path is end-to-
+  end functional: generate → regenerate (K.6) → refine in
+  chat (K.7).

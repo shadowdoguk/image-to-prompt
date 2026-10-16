@@ -1810,3 +1810,87 @@ K.3's prior behaviour).
   a shared symbol" requires explicit approval).
 - The `#krea2-refine-in-chat-link` is an `<a href="#/chat">`
   and works without JS wiring. No change needed.
+
+### A11 — K.7 wiring: Krea-2 chat panel-show post-success block (K.4 follow-up)
+
+Added 2026-10-16 as a K.4 ship-without-wiring fix. K.4 shipped
+`activateKrea2ChatForResult` (src/app.js:2627) as a half-
+complete helper. It POSTs `/api/chat/sessions`, sets
+`state.chatSessionId`, calls `renderChatSessionSelect()` +
+`updateChatSendButton()`, and returns. The Anima parallel
+helper (`activateAnimaChatForResult` at src/app.js:6305) does
+the same PLUS the post-success block that brings the chat
+panel to life. K.7 closes the gap by mirroring the Anima
+post-success block into the Krea-2 helper.
+
+| Element | File | Lines | Pattern mirrored |
+|---------|------|-------|------------------|
+| `state.chatSessions` prepend | `src/app.js` | inside the `try` block of `activateKrea2ChatForResult` | Slice 2.4 Anima (line 6268) |
+| `renderChatMessages(session)` call | `src/app.js` | inside the `try` block of `activateKrea2ChatForResult` | Slice 2.4 Anima (line 6272) |
+| `dom.stepChat.hidden = false` | `src/app.js` | inside the `try` block of `activateKrea2ChatForResult` | Slice 2.4 Anima (line 6273) |
+| `dom.chatSessionStatus.hidden = false` + `textContent = formatChatSessionStatus(session)` | `src/app.js` | inside the `try` block of `activateKrea2ChatForResult` | Slice 2.4 Anima (line 6274-6277) |
+| `dom.chatSessionDeleteBtn.disabled = false` | `src/app.js` | inside the `try` block of `activateKrea2ChatForResult` | Slice 2.4 Anima (line 6278-6280) |
+| `dom.chatInput.focus()` | `src/app.js` | inside the `try` block of `activateKrea2ChatForResult` | Slice 2.4 Anima (line 6355) |
+| K.7 tests (4 new) | `tests/run-all.js` | new test block at end of file | Slice 2.4 + K.5 pattern |
+
+**Why the post-success block lives in the helper, not in
+`onViewEnter`.** Two reasons. (1) Per ADR 0021's per-model
+chat-session pattern, every model gets its own chat
+activation that runs as part of `displayXxxResult`. Putting
+the panel-show in the helper means the panel-show runs in
+lockstep with the session creation, in the same `try` block,
+with the same fire-and-forget error semantics. If the POST
+fails, the panel-show never runs. (2) The chat view's
+`onViewEnter` handler in src/shell.js:73-86 has no `chat`
+branch today; adding one would conflate "the user came from a
+result panel" with "the user is just opening the chat tab
+with no session" — a different cause with a different fix
+(parked as H7).
+
+**Why we don't add click handlers on the three
+`<a href="#/chat">` links.** The session is already pre-
+created in `displayKrea2Result` before the user ever clicks
+the link. The fix lives in the helper, not on the link. Wiring
+the link click would be belt-and-braces, not a fix.
+
+**Why the K.7 helper is now a mechanical mirror of the
+Anima helper.** The two helpers are structurally identical
+after K.7:
+
+```
+POST /api/chat/sessions  (with model-specific body)
+  → state.chatSessionId = session.id
+  → state.chatSessions = [session].concat(...)
+  → renderChatSessionSelect()
+  → renderChatMessages(session)
+  → dom.stepChat.hidden = false
+  → dom.chatSessionStatus.{hidden=false, textContent=formatChatSessionStatus(session)}
+  → dom.chatSessionDeleteBtn.disabled = false
+  → updateChatSendButton()
+  → dom.chatInput.focus()
+```
+
+The only Krea-2-specific bits are the body shape
+(`model: 'krea2'`, `variant`, `creativity`, `metadata`)
+and the `preset_name: 'Krea 2'`. A future refactor
+(out of scope for K.7) could lift this into one
+parameterised `activateChatForResult(model, data)` helper.
+Crosses the AGENTS.md "rename a shared symbol" gate;
+needs explicit user approval.
+
+**Out of scope (intentional).**
+
+- Click handlers on the three `<a href="#/chat">` links
+  (Z-Image, Anima, Krea-2). The helper fix is sufficient.
+  Belt-and-braces only.
+- An `onViewEnter('chat')` branch that handles the empty
+  case (user navigates to `#/chat` via the top nav tab with
+  no session). Different cause, different scope, low
+  frequency. Parked as **H7** in BACKLOG.
+- Z-Image + Anima regenerate button spinners (H5 parked,
+  K.6 follow-on).
+- `setButtonLoading` refactor (parked).
+- A lifted `activateChatForResult(model, data)` helper
+  (would cross the "rename a shared symbol" gate).
+- The K.7 fix does NOT change the session body. It is purely
+  a UI-binding fix, not a contract change.
