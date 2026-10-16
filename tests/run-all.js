@@ -15116,6 +15116,68 @@ test('SPEC §30 K.9: showEmptyChatState un-hides #step-chat and writes a friendl
     'empty-state text must mention the Generate → Refine in chat path so the user has actionable instructions');
 });
 
+// ─── SPEC §30 — K.12 (destructive-endpoint test fixtures) ─────────
+// ─── SPEC §30 — K.12 (destructive-endpoint test fixtures) ─────────
+// Slice H1 (SPEC §29) shipped withDataFileSnapshotted as a
+// general-purpose file-agnostic helper. The parked BACKLOG item
+// "Test fixtures for destructive endpoints" was about the Session
+// #19 wipe hazard. K.12 closes the process gap by adding 2
+// smoke tests that prove the helper works on a non-chat file
+// (data/notes.json), so a future destructive feature (delete
+// palette, delete all notes, etc.) can adopt it directly
+// without re-discovering the chat-only assumption.
+
+test('SPEC §30 K.12: withDataFileSnapshotted restores a non-chat data file after a destructive body', () => {
+  const fileRel = 'notes.json';
+  const fileAbs = path.join(PROJECT_ROOT, 'data', fileRel);
+  const existed = fs.existsSync(fileAbs);
+  const original = existed ? fs.readFileSync(fileAbs, 'utf8') : null;
+
+  try {
+    let result;
+    withDataFileSnapshotted(fileRel, () => {
+      // Destructive body: overwrite the notes file with a marker.
+      fs.writeFileSync(fileAbs, '{"__k12_smoke__":true}', 'utf8');
+      // Verify the overwrite landed.
+      assertEqual(fs.readFileSync(fileAbs, 'utf8'), '{"__k12_smoke__":true}',
+        'overwrite inside the body must be visible during the body');
+      result = 'body-ran';
+    });
+    assertEqual(result, 'body-ran', 'body must run');
+    // After the body: file must be restored to its pre-call state.
+    if (existed) {
+      assertEqual(fs.readFileSync(fileAbs, 'utf8'), original,
+        'withDataFileSnapshotted must restore the original file contents after the body');
+    } else {
+      assertTrue(!fs.existsSync(fileAbs),
+        'withDataFileSnapshotted must delete a file that did not exist before the body');
+    }
+  } finally {
+    // Belt-and-braces: restore in case the test threw.
+    if (existed) fs.writeFileSync(fileAbs, original, 'utf8');
+    else if (fs.existsSync(fileAbs)) fs.unlinkSync(fileAbs);
+  }
+});
+
+test('SPEC §30 K.12: withDataFileSnapshotted deletes a file created inside the body when none existed before', () => {
+  const fileRel = 'k12_nonexistent_smoke.json';
+  const fileAbs = path.join(PROJECT_ROOT, 'data', fileRel);
+  // Make sure the file does NOT exist before the test.
+  if (fs.existsSync(fileAbs)) fs.unlinkSync(fileAbs);
+
+  withDataFileSnapshotted(fileRel, () => {
+    // Body creates the file (simulating a destructive endpoint
+    // that creates a new state file).
+    fs.writeFileSync(fileAbs, '{"created":"inside-body"}', 'utf8');
+    assertTrue(fs.existsSync(fileAbs), 'file should exist inside the body');
+  });
+
+  assertTrue(!fs.existsSync(fileAbs),
+    'withDataFileSnapshotted must delete a file that was created inside the body when the file did not exist before the body');
+});
+
+
+// The setButtonLoading helper now accepts an array of {btn, text}
 // ─── SPEC §30 — K.10 (setButtonLoading refactor) ──────────────────
 // The setButtonLoading helper now accepts an array of {btn, text}
 // entries (or a bare button + shared text). The single-button form
