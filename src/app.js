@@ -2049,8 +2049,13 @@
       // primary generatePromptBtn is in a different panel; setting
       // loading on it gives no visible feedback from inside the Krea-2
       // result panel. Both buttons are reset in the finally.
-      setButtonLoading(dom.krea2RegenerateBtn, true, 'Regenerating…');
-      setButtonLoading(dom.generatePromptBtn, true, 'Generating…');
+      setButtonLoading(
+        [
+          { btn: dom.krea2RegenerateBtn, text: 'Regenerating…' },
+          { btn: dom.generatePromptBtn, text: 'Generating…' }
+        ],
+        true
+      );
       const fd = new FormData();
       fd.append('image', file);
       fd.append('creativity', String(state.krea2Creativity));
@@ -2072,8 +2077,13 @@
       showError(`Krea 2 generation failed: ${e.message}`);
     } finally {
       state.isGenerating = false;
-      setButtonLoading(dom.krea2RegenerateBtn, false, 'Regenerate');
-      setButtonLoading(dom.generatePromptBtn, false, 'Generate prompt');
+      setButtonLoading(
+        [
+          { btn: dom.krea2RegenerateBtn, text: 'Regenerate' },
+          { btn: dom.generatePromptBtn, text: 'Generate prompt' }
+        ],
+        false
+      );
       updateButtons();
     }
   };
@@ -2145,11 +2155,29 @@
     }
   };
 
-  const setButtonLoading = (btn, loading, text) => {
-    const textEl = btn.querySelector('.btn-text');
-    const spinnerEl = btn.querySelector('.btn-spinner');
-    if (textEl) textEl.textContent = text;
-    if (spinnerEl) spinnerEl.hidden = !loading;
+  // setButtonLoading — flip a button into / out of its loading state.
+  // Accepts either a single button or an array. For an array, each
+  // entry is either a bare button (uses the shared `text`) or an
+  // object `{ btn, text }` (per-button text). The array form is the
+  // natural shape for operations that should show feedback on more
+  // than one button (e.g. the primary + a per-panel Regenerate
+  // button) so callers don't have to make two calls and risk a
+  // partial flip if one button is missing.
+  //   setButtonLoading(btn, true, 'Generating…')           // single
+  //   setButtonLoading([btn1, btn2], true, '…')            // array, shared text
+  //   setButtonLoading([{btn: btn1, text: 'A'},
+  //                      {btn: btn2, text: 'B'}], true)     // array, per-button text
+  const setButtonLoading = (target, loading, text) => {
+    const entries = Array.isArray(target)
+      ? target.map((t) => (t && typeof t === 'object' && 'btn' in t) ? t : { btn: t, text })
+      : [{ btn: target, text }];
+    for (const { btn, text: entryText } of entries) {
+      if (!btn) continue;
+      const textEl = btn.querySelector('.btn-text');
+      const spinnerEl = btn.querySelector('.btn-spinner');
+      if (textEl) textEl.textContent = entryText;
+      if (spinnerEl) spinnerEl.hidden = !loading;
+    }
   };
 
   dom.analyzeBtn.addEventListener('click', runAnalysis);

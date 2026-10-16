@@ -2541,6 +2541,102 @@ additive fix. After K.9, the chat view always shows
 the user something actionable — never just a black
 background.
 
+### 30.6.5 Sub-slice K.10 — `setButtonLoading` refactor (accept button list)
+
+**Status:** Added 2026-10-16 as the close of the parked
+`setButtonLoading`-accepts-list refactor. The refactor
+was parked in K.6's BACKLOG entry (see
+`docs/BACKLOG.md` Item "setButtonLoading refactor —
+accept a button list").
+
+**Reframe.** K.6 introduced a parallel
+`setButtonLoading(dom.krea2RegenerateBtn, ...)` call
+inside `runKrea2Generate` so the spinner appears on the
+button the user actually clicked. The same pattern is
+needed any time a single operation needs to flip
+loading on multiple buttons. The current API forces
+two consecutive calls (one per button), which is
+clunky and risks a partial flip if one button is
+missing or the developer adds a new button later. K.10
+lifts the helper to accept either a single button OR
+an array of `{ btn, text }` entries (or bare buttons
+with a shared text).
+
+**Scope.**
+
+- In scope: lift `setButtonLoading(btn, loading, text)`
+  to `setButtonLoading(target, loading, text)` where
+  `target` is either a single button or an array.
+  Array entries are either bare buttons (use the shared
+  `text`) or `{ btn, text }` objects (per-button text).
+  Update the two dual-button pairs in `runKrea2Generate`
+  to use the array form. All other call sites
+  unchanged. 4 new SPEC §30 K.10 tests.
+- Out of scope: a deeper refactor (lift to a class,
+  add `disabling` semantics, etc.) — not warranted by
+  the current usage pattern.
+- No new endpoint. No new dependency. No SPEC contract
+  change. No HTML change.
+
+**Behaviour contract.**
+
+- Single-button form (the existing API, unchanged):
+  `setButtonLoading(btn, true, 'Generating…')` flips
+  the button into its loading state (text update +
+  spinner un-hidden). This is the 20+ existing call
+  sites.
+- Array form (the new option):
+  - Bare-button array with shared text:
+    `setButtonLoading([btn1, btn2], true, '…')` flips
+    both buttons with the same text.
+  - Object array with per-button text:
+    `setButtonLoading([{btn: btn1, text: 'A'},
+    {btn: btn2, text: 'B'}], true)` flips each button
+    with its own text. The `runKrea2Generate` dual-
+    button pair uses this form so the Krea-2
+    Regenerate button shows "Regenerating…" while the
+    primary shows "Generating…" — different text per
+    button, one call.
+- Null buttons in the array are skipped (defensive
+  against `dom.X` lookups that may be null).
+- Backward-compatible: every existing single-button
+  call site continues to work without modification.
+
+**DoD.**
+
+- 4 new tests pass. Total: 728 → 732 (the two
+  pre-existing LLM-dependent failures + one
+  environment-dependent chat-attachments test
+  excluded). K.10 itself: 4 / 4 green.
+- Code review `docs/CODE-REVIEW-30-k10-setbuttonloading-refactor.md`
+  (2-axis Standards + Spec). Polish audit
+  `docs/POLISH-AUDIT-30-k10.md`.
+- SESSION-STATE Session #22+ row appended.
+- BACKLOG parked entry closed as SHIPPED 2026-10-16.
+- Commit
+  `refactor(slice-k.10): setButtonLoading accepts a
+  button list (or single button)`.
+
+**Constraints preserved.**
+
+- The 20+ existing single-button call sites are
+  unchanged. K.10 extends the API, doesn't replace it.
+- The K.6 Krea-2 regenerate spinner behaviour is
+  preserved. The new array form produces the same
+  observable result as the old two-call form (both
+  buttons flipped to the same loading state, same
+  text per button).
+- The K.7 active-session post-success block is
+  unaffected. K.10 only touches `setButtonLoading` +
+  `runKrea2Generate`'s two `setButtonLoading` calls.
+- No new dependency. No new contract. No HTML
+  change. No CSS change. No server.js change.
+
+**Open questions.** None. K.10 is a small, isolated,
+additive refactor. Future call sites that need to
+flip multiple buttons at once can use the array form
+verbatim.
+
 ### 30.9 References
 
 - `docs/KREA-2-PROMPTING-MANUAL.md` — the Krea 2 contract source
@@ -2638,23 +2734,16 @@ background.
   728 / 0 green. No new dependency, no contract
   change, no HTML change. The active-session path is
   unchanged — K.9 is the no-session path only.
-  Closes a K.4 ship-without-wiring defect:
-  `activateKrea2ChatForResult` (src/app.js:2627) was a
-  half-complete helper. It POSTed `/api/chat/sessions` and
-  set `state.chatSessionId` but skipped the post-success
-  block that the Anima parallel helper does — prepending
-  the session to `state.chatSessions`, calling
-  `renderChatMessages(session)`, un-hiding `#step-chat`,
-  populating the session status, enabling the delete
-  button, and focusing the input. Consequence: clicking
-  the "Refine in chat →" link on the Krea-2 result panel
-  sent the user to `#/chat`, where they saw only the view
-  title + view-sub on a black background — the chat
-  panel was hidden, no message area, no input, no
-  session rail. K.7 mirrors the Anima helper's
-  post-success block into the Krea-2 helper, ~5 lines,
-  and locks the four critical post-success steps with
-  4 new tests. 718 → 722 / 0 green (target). Companion
-  to K.6; together they mean the Krea-2 path is end-to-
-  end functional: generate → regenerate (K.6) → refine in
-  chat (K.7).
+- §30.6.5 added 2026-10-16 — K.10 sub-slice (setButtonLoading refactor).
+  Lifts `setButtonLoading` to accept either a single
+  button (the existing API, unchanged) or an array of
+  `{ btn, text }` entries (or bare buttons with a shared
+  text). The array form is the natural shape for
+  operations that need to flip multiple buttons at once
+  (e.g. the Krea-2 path's primary + per-panel regenerate
+  pair). 4 new SPEC §30 K.10 tests lock both forms +
+  the `runKrea2Generate` call-site update. 728 → 732.
+  Backward-compatible: all 20+ existing single-button
+  call sites continue to work. No new dependency, no
+  contract change, no HTML change. Closes the parked
+  "setButtonLoading refactor — accept a button list"

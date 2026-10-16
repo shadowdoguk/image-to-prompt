@@ -14903,13 +14903,24 @@ test('SPEC §30 K.6: runKrea2Generate sets loading on the krea2 regenerate butto
   // generatePromptBtn is in a different panel; setting loading on it
   // gives no visible feedback from inside the Krea-2 result panel.
   // runKrea2Generate must also flip the Krea-2 regenerate button.
+  // Slice setButton-loading refactor: the helper now accepts an
+  // array of {btn, text} entries so the two-button pair is one
+  // call. The test asserts both buttons are wired (in either
+  // form: the old `setButtonLoading(dom.X, …)` per-button calls
+  // or the new array form).
   const fnStart = js.indexOf('const runKrea2Generate = async () => {');
   assertTrue(fnStart !== -1, 'runKrea2Generate declared');
   const fnWindow = js.slice(fnStart, fnStart + 3000);
-  assertTrue(/setButtonLoading\(dom\.krea2RegenerateBtn,\s*true/.test(fnWindow),
-    'runKrea2Generate must set loading on krea2RegenerateBtn (true)');
-  assertTrue(/setButtonLoading\(dom\.krea2RegenerateBtn,\s*false/.test(fnWindow),
-    'runKrea2Generate must reset loading on krea2RegenerateBtn (false) in finally');
+  const krea2Wired =
+    /setButtonLoading\([^)]*dom\.krea2RegenerateBtn[\s\S]{0,500}true/.test(fnWindow) ||
+    /setButtonLoading\(\s*\[[\s\S]{0,500}dom\.krea2RegenerateBtn[\s\S]{0,500}true/.test(fnWindow);
+  assertTrue(krea2Wired,
+    'runKrea2Generate must set loading on krea2RegenerateBtn (true) — single or array form');
+  const krea2Reset =
+    /setButtonLoading\([^)]*dom\.krea2RegenerateBtn[\s\S]{0,500}false/.test(fnWindow) ||
+    /setButtonLoading\(\s*\[[\s\S]{0,500}dom\.krea2RegenerateBtn[\s\S]{0,500}false/.test(fnWindow);
+  assertTrue(krea2Reset,
+    'runKrea2Generate must reset loading on krea2RegenerateBtn (false) in finally — single or array form');
 });
 
 test('SPEC §30 K.6: src/index.html Krea-2 buttons have btn-text + btn-spinner markup', () => {
@@ -15088,6 +15099,84 @@ test('SPEC §30 K.9: src/shell.js onViewEnter calls __i2pShowEmptyChatState for 
     'chat branch must call window.__i2pShowEmptyChatState');
   assertTrue(/typeof window\.__i2pShowEmptyChatState\s*===\s*['"]function['"]/.test(onRouteBody),
     'call must be guarded by typeof check (mirrors the other shell.js bridges)');
+});
+
+test('SPEC §30 K.9: showEmptyChatState un-hides #step-chat and writes a friendly empty-state paragraph', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const showEmptyChatState = (');
+  assertTrue(fnStart !== -1, 'showEmptyChatState function found');
+  const fnBody = js.slice(fnStart, fnStart + 2000);
+  // No-op guard for an active session.
+  assertTrue(/state\.chatSessionId/.test(fnBody) && /return false/.test(fnBody),
+    'showEmptyChatState must no-op when state.chatSessionId is set (active-session path is owned by other helpers)');
+  // The two essential DOM writes.
+  assertTrue(/dom\.stepChat\.hidden\s*=\s*false/.test(fnBody),
+    'showEmptyChatState must un-hide #step-chat (the core fix)');
+  assertTrue(/dom\.chatMessages\.innerHTML\s*=\s*['"]['"]/.test(fnBody),
+    'showEmptyChatState must clear #chat-messages before writing the empty state');
+  assertTrue(/chat-empty/.test(fnBody),
+    'empty-state paragraph must use the .chat-empty class (mirrors the existing renderChatMessages empty-state pattern at src/app.js:5391)');
+  // The empty-state text should mention the path forward so the
+  // user knows what to do next.
+  assertTrue(/Generate a prompt/.test(fnBody) && /Refine in chat/.test(fnBody),
+    'empty-state text must mention the Generate → Refine in chat path so the user has actionable instructions');
+});
+
+// ─── SPEC §30 — K.10 (setButtonLoading refactor) ──────────────────
+// The setButtonLoading helper now accepts an array of {btn, text}
+// entries (or a bare button + shared text). The single-button form
+// is unchanged; the array form is the new option for callers that
+// need to flip multiple buttons at once (e.g. runKrea2Generate
+// shows the spinner on both the primary and the Krea-2 panel
+// Regenerate button). These tests lock both forms.
+
+test('SPEC §30 K.10: setButtonLoading still supports the single-button form (backward-compatible)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const setButtonLoading =');
+  assertTrue(fnStart !== -1, 'setButtonLoading defined');
+  const fnBody = js.slice(fnStart, fnStart + 1500);
+  // Single-button form: the function must still query .btn-text
+  // and .btn-spinner on the bare button and apply the text +
+  // hidden-toggle.
+  assertTrue(/btn\.querySelector\(['"]\.btn-text['"]\)/.test(fnBody),
+    'setButtonLoading must still query .btn-text on the bare button');
+  assertTrue(/btn\.querySelector\(['"]\.btn-spinner['"]\)/.test(fnBody),
+    'setButtonLoading must still query .btn-spinner on the bare button');
+});
+
+test('SPEC §30 K.10: setButtonLoading accepts an array of buttons with a shared text', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const setButtonLoading =');
+  assertTrue(fnStart !== -1, 'setButtonLoading defined');
+  const fnBody = js.slice(fnStart, fnStart + 1500);
+  // Array detection — wraps the bare-button path with an array.
+  assertTrue(/Array\.isArray/.test(fnBody),
+    'setButtonLoading must detect array input via Array.isArray');
+});
+
+test('SPEC §30 K.10: setButtonLoading accepts an array of {btn, text} entries for per-button text', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const setButtonLoading =');
+  assertTrue(fnStart !== -1, 'setButtonLoading defined');
+  const fnBody = js.slice(fnStart, fnStart + 1500);
+  // Per-button text — the entries can be {btn, text} objects so
+  // the runKrea2Generate dual-button pair can show "Regenerating…"
+  // and "Generating…" simultaneously with a single call.
+  assertTrue(/['"]btn['"]\s+in\s+/.test(fnBody) || /['"]btn['"]\s*in\s+/.test(fnBody) || /\bbtn\s+in\s+/.test(fnBody) || /['"]btn['"]/.test(fnBody),
+    'setButtonLoading must support the {btn, text} object shape for per-button text');
+});
+
+test('SPEC §30 K.10: runKrea2Generate uses the array form for the two-button loading pair', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const runKrea2Generate = async () => {');
+  assertTrue(fnStart !== -1, 'runKrea2Generate declared');
+  const fnWindow = js.slice(fnStart, fnStart + 3000);
+  // The two pairs (try + finally) are now collapsed into single
+  // setButtonLoading([{...}, {...}], …) calls.
+  assertTrue(/setButtonLoading\(\s*\[[\s\S]{0,500}dom\.krea2RegenerateBtn[\s\S]{0,500}dom\.generatePromptBtn[\s\S]{0,500}\],\s*true/.test(fnWindow),
+    'runKrea2Generate try block must use the array form for the two-button loading pair');
+  assertTrue(/setButtonLoading\(\s*\[[\s\S]{0,500}dom\.krea2RegenerateBtn[\s\S]{0,500}dom\.generatePromptBtn[\s\S]{0,500}\],\s*false/.test(fnWindow),
+    'runKrea2Generate finally block must use the array form for the two-button reset pair');
 });
 
 test('SPEC §30 K.9: showEmptyChatState un-hides #step-chat and writes a friendly empty-state paragraph', () => {

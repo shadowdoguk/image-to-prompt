@@ -208,7 +208,7 @@ Parked items that have since shipped. The original Parked-items entry is preserv
 - **Origin:** Session #22+ (Slice K.6). The K.6 sub-slice added a parallel `setButtonLoading(dom.krea2RegenerateBtn, ...)` call inside `runKrea2Generate` so the spinner appears on the button the user actually clicked. The same pattern is needed any time a single operation needs to flip loading on multiple buttons (e.g. the primary + a per-panel regenerate button).
 - **Why parked:** Wide refactor that would rename a shared symbol (`setButtonLoading`) and update ~20+ call sites. Crosses the AGENTS.md "Adopt a new dependency, change the stack, or rename a shared symbol" gate; needs explicit user approval per methodology. Out of scope for K.6.
 - **To un-park, we'd need:** Lift to `setButtonsLoading(buttons, loading, text)` (buttons as an array). Keep `setButtonLoading(btn, loading, text)` as a thin wrapper that delegates to `setButtonsLoading([btn], ...)`. Update all call sites mechanically. ~30 LOC + ~5 tests.
-- **Estimated impact if pursued:** **LOW–MEDIUM** — code-quality improvement. No user-visible change. Recommend doing together with the H5 cosmetic pass (Z-Image + Anima regenerate button spinners) for one cohesive UX-consistency slice.
+- **Estimated impact if pursued:** **LOW–MEDIUM** — code-quality improvement. No user-visible change. Recommend doing together with the H5 cosmetic pass (Z-Image + Anima regenerate button spinners) for one cohesive UX-consistency slice. **CLOSED 2026-10-16 as Slice K.10 (commit pending).** |
 
 ### Item: Krea-2 result panel button wiring (K.3 follow-up) — SHIPPED 2026-10-16 as Slice K.6
 
