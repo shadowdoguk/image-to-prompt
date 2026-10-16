@@ -5114,6 +5114,38 @@
   // destructive bulk action. SPEC §27 A3.
   window.__i2pClearChatHistory = onChatHistoryCleared;
 
+  // ─── Slice K.9 (H7 close) — empty-chat-view handler ──────────────
+  // If the user navigates to #/chat via the top nav tab without first
+  // generating a prompt, state.chatSessionId is null. The router
+  // un-hides #view-chat but #step-chat stays hidden, so the user sees
+  // only the view title + view-sub on a black background. K.9 closes
+  // this UX gap by rendering a friendly empty state inside the chat
+  // panel when no session exists. Exposed via window.__i2pShowEmpty-
+  // ChatState so src/shell.js's onViewEnter can call it.
+  const showEmptyChatState = () => {
+    // No-op if a session is already active — the per-model chat
+    // helpers (activateAnimaChatForResult / activateKrea2ChatForResult
+    // post-success block / loadOrCreateChatSession / selectChatSession)
+    // own the active-session path. K.9 is the no-session path only.
+    if (state.chatSessionId) return false;
+    if (!dom.stepChat || !dom.chatMessages) return false;
+    // Un-hide the panel (default is hidden — see src/index.html:445).
+    dom.stepChat.hidden = false;
+    // Replace any prior message-area content with the empty-state
+    // paragraph. The chat-hint at the top of the panel (see
+    // src/index.html:447) already explains the flow.
+    dom.chatMessages.innerHTML = '';
+    const empty = document.createElement('p');
+    empty.className = 'chat-empty';
+    empty.textContent =
+      'No chat session yet. Generate a prompt in the Create view, ' +
+      'then click "Refine in chat →" on the result panel to start a ' +
+      'conversation with the art expert.';
+    dom.chatMessages.appendChild(empty);
+    return true;
+  };
+  window.__i2pShowEmptyChatState = showEmptyChatState;
+
   // SPEC §28 / IR-1 — onAnalyzeGeneratedClick handler. Thin wire:
   // validates session, POSTs to the new route, renders the assistant
   // message + Mismatch[] inline, mirrors the iteration counter

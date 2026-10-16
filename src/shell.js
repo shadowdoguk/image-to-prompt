@@ -86,6 +86,19 @@
     if (view === 'notes') {
       renderNotesView(); // fresh fetch + re-render whenever the module is opened
     }
+    if (view === 'chat') {
+      // Slice K.9 (H7 close) — if the user navigates to #/chat via the
+      // top nav tab without first generating a prompt, no chat session
+      // exists. The per-model chat helpers (activateAnimaChatForResult,
+      // activateKrea2ChatForResult post-success block) own the
+      // active-session path; this branch is the no-session path. The
+      // helper un-hides #step-chat and writes a friendly empty-state
+      // paragraph so the user sees actionable instructions instead of
+      // a black background. No-op if a session is already active.
+      if (typeof window.__i2pShowEmptyChatState === 'function') {
+        window.__i2pShowEmptyChatState();
+      }
+    }
   };
 
   // ─── UI-R7 — Models view: enable/disable models per provider ─────────────

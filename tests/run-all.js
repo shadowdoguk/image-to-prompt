@@ -15055,3 +15055,58 @@ test('SPEC §30 K.8: H5 close — slice identifier present in src/index.html', (
   assertTrue(/Slice K\.8/.test(html) || /H5 close/.test(html),
     'src/index.html identifies the fix as Slice K.8 (H5 close)');
 });
+
+// ─── SPEC §30 — K.9 (H7 close): empty-chat-view `onViewEnter` branch
+// K.7 closed the half-complete helper case (panel hidden when session
+// is created but UI binding is missing). H7 is the related-but-
+// different cause: user navigates to #/chat via the top nav tab
+// without first generating a prompt. K.9 adds a friendly empty
+// state in the chat panel so the user sees actionable instructions
+// instead of a black background.
+
+test('SPEC §30 K.9: src/app.js exposes __i2pShowEmptyChatState (H7 close)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // The function must be defined and assigned to window so shell.js
+  // can call it from onViewEnter.
+  assertTrue(/const showEmptyChatState\s*=\s*\(/.test(js),
+    'showEmptyChatState helper must be defined in src/app.js');
+  assertTrue(/window\.__i2pShowEmptyChatState\s*=\s*showEmptyChatState/.test(js),
+    'showEmptyChatState must be exposed on window.__i2pShowEmptyChatState for shell.js to call');
+});
+
+test('SPEC §30 K.9: src/shell.js onViewEnter calls __i2pShowEmptyChatState for view=chat (H7 close)', () => {
+  const shell = fs.readFileSync(path.join(PROJECT_ROOT, 'src/shell.js'), 'utf8');
+  // The onViewEnter function must have a chat branch that calls
+  // the empty-state helper. Guarded by typeof check (same pattern
+  // as the other shell.js → app.js bridges).
+  const onRouteStart = shell.indexOf('const onViewEnter = (view, params) => {');
+  assertTrue(onRouteStart !== -1, 'onViewEnter function found');
+  const onRouteBody = shell.slice(onRouteStart, onRouteStart + 2000);
+  assertTrue(/if\s*\(\s*view\s*===\s*['"]chat['"]\s*\)/.test(onRouteBody),
+    'onViewEnter must have a chat branch');
+  assertTrue(/__i2pShowEmptyChatState/.test(onRouteBody),
+    'chat branch must call window.__i2pShowEmptyChatState');
+  assertTrue(/typeof window\.__i2pShowEmptyChatState\s*===\s*['"]function['"]/.test(onRouteBody),
+    'call must be guarded by typeof check (mirrors the other shell.js bridges)');
+});
+
+test('SPEC §30 K.9: showEmptyChatState un-hides #step-chat and writes a friendly empty-state paragraph', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const showEmptyChatState = (');
+  assertTrue(fnStart !== -1, 'showEmptyChatState function found');
+  const fnBody = js.slice(fnStart, fnStart + 2000);
+  // No-op guard for an active session.
+  assertTrue(/state\.chatSessionId/.test(fnBody) && /return false/.test(fnBody),
+    'showEmptyChatState must no-op when state.chatSessionId is set (active-session path is owned by other helpers)');
+  // The two essential DOM writes.
+  assertTrue(/dom\.stepChat\.hidden\s*=\s*false/.test(fnBody),
+    'showEmptyChatState must un-hide #step-chat (the core fix)');
+  assertTrue(/dom\.chatMessages\.innerHTML\s*=\s*['"]['"]/.test(fnBody),
+    'showEmptyChatState must clear #chat-messages before writing the empty state');
+  assertTrue(/chat-empty/.test(fnBody),
+    'empty-state paragraph must use the .chat-empty class (mirrors the existing renderChatMessages empty-state pattern at src/app.js:5391)');
+  // The empty-state text should mention the path forward so the
+  // user knows what to do next.
+  assertTrue(/Generate a prompt/.test(fnBody) && /Refine in chat/.test(fnBody),
+    'empty-state text must mention the Generate → Refine in chat path so the user has actionable instructions');
+});

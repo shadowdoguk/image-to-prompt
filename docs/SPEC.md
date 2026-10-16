@@ -2438,6 +2438,109 @@ the gap.
 fix. After K.8 lands, all three Regenerate buttons
 (Z-Image, Anima, Krea-2) have the same markup shape.
 
+### 30.6.4 Sub-slice K.9 — H7 close — Empty-chat-view `onViewEnter('chat')` branch
+
+**Status:** Added 2026-10-16 as the close of H7 (a
+related-but-different cause for the same black-screen
+symptom that K.7 closed for the result-panel link path).
+
+**Reframe.** K.7 closed the case where the user clicks
+a result-panel "Refine in chat →" link and lands on an
+empty `#/chat` (the helper was a stub that POSTed the
+session but didn't un-hide the panel). H7 is the
+parallel case where the user navigates to `#/chat` via
+the **top nav tab** without first generating a prompt:
+`state.chatSessionId` is null, the router un-hides
+`#view-chat`, but `#step-chat` stays `hidden` (default
+in src/index.html:445). Same black-screen symptom
+(view title + view-sub only, no panel). Different cause
+(no session to populate, not a half-complete helper).
+K.7 explicitly did not address this — P-13 in
+PRE-MORTEM §30.6.2 forbids adding the `onViewEnter`
+chat branch as part of K.7 to keep the scope tight.
+K.9 closes the gap.
+
+**Scope.**
+
+- In scope: 1 new function `showEmptyChatState` in
+  src/app.js (~25 lines including comments), exposed
+  via `window.__i2pShowEmptyChatState`. 1 new branch
+  in `onViewEnter` in src/shell.js (~10 lines). 3 new
+  SPEC §30 K.9 tests.
+- Out of scope: a full "create-on-demand" chat session
+  (the user must explicitly generate a prompt first
+  — that's the documented primary path). Active-session
+  panel-show is owned by K.7 + Slice 2.4 + loadOrCreate-
+  ChatSession + selectChatSession; K.9 is the
+  no-session path only.
+- No new endpoint. No new dependency. No SPEC contract
+  change. No HTML change (the panel + message area +
+  form all already exist; K.9 just un-hides + writes
+  text).
+
+**Behaviour contract.**
+
+- User clicks the top nav "Chat" tab with no session →
+  router shows `#view-chat` → `onViewEnter('chat')` →
+  `__i2pShowEmptyChatState()` is called →
+  `state.chatSessionId` is null → `dom.stepChat.hidden =
+  false` → `#chat-messages` is cleared → a friendly
+  paragraph is written into `#chat-messages` with
+  class `chat-empty` and text: "No chat session yet.
+  Generate a prompt in the Create view, then click
+  'Refine in chat →' on the result panel to start a
+  conversation with the art expert." → user sees a
+  clear next-step instruction instead of a black
+  background.
+- If a session IS active (user came from a result panel
+  or picked a session from the dropdown), the function
+  is a no-op (returns false). The per-model chat helpers
+  own the active-session path.
+- The form below the message area remains visible but
+  the submit handlers already guard with
+  `if (!state.chatSessionId)` and show a status message
+  ("Open a chat session first."), so typing + Send is
+  safe (it surfaces a status, doesn't crash).
+
+**DoD.**
+
+- 3 new tests pass. Total: 725 → 728 / 0 green.
+- Code review `docs/CODE-REVIEW-30-k9-h7-empty-chat.md`
+  (2-axis Standards + Spec). Polish audit
+  `docs/POLISH-AUDIT-30-k9.md`.
+- SESSION-STATE Session #22+ row appended.
+- BACKLOG H7 closure — parked entry closed as
+  SHIPPED 2026-10-16.
+- Commit
+  `fix(slice-k.9): render empty-state in chat view when
+  no session exists (H7 close)`.
+
+**Constraints preserved.**
+
+- The K.7 active-session post-success block is
+  unchanged. K.9 is the no-session path; the two are
+  orthogonal. When a session exists, K.9 returns false
+  immediately and the K.7 path is the only one that
+  writes to `#step-chat` / `#chat-messages`.
+- The K.4 / K.5 / K.7 invariants (no-negative
+  envelope, per-model chat-session pattern, chat-Apply
+  branch) are preserved. K.9 does not touch the
+  helper bodies, the chat-stream path, the chat-apply
+  path, or the picker dispatch.
+- The 725-test baseline is preserved (K.9 is additive;
+  no test was modified or removed).
+- The shell.js → app.js bridge pattern (the
+  `window.__i2pXxx` exports) is preserved. K.9 adds
+  one new bridge (`__i2pShowEmptyChatState`),
+  guarded by `typeof` check on the shell.js side
+  (mirrors `__i2pClearChatHistory` at src/app.js:5115
+  and `__i2pAnalyzeGenerated` at src/app.js:5163).
+
+**Open questions.** None. K.9 is a small, isolated,
+additive fix. After K.9, the chat view always shows
+the user something actionable — never just a black
+background.
+
 ### 30.9 References
 
 - `docs/KREA-2-PROMPTING-MANUAL.md` — the Krea 2 contract source
@@ -2518,6 +2621,23 @@ fix. After K.8 lands, all three Regenerate buttons
   was visible. K.8 is a tiny HTML-only fix: add
   `btn-text` + `btn-spinner` to both buttons. 3 new
   markup-presence tests. 722 → 725 / 0 green.
+- §30.6.4 added 2026-10-16 — K.9 sub-slice (H7 close).
+  Closes the related-but-different cause for the same
+  black-screen symptom that K.7 closed for the
+  result-panel link path: if the user navigates to
+  `#/chat` via the top nav tab without first generating
+  a prompt, `state.chatSessionId` is null and
+  `onViewEnter` had no chat branch — view title +
+  view-sub only on a black background. K.9 adds
+  `showEmptyChatState()` in src/app.js (exposed via
+  `window.__i2pShowEmptyChatState`) and an
+  `onViewEnter('chat')` branch in src/shell.js that
+  calls it. The function un-hides `#step-chat` and
+  writes a friendly next-step instruction into
+  `#chat-messages`. 3 new SPEC §30 K.9 tests. 725 →
+  728 / 0 green. No new dependency, no contract
+  change, no HTML change. The active-session path is
+  unchanged — K.9 is the no-session path only.
   Closes a K.4 ship-without-wiring defect:
   `activateKrea2ChatForResult` (src/app.js:2627) was a
   half-complete helper. It POSTed `/api/chat/sessions` and

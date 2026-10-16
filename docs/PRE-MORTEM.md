@@ -1160,6 +1160,94 @@ HTML-only fix that brings the two buttons to parity.
   aria-hidden="true"` attributes. No stylistic
   divergence.
 
+## §30.6.4 pre-mortem — K.9 wiring (H7 close)
+
+Added 2026-10-16 as the close of H7. H7 was parked in
+K.7's P-13 — different cause (no session, not a
+half-complete helper) but same black-screen symptom.
+K.9 adds the `onViewEnter('chat')` branch that P-13
+explicitly deferred.
+
+### Risks
+
+- **R-17 (LOW):** Calling `showEmptyChatState` from
+  `onViewEnter` on every entry to `#/chat` (even when
+  a session is active) adds a function call per
+  navigation. The function is a no-op when
+  `state.chatSessionId` is set, so the cost is one
+  boolean check + one early `return false` per
+  navigation. Negligible. *Mitigation:* the function
+  is intentionally cheap; no caching needed.
+
+- **R-18 (LOW):** The empty-state paragraph overwrites
+  any prior `#chat-messages` content. If the user has
+  a session active, navigates away, and navigates back
+  via the nav tab, the active-session path's
+  `renderChatMessages` (or the new K.7 post-success
+  block) re-runs AFTER `showEmptyChatState` returns
+  false, so the active messages survive. *Mitigation:*
+  the early `return false` in `showEmptyChatState`
+  ensures the function never touches `#chat-messages`
+  when a session is active. Test `SPEC §30 K.9:
+  showEmptyChatState un-hides #step-chat` locks the
+  no-op guard pattern.
+
+- **R-19 (LOW):** The new `__i2pShowEmptyChatState`
+  bridge adds one more `window.__i2pXxx` surface to
+  the app.js IIFE. If a future refactor centralises
+  these bridges, the count of `window.__i2p*` exports
+  is currently 3 (ClearHistory, AnalyzeGenerated,
+  ShowEmptyChatState) and growing. *Mitigation:* this
+  is the established bridge pattern; not a new
+  concern. The bridges are stable, documented, and
+  guarded by `typeof` checks on the shell.js side.
+
+### Pre-commitments
+
+- **P-15:** K.9's `showEmptyChatState` MUST no-op
+  (return `false`) when `state.chatSessionId` is set.
+  The active-session path is owned by K.7 + Slice
+  2.4 + loadOrCreateChatSession + selectChatSession.
+  Test coverage: 1 of 3 K.9 tests asserts the
+  no-op-when-active pattern.
+
+- **P-16:** K.9's empty-state text MUST mention
+  the two-step flow ("Generate a prompt in the
+  Create view, then click 'Refine in chat →' on the
+  result panel") so the user has actionable
+  instructions. The current text is verbatim from
+  the SPEC; future polish may reword but MUST
+  preserve the two-step reference.
+
+### Kill criteria
+
+- **K-12:** If any of the 725 baseline tests flips
+  red during K.9 (K.9 is additive — it adds 3 new
+  tests but must not break any existing one), the
+  slice does not merge. K.9 verified at 728 / 0
+  green on 2026-10-16; criterion met.
+
+- **K-13:** If clicking the top nav "Chat" tab
+  without first generating a prompt does NOT show
+  the friendly empty-state paragraph in
+  `#chat-messages` on a captured browser session
+  (i.e. manual smoke fails), the slice does not
+  merge. The 3 unit tests lock the function
+  presence + the shell.js call + the DOM writes;
+  the smoke confirms the wiring renders correctly
+  in a real browser.
+
+### Out of scope (intentional)
+
+- Auto-creating a chat session on empty view
+  entrance. Different scope; would contradict the
+  per-model chat-session pattern (ADR 0021).
+- Auto-navigating to the Create view. Aggressive
+  UX intervention not warranted by the symptom.
+- Hiding the chat form below the empty state. The
+  submit handlers already guard with
+  `if (!state.chatSessionId)`.
+
 ### Kill criteria
 
 - **K-10:** If any of the 722 baseline tests flips

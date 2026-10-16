@@ -1927,3 +1927,73 @@ three: "regenerate with the same image + the same model
 settings". Now that the markup is uniform, a future
 slice that adds a 4th model can copy the markup
 verbatim from any of the three panels.
+
+### A13 — K.9 wiring: Empty-chat-view `onViewEnter('chat')` branch (H7 close)
+
+Added 2026-10-16 as the close of H7 — a related-but-
+different cause for the same black-screen symptom that
+K.7 closed for the result-panel link path. K.7 closed
+the case where the user clicks a result-panel "Refine in
+chat →" link and lands on an empty `#/chat` (the
+`activateKrea2ChatForResult` helper was a stub that
+POSTed the session but didn't un-hide the panel). H7 is
+the parallel case where the user navigates to `#/chat`
+via the **top nav tab** without first generating a
+prompt. Same symptom, different cause.
+
+| Element | File | Lines | Pattern mirrored |
+|---------|------|-------|------------------|
+| `showEmptyChatState` helper | `src/app.js` | new function, exposed via `window.__i2pShowEmptyChatState` | `window.__i2pClearChatHistory` at src/app.js:5115 |
+| `onViewEnter('chat')` branch | `src/shell.js` | new branch in `onViewEnter` (the only one in the function besides `library` / `providers` / `models` / `notes`) | `onViewEnter` for `library` at src/shell.js:74-76 |
+| K.9 tests (3 new) | `tests/run-all.js` | new test block at end of file | K.7 / K.8 pattern |
+
+**Why a new shell.js → app.js bridge, not inline in
+shell.js.** shell.js is pure routing — it has no DOM
+lookups for the chat panel (those live in the app.js
+`dom` block at src/app.js:297-303). The new bridge
+mirrors the existing `__i2pClearChatHistory` (shell.js
+Settings modal → app.js bulk DELETE) and
+`__i2pAnalyzeGenerated` (shell.js Analyze button →
+app.js click handler) pattern. Adding the bridge
+keeps shell.js thin.
+
+**Why no-op when `state.chatSessionId` is set.** The
+active-session path is owned by four other call sites:
+`loadOrCreateChatSession` (src/app.js:6273), K.7's
+`activateKrea2ChatForResult` post-success block
+(src/app.js:2658), Slice 2.4's
+`activateAnimaChatForResult` post-success block
+(src/app.js:6273-6282), and the post-delete
+`selectChatSession` path (src/app.js:6350). K.9's
+`showEmptyChatState` is the no-session path only — it
+returns `false` immediately if a session is active, so
+the active-session helpers retain exclusive ownership of
+the panel-show sequence.
+
+**Why the empty-state text mentions "Generate a prompt
+in the Create view, then click Refine in chat".** The
+two-step flow (generate → refine in chat) is the
+documented primary path. The user landed on `#/chat`
+without taking step 1, so the empty state points them
+to step 1 explicitly. Same instructional pattern as
+the existing chat-hint at src/index.html:447 ("Discuss
+the prompt, ask for recommendations, or request a
+change").
+
+**Out of scope (intentional).**
+
+- Auto-creating a chat session on empty view entrance.
+  Different scope (and would contradict the per-model
+  chat-session pattern from ADR 0021, which expects
+  sessions to be created by the model-specific display
+  helpers, not by the view-entrance handler).
+- Auto-navigating the user to the Create view. Even
+  more aggressive UX intervention; not warranted by
+  the symptom (which is just "panel hidden, no
+  content").
+- Hiding the chat form below the empty state. The
+  submit handlers already guard with
+  `if (!state.chatSessionId)` and show a status
+  message; the form is informative when visible
+  (the user can see the field + Send button + the
+  field's placeholder text).
