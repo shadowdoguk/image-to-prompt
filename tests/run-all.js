@@ -3400,21 +3400,32 @@ test('Slice 2.4: displayAnimaResult fires activateAnimaChatForResult (ADR 0021)'
     'displayAnimaResult must catch and log activation failures (fire-and-forget)');
 });
 
-test('Slice 2.4: activateAnimaChatForResult defined and uses Anima envelope (ADR 0021)', () => {
+test('Slice 2.4: activateAnimaChatForResult defined and uses Anima envelope (ADR 0021; K.11 lifts the post-success block to runChatActivationSession)', () => {
   const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // K.11 — the per-model helper now delegates to
+  // runChatActivationSession. The Anima-specific bits (body shape)
+  // live in activateAnimaChatForResult; the shared flow (POST +
+  // state + post-success block) lives in runChatActivationSession.
   const fnStart = js.indexOf('const activateAnimaChatForResult = async');
   assertTrue(fnStart > 0, 'activateAnimaChatForResult must be defined');
-  const fnBody = js.slice(fnStart, fnStart + 3000);
+  const fnBody = js.slice(fnStart, fnStart + 2000);
   assertTrue(/data\.positive/.test(fnBody),
     'activateAnimaChatForResult must use data.positive as the prompt');
   assertTrue(/model: 'anima'/.test(fnBody),
     'activateAnimaChatForResult must send model: anima');
   assertTrue(/preset_anima_internal/.test(fnBody),
     'activateAnimaChatForResult must use the placeholder preset_id');
-  assertTrue(/\/api\/chat\/sessions/.test(fnBody),
-    'activateAnimaChatForResult must POST to /api/chat/sessions');
-  assertTrue(/state\.chatSessionId = session\.id/.test(fnBody),
-    'activateAnimaChatForResult must set state.chatSessionId');
+  // K.11 — delegate to the lifted helper.
+  assertTrue(/runChatActivationSession\(/.test(fnBody),
+    'activateAnimaChatForResult must delegate to runChatActivationSession (K.11 refactor)');
+  // The lifted helper owns the POST + state + post-success block.
+  const liftedStart = js.indexOf('const runChatActivationSession = async');
+  assertTrue(liftedStart > 0, 'runChatActivationSession must be defined');
+  const liftedBody = js.slice(liftedStart, liftedStart + 3000);
+  assertTrue(/\/api\/chat\/sessions/.test(liftedBody),
+    'runChatActivationSession must POST to /api/chat/sessions');
+  assertTrue(/state\.chatSessionId = session\.id/.test(liftedBody),
+    'runChatActivationSession must set state.chatSessionId');
 });
 
 test('Bug fix (Anima drag-drop upload): runAnimaGenerate uses state.currentFile, not document.querySelector (ADR 0021)', () => {
@@ -14964,64 +14975,47 @@ test('SPEC §30 K.6: K.3 follow-up identifier present in src/app.js + src/index.
 // from Slice 2.4 (formatChatSessionStatus, delete-btn enable,
 // token-reminder banner, etc. are tested there).
 
-test('SPEC §30 K.7: activateKrea2ChatForResult prepends new session to state.chatSessions (K.4 follow-up)', () => {
+test('SPEC §30 K.7: Krea-2 chat-session activation prepends + renders + un-hides + focuses (via runChatActivationSession, K.11)', () => {
   const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
-  const fnStart = js.indexOf('const activateKrea2ChatForResult = async');
-  assertTrue(fnStart !== -1, 'activateKrea2ChatForResult must be defined');
-  const fnBody = js.slice(fnStart, fnStart + 3000);
-  // Mirrors activateAnimaChatForResult's prepend pattern (slice 2.4):
-  //   state.chatSessions = [session].concat(
-  //     state.chatSessions.filter((s) => s.id !== session.id)
-  //   );
-  assertTrue(/state\.chatSessions\s*=\s*\[session\]\.concat\(\s*state\.chatSessions\.filter\(\(s\)\s*=>\s*s\.id\s*!==\s*session\.id\s*\)\s*\)/.test(fnBody),
-    'activateKrea2ChatForResult must prepend the new session to state.chatSessions (mirrors Anima)');
-});
-
-test('SPEC §30 K.7: activateKrea2ChatForResult calls renderChatMessages(session) (K.4 follow-up)', () => {
-  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
-  const fnStart = js.indexOf('const activateKrea2ChatForResult = async');
-  assertTrue(fnStart !== -1, 'activateKrea2ChatForResult must be defined');
-  const fnBody = js.slice(fnStart, fnStart + 3000);
-  // The K.4 stub forgot to call renderChatMessages, so even if the
-  // panel had been un-hidden, #chat-messages would have been empty.
-  assertTrue(/renderChatMessages\(session\)/.test(fnBody),
-    'activateKrea2ChatForResult must call renderChatMessages(session) so the message area populates');
-  // Guarded by the typeof check pattern (function may be hoisted but
-  // is referenced through the conditional to avoid TDZ in test envs).
-  assertTrue(/typeof renderChatMessages\s*===\s*['"]function['"]/.test(fnBody),
-    'renderChatMessages call must be guarded by typeof check (matches the existing pattern for renderChatSessionSelect + updateChatSendButton)');
-});
-
-test('SPEC §30 K.7: activateKrea2ChatForResult un-hides #step-chat (K.4 follow-up)', () => {
-  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
-  const fnStart = js.indexOf('const activateKrea2ChatForResult = async');
-  assertTrue(fnStart !== -1, 'activateKrea2ChatForResult must be defined');
-  const fnBody = js.slice(fnStart, fnStart + 3000);
-  // The core bug: #step-chat is hidden by default (src/index.html:433)
-  // and is only un-hidden by the post-success block that K.4 forgot.
-  // Without this line, the user lands on #/chat and sees only the
-  // view title + view-sub on a black background.
-  assertTrue(/dom\.stepChat\.hidden\s*=\s*false/.test(fnBody),
-    'activateKrea2ChatForResult must set dom.stepChat.hidden = false (the core panel-show fix)');
-  // And must guard against the dom lookup being missing.
-  assertTrue(/if\s*\(\s*dom\.stepChat\s*\)/.test(fnBody),
+  // K.7 originally added the post-success block directly into
+  // activateKrea2ChatForResult. K.11 lifted that block into
+  // runChatActivationSession (the per-model helpers now just
+  // build the body and delegate). The K.7 invariants are
+  // preserved — they're just enforced inside the lifted helper
+  // now, which both Anima + Krea-2 paths use.
+  const liftedStart = js.indexOf('const runChatActivationSession = async');
+  assertTrue(liftedStart !== -1, 'runChatActivationSession (K.11 lifted helper) must be defined');
+  const liftedBody = js.slice(liftedStart, liftedStart + 3000);
+  // K.7.1: state.chatSessions prepend (mirrors Anima).
+  assertTrue(/state\.chatSessions\s*=\s*\[session\]\.concat\(\s*state\.chatSessions\.filter\(\(s\)\s*=>\s*s\.id\s*!==\s*session\.id\s*\)\s*\)/.test(liftedBody),
+    'runChatActivationSession must prepend the new session to state.chatSessions (K.7 invariant preserved through K.11 lift)');
+  // K.7.2: renderChatMessages(session).
+  assertTrue(/renderChatMessages\(session\)/.test(liftedBody),
+    'runChatActivationSession must call renderChatMessages(session) (K.7 invariant preserved through K.11 lift)');
+  assertTrue(/typeof renderChatMessages\s*===\s*['"]function['"]/.test(liftedBody),
+    'renderChatMessages call must be guarded by typeof check');
+  // K.7.3: dom.stepChat.hidden = false (the core panel-show fix).
+  assertTrue(/dom\.stepChat\.hidden\s*=\s*false/.test(liftedBody),
+    'runChatActivationSession must set dom.stepChat.hidden = false (K.7 invariant preserved through K.11 lift)');
+  assertTrue(/if\s*\(\s*dom\.stepChat\s*\)/.test(liftedBody),
     'dom.stepChat write must be guarded by an existence check');
-});
-
-test('SPEC §30 K.7: activateKrea2ChatForResult focuses the chat input (K.4 follow-up)', () => {
-  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
-  const fnStart = js.indexOf('const activateKrea2ChatForResult = async');
-  assertTrue(fnStart !== -1, 'activateKrea2ChatForResult must be defined');
-  const fnBody = js.slice(fnStart, fnStart + 3000);
-  // The Anima helper focuses the input so the user can type
-  // immediately. K.7 brings the Krea-2 helper to parity so the
-  // user does not have to click into the input after clicking
-  // "Refine in chat →". Mirrors activateAnimaChatForResult line
-  // 6355 in the post-success block.
-  assertTrue(/dom\.chatInput\.focus\(\)/.test(fnBody),
-    'activateKrea2ChatForResult must call dom.chatInput.focus() (parity with Anima)');
-  assertTrue(/if\s*\(\s*dom\.chatInput\s*\)/.test(fnBody),
+  // K.7.4: dom.chatInput.focus().
+  assertTrue(/dom\.chatInput\.focus\(\)/.test(liftedBody),
+    'runChatActivationSession must call dom.chatInput.focus() (K.7 invariant preserved through K.11 lift)');
+  assertTrue(/if\s*\(\s*dom\.chatInput\s*\)/.test(liftedBody),
     'dom.chatInput.focus() must be guarded by an existence check');
+  // K.11 itself: the per-model helpers must delegate to the lifted
+  // helper. This locks the K.11 refactor — without this assertion,
+  // a future developer could move the post-success block back into
+  // the per-model helpers and break the dedup.
+  const krea2Start = js.indexOf('const activateKrea2ChatForResult = async');
+  const krea2Body = js.slice(krea2Start, krea2Start + 2000);
+  assertTrue(/runChatActivationSession\(/.test(krea2Body),
+    'activateKrea2ChatForResult must delegate to runChatActivationSession (K.11)');
+  const animaStart = js.indexOf('const activateAnimaChatForResult = async');
+  const animaBody = js.slice(animaStart, animaStart + 2000);
+  assertTrue(/runChatActivationSession\(/.test(animaBody),
+    'activateAnimaChatForResult must delegate to runChatActivationSession (K.11)');
 });
 
 // ─── SPEC §30 — K.8 (H5 close): Z-Image + Anima regenerate spinners ──

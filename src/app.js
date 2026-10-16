@@ -2647,64 +2647,83 @@
     }
   }
 
+  // ─── Slice K.11 — lifted chat-activation helper (per-model body) ─
+  // The per-model chat-activation flow (POST /api/chat/sessions,
+  // set state.chatSessionId, prepend to state.chatSessions, un-hide
+  // #step-chat, render messages, populate status, enable delete
+  // button, focus input) is identical across models. What differs
+  // per model is ONLY the request body. runChatActivationSession
+  // owns the unified flow; the per-model helpers (Anima + Krea-2)
+  // build the body and call this. Pre-K.11, both helpers had ~20
+  // lines of identical post-success code; K.11 collapses them.
+  const runChatActivationSession = async ({ modelName, body }) => {
+    let session;
+    try {
+      session = await apiCall('/api/chat/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } catch (e) {
+      // Soft-state: chat session failures must not clobber the
+      // displayed result. The chat-limit case surfaces a warning
+      // (mirrors activateAnimaChatForResult's pre-K.11 behaviour);
+      // everything else is silenced (the result panel is still
+      // functional, the user can refresh to retry).
+      console.warn(`[${modelName} chat activation] ${e.message}`);
+      const isChatLimit = /chat session limit reached/i.test(e.message);
+      if (isChatLimit) {
+        showError(`Chat history is full (200 sessions). Delete older conversations from the picker above to start a new one.`, { severity: 'warning' });
+      }
+      return null;
+    }
+    state.chatSessionId = session.id;
+    state.chatSessions = [session].concat(
+      state.chatSessions.filter((s) => s.id !== session.id)
+    );
+    if (typeof renderChatSessionSelect === 'function') renderChatSessionSelect();
+    if (typeof renderChatMessages === 'function') renderChatMessages(session);
+    if (dom.stepChat) dom.stepChat.hidden = false;
+    if (dom.chatSessionStatus) {
+      dom.chatSessionStatus.hidden = false;
+      dom.chatSessionStatus.textContent = formatChatSessionStatus(session);
+    }
+    if (dom.chatSessionDeleteBtn) {
+      dom.chatSessionDeleteBtn.disabled = false;
+    }
+    if (typeof updateChatSendButton === 'function') updateChatSendButton();
+    if (dom.chatInput) dom.chatInput.focus();
+    return session;
+  };
+
   // ─── Slice K.4 stub — chat activation for Krea-2 ───
   // K.4 mirrors activateAnimaChatForResult. K.3 ships the function
   // shell + the `if (typeof ... === 'function')` guard in
   // displayKrea2Result so the chat-activation call is wired but
-  // doesn't ship as a no-op. K.4 lands the helper body.
+  // doesn't ship as a no-op. K.4 lands the helper body. K.7
+  // appends the post-success block. K.11 lifts the post-success
+  // block into runChatActivationSession.
   const activateKrea2ChatForResult = async (data) => {
     if (!data || !data.prompt) return;
     // K.4 — chat session anchor: POST /api/chat/sessions with
     // model='krea2', variant=data.variant, creativity=data.creativity,
-    // current_prompt=data.prompt. Mirrors activateAnimaChatForResult
-    // in slice 2.4.
-    try {
-      const session = await apiCall('/api/chat/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          preset_id: null,
-          preset_name: 'Krea 2',
-          original_prompt: data.prompt,
-          current_prompt: data.prompt,
-          pending_prompt: null,
-          model: 'krea2',
-          variant: data.variant || state.krea2Variant,
-          creativity: data.creativity ?? state.krea2Creativity,
-          metadata: { provider: state.provider, llm_model: state.llmModel }
-        })
-      });
-      state.chatSessionId = session.id;
-      // K.7 — K.4 follow-up. K.4 shipped this helper as a stub
-      // that only POSTed + set state.chatSessionId + repainted
-      // the session select. The post-success block that brings
-      // the chat panel to life (mirror of activateAnimaChatForResult
-      // at slice 2.4) was missing. Consequence: clicking
-      // #krea2-refine-in-chat-link sent the user to #/chat where
-      // #step-chat was still hidden and #chat-messages was empty —
-      // view title + view-sub on a black background. K.7 closes
-      // the gap by appending the Anima post-success block.
-      state.chatSessions = [session].concat(
-        state.chatSessions.filter((s) => s.id !== session.id)
-      );
-      if (typeof renderChatSessionSelect === 'function') renderChatSessionSelect();
-      if (typeof renderChatMessages === 'function') renderChatMessages(session);
-      if (dom.stepChat) dom.stepChat.hidden = false;
-      if (dom.chatSessionStatus) {
-        dom.chatSessionStatus.hidden = false;
-        dom.chatSessionStatus.textContent = formatChatSessionStatus(session);
+    // current_prompt=data.prompt. K.11 — body construction is the
+    // only per-model bit left in this helper; the rest lives in
+    // runChatActivationSession.
+    await runChatActivationSession({
+      modelName: 'krea2',
+      body: {
+        preset_id: null,
+        preset_name: 'Krea 2',
+        original_prompt: data.prompt,
+        current_prompt: data.prompt,
+        pending_prompt: null,
+        model: 'krea2',
+        variant: data.variant || state.krea2Variant,
+        creativity: data.creativity ?? state.krea2Creativity,
+        metadata: { provider: state.provider, llm_model: state.llmModel }
       }
-      if (dom.chatSessionDeleteBtn) {
-        dom.chatSessionDeleteBtn.disabled = false;
-      }
-      if (typeof updateChatSendButton === 'function') updateChatSendButton();
-      if (dom.chatInput) dom.chatInput.focus();
-    } catch (e) {
-      // Chat activation is best-effort; a 4xx/5xx here must not
-      // clobber the displayed result. Surface as console.warn
-      // (mirrors activateAnimaChatForResult's catch).
-      console.warn(`[krea2 chat activation] ${e.message}`);
-    }
+    });
   };
 
   // Slice 2.3 — Anima regenerate button re-uses the same dispatch path.
@@ -6385,58 +6404,23 @@
   const activateAnimaChatForResult = async (data) => {
     const positive = (data && typeof data.positive === 'string') ? data.positive : '';
     if (!positive.trim()) return;
-
-    const body = {
-      prompt: positive,
-      preset_id: 'preset_anima_internal', // placeholder; not a real preset
-      preset_name: 'Anima',
-      run_id: state.currentRunId || null,
-      analysis_snapshot: data && typeof data.negative === 'string'
-        ? { negative: data.negative, variant: data.variant || state.animaVariant }
-        : null,
-      // Slice 2.4 — model: 'anima' so the server dispatches to the
-      // Anima constraints block. The validator accepts the field.
-      model: 'anima'
-    };
-
-    let session;
-    try {
-      session = await apiCall('/api/chat/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-    } catch (e) {
-      // Soft-state: chat session failures must not clobber the result.
-      console.warn('Could not start Anima chat session:', e.message);
-      const isChatLimit = /chat session limit reached/i.test(e.message);
-      if (isChatLimit) {
-        showError(`Chat history is full (200 sessions). Delete older conversations from the picker above to start a new one.`, { severity: 'warning' });
-      } else {
-        // Other failures (preset_id placeholder might not be valid) are
-        // silenced — the Anima result panel is still functional, and
-        // the user can refresh to retry. Caller already logged the
-        // warning.
+    // Slice 2.4 — model: 'anima' so the server dispatches to the
+    // Anima constraints block. The validator accepts the field.
+    // K.11 — body construction is the only per-model bit left in
+    // this helper; the rest lives in runChatActivationSession.
+    await runChatActivationSession({
+      modelName: 'anima',
+      body: {
+        prompt: positive,
+        preset_id: 'preset_anima_internal', // placeholder; not a real preset
+        preset_name: 'Anima',
+        run_id: state.currentRunId || null,
+        analysis_snapshot: data && typeof data.negative === 'string'
+          ? { negative: data.negative, variant: data.variant || state.animaVariant }
+          : null,
+        model: 'anima'
       }
-      return;
-    }
-
-    state.chatSessionId = session.id;
-    state.chatSessions = [session].concat(
-      state.chatSessions.filter((s) => s.id !== session.id)
-    );
-    renderChatSessionSelect();
-    renderChatMessages(session);
-    if (dom.stepChat) dom.stepChat.hidden = false;
-    if (dom.chatSessionStatus) {
-      dom.chatSessionStatus.hidden = false;
-      dom.chatSessionStatus.textContent = formatChatSessionStatus(session);
-    }
-    if (dom.chatSessionDeleteBtn) {
-      dom.chatSessionDeleteBtn.disabled = false;
-    }
-    updateChatSendButton();
-    if (dom.chatInput) dom.chatInput.focus();
+    });
   };
 
   /**
