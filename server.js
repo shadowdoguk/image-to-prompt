@@ -12,6 +12,7 @@
 require('dotenv').config();
 
 const express = require('express');
+const compression = require('compression');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -2488,6 +2489,24 @@ const applyDirectiveUpdate = (directive, body) => {
 // Middleware
 // ─────────────────────────────────────────────────────────────────────────────
 
+// SPEC §30 K.13 — gzip/deflate responses for any body that the
+// compression middleware deems compressible (text, JSON, SVG, etc.).
+// Sits before the static handlers so the bundled JS/CSS also gets
+// compressed on the wire. Skipped for already-compressed assets
+// (PNG/JPEG/WebP) by the default content-type filter.
+app.use(compression());
+// SPEC §30 K.13 — long-lived Cache-Control on versioned static
+// assets. The frontend uses no-build / src/ paths, so a 1-day
+// max-age is a safe default; bumping it is a one-line change when
+// we add content hashing to the bundle. HTML and JSON API
+// responses are deliberately exempt (always-fresh).
+const STATIC_ASSET_CACHE_MS = 86400; // 1 day
+app.use((req, res, next) => {
+  if (req.method === 'GET' && /\.(js|css|woff2?|svg|png|jpg|jpeg|webp|ico)$/i.test(req.path)) {
+    res.setHeader('Cache-Control', `public, max-age=${STATIC_ASSET_CACHE_MS}`);
+  }
+  next();
+});
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'src')));

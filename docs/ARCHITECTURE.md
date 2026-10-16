@@ -1997,3 +1997,55 @@ change").
   message; the form is informative when visible
   (the user can see the field + Send button + the
   field's placeholder text).
+
+### A14 — K.13 server perf: compression + Cache-Control (POLISH-AUDIT P1/P2 close)
+
+```
+HTTP request
+  ↓
+[compression()]                           ← K.13 P1
+   (gzip/deflate; Vary: Accept-Encoding)
+  ↓
+[Cache-Control static-asset middleware]   ← K.13 P2
+   (sets public, max-age=86400 on .js/.css/woff/svg/png/jpg/webp/ico)
+  ↓
+[express.json / urlencoded]
+  ↓
+[express.static: /src/...]
+[express.static: /sortable.min.js]
+[express.static: /]
+  ↓
+[API routes...]
+```
+
+**Key decisions:**
+
+- **`compression()` before the static handlers.** The
+  static bundle is the largest response on the wire
+  (≈1.2 MB JS + 60 KB CSS). Compressing it is the
+  single biggest transport win; the middleware
+  is content-type aware and skips already-compressed
+  assets (images, fonts) automatically.
+- **Cache-Control via a small inline middleware**
+  (not `express.static` `maxAge` option). The
+  `maxAge` option sets the header on the response,
+  but it doesn't gate on method or extension the way
+  this slice needs (we want the header on
+  `/src/app.js` but not on `/api/notes.json`).
+- **24-hour max-age, not 1-year.** No content
+  hashing in the build pipeline yet; 1-year caching
+  would require a cache-bust on every release.
+  24 hours is a safe default that still drops
+  repeat visits to zero on the wire.
+- **`STATIC_ASSET_CACHE_MS` surfaced as a const.**
+  One-line tuning later without re-reading the
+  middleware body.
+
+**Why the extension regex matches the no-build
+`src/` paths.** The frontend ships as direct files
+from `src/`, served by the first `express.static`
+handler. No bundler, no content hashes. The
+extension regex is the only stable key the
+middleware can use to distinguish "static asset"
+from "API response" without touching the route
+table.

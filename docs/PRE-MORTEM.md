@@ -1270,3 +1270,69 @@ explicitly deferred.
 - `setButtonLoading` refactor to accept a button
   list. Wide refactor, would cross the AGENTS.md
   "rename a shared symbol" gate. Parked.
+
+## §30.6.6 pre-mortem — K.13 (POLISH-AUDIT P1/P2 close)
+
+### Risks
+
+- **R-20: `compression()` rewrites
+  `Content-Length`.** The middleware streams
+  compressed output and removes the
+  `Content-Length` header. Clients that buffer
+  by length (rare; mostly old HTTP/1.0 clients)
+  fall back to chunked transfer encoding. The
+  test suite uses Node's built-in fetch which
+  handles both. Risk: low; impact: low.
+
+- **R-21: Cache-Control on `/src/app.js` could
+  mask a buggy release.** A 1-day max-age means
+  a user with the page open at deploy time could
+  keep the old bundle for up to 24 h. The project
+  has no in-app "new version available" toast
+  (out of scope for K.13). Risk: low (current
+  bundle is small + backwards-compatible at the
+  contract level); impact: low.
+
+- **R-22: compression adds CPU overhead on
+  every response.** The middleware uses
+  zlib.gzipSync for tiny responses, which is
+  slower than zlib.createGzip. For the
+  `/api/notes.json` style responses (1-5 KB)
+  this is negligible. For the static bundle
+  (1.2 MB) the first request pays the cost; the
+  browser cache (post-K.13) eliminates it on
+  repeat. Risk: low; impact: low.
+
+### Pre-commitments
+
+- **P-17: One-line revert path.** Removing the
+  two `app.use(…)` lines fully reverts K.13.
+  No migration, no data shape, no schema.
+- **P-18: `STATIC_ASSET_CACHE_MS` is the single
+  tuning knob.** Future cache-duration changes
+  edit that one const, not the header template.
+
+### Kill criteria
+
+- **K-14:** If any of the 732 baseline tests
+  flips red during K.13 (K.13 is additive — it
+  adds 4 new tests but must not break any
+  existing one), the slice does not merge.
+  K.13 verified at 736 / 0 green on 2026-10-16;
+  criterion met.
+
+- **K-15:** If `node --check server.js` fails
+  after the K.13 edits, the slice does not
+  merge. Verified syntax OK on 2026-10-16;
+  criterion met.
+
+### Out of scope (intentional)
+
+- Brotli encoding (would require the `iltorb`
+  native binding; the project stays on pure-JS
+  gzip).
+- HTTP/2 server (project is on HTTP/1.1; the
+  perf wins are real but the migration is a
+  separate slice).
+- Service worker for offline / instant-load
+  (separate, much larger scope).

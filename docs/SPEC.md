@@ -2747,3 +2747,122 @@ verbatim.
   call sites continue to work. No new dependency, no
   contract change, no HTML change. Closes the parked
   "setButtonLoading refactor — accept a button list"
+  sub-slice entry from BACKLOG (POLISH-AUDIT P1/P2). Single-purpose transport/perf micro-fix — no new contract, no new UI. Reuses the proven compression package (same dependency family as morgan/cors which the project already uses in spirit). **Tests: 732 → 736 / 0 green** (was 732; +4 net new). **New dependency: `compression` (^1.8.2) — first-party MIT, no native bindings, ~0 transitive deps.** No new ADR (this is infra, not a contract decision). **Docs:** SPEC §30.6.6 + Change Log row, ARCH §30 A14, PRE-MORTEM §30.6.6, `docs/CODE-REVIEW-30-k13-server-perf.md` (verdict pass), `docs/POLISH-AUDIT-30-k13.md` (verdict pass).
+- §30.6.6 added 2026-10-16 — K.13 sub-slice
+  (POLISH-AUDIT P1/P2 close). Closes the last open
+  BACKLOG item: a one-line server ops micro-fix for
+  the two open transport/perf items from the original
+  POLISH-AUDIT (P1: no gzip/deflate on the wire; P2:
+  no Cache-Control on static assets so the browser
+  re-downloads the JS/CSS bundle on every reload).
+  K.13 wires `compression()` (added the `compression`
+  npm dep) + a 4-line middleware that sets
+  `Cache-Control: public, max-age=86400` on GET
+  requests for `.js/.css/.woff/.woff2/.svg/.png/.jpg
+  /.jpeg/.webp/.ico` paths. The middleware sits
+  before the existing three `app.use(express.static
+  (…))` handlers so the static bundle gets both
+  compression AND a long-lived cache header. 4 new
+  SPEC §30 K.13 tests lock the require, the
+  `app.use(compression())` placement, the header
+  template, and the middleware ordering. 732 → 736 /
+  0 green. No new ADR, no HTML/JS change, no contract
+  change. The `STATIC_ASSET_CACHE_MS` const is
+  surfaced for one-line tuning later.
+
+## §30.6.6 sub-slice K.13 — server perf (POLISH-AUDIT P1/P2 close)
+
+### Reframe
+
+The original POLISH-AUDIT (2026-09-28) raised two
+transport/perf items that were parked for a later
+sweep: P1 (gzip/deflate on the wire) and P2
+(Cache-Control on static assets). The bundle is
+~1.2 MB of JS + 60 KB of CSS that the browser
+re-downloads on every page load because the server
+sets no Cache-Control, and ships uncompressed. Both
+are single-call middleware fixes; both are
+additive. K.13 is the sweeper that closes them
+together with a single new dependency.
+
+### Scope
+
+1. Add `compression` to package.json deps.
+2. Add `app.use(compression())` early in the
+   middleware chain (before the static handlers, so
+   the static bundle also gets compressed).
+3. Add a tiny middleware that sets
+   `Cache-Control: public, max-age=86400` on GET
+   requests for static asset paths (.js, .css, fonts,
+   images, favicon).
+4. 4 SPEC §30 K.13 tests locking the require, the
+   `compression()` placement, the header template,
+   and the middleware ordering.
+
+### Behaviour
+
+- First request to `/index.html`: HTML body is
+  uncompressed (gzip on tiny HTML is not a win and
+  the compression middleware skips it by default for
+  sub-1KB responses). Cache-Control is `no-store`
+  (default; not touched by the new middleware).
+- First request to `/src/app.js`: response body is
+  gzipped, `Content-Encoding: gzip`,
+  `Cache-Control: public, max-age=86400`,
+  `Vary: Accept-Encoding` (compression middleware
+  default).
+- Subsequent requests within 24 h: the browser serves
+  the response from disk cache; the server sees zero
+  bandwidth for that path.
+- All API responses (`/api/*`): JSON body gzipped;
+  Cache-Control is the default `no-store` (the new
+  middleware only matches static asset extensions).
+
+### Definition of done
+
+- [x] `compression` added to package.json
+      dependencies.
+- [x] `app.use(compression())` placed before the
+      `express.static` handlers.
+- [x] Cache-Control middleware gates on
+      `req.method === 'GET'` and the static asset
+      extension regex.
+- [x] `STATIC_ASSET_CACHE_MS = 86400` constant
+      surfaced (not a magic number).
+- [x] 4 SPEC §30 K.13 tests pass; baseline
+      preserved (732 → 736 / 0 green).
+- [x] `node --check server.js` passes.
+
+### Constraints
+
+- No native bindings (compression is pure-JS; the
+  server stays portable).
+- No `req.path` regex on the API routes — the
+  extension match must be exact (no false positives
+  on `/api/notes.json` or similar).
+- The middleware must be idempotent (must not double-
+  set the header if some other middleware already
+  set one). `res.setHeader` overwrites; the
+  middleware uses `setHeader` (not `appendHeader`)
+  intentionally.
+- The `compression()` call must come AFTER
+  `const app = express();` and BEFORE the static
+  handlers. Both orderings are tested.
+
+### Out of scope (intentional)
+
+- ETag / Last-Modified negotiation. The browser
+  cache is enough for the project's current scale;
+  ETag support would require a conditional-get
+  middleware that's a separate slice.
+- Brotli encoding. The compression middleware
+  supports `brotli` if the `iltorb` native binding
+  is available, but the project uses the safer
+  gzip/deflate default to avoid a native-build
+  dependency.
+- Asset hashing / long-term caching. The 1-day
+  max-age is safe under the no-bundle / no-hash
+  build pipeline; bumping to 1-year is a one-line
+  change when content hashing lands.
+- HTTP/2 push. Out of scope; needs an HTTP/2
+  server (project is on plain HTTP/1.1).

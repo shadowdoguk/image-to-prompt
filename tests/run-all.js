@@ -15255,3 +15255,90 @@ test('SPEC §30 K.9: showEmptyChatState un-hides #step-chat and writes a friendl
   assertTrue(/Generate a prompt/.test(fnBody) && /Refine in chat/.test(fnBody),
     'empty-state text must mention the Generate → Refine in chat path so the user has actionable instructions');
 });
+
+// ─── SPEC §30 — K.13 (compression + Cache-Control middleware) ────────────
+// POLISH-AUDIT P1/P2 close — wire `compression` for transport-size
+// reduction + add a 1-day Cache-Control on static assets so repeat
+// loads hit the browser cache. The existing static-handler trio
+// (src/, sortable, root) sits immediately after these two new
+// middlewares, so anything that needs the header gets it set before
+// express.static writes the response.
+
+test('SPEC §30 K.13: server.js requires the compression package', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  assertTrue(/require\(['"]compression['"]\)/.test(js),
+    'server.js must require the compression package (POLISH-AUDIT P1)');
+  // And the dependency must be present in package.json — not just
+  // an undocumented require of a transitive dep.
+  const pkg = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8'));
+  assertTrue(pkg.dependencies && pkg.dependencies.compression,
+    'compression must be declared in package.json dependencies');
+});
+
+test('SPEC §30 K.13: app.use(compression()) is wired before the static handlers', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The compression() call site.
+  const useStart = js.indexOf('app.use(compression())');
+  assertTrue(useStart !== -1, 'app.use(compression()) must be present in server.js');
+  // The first static handler — anything under src/ or root.
+  const staticStart = js.indexOf("app.use(express.static(path.join(__dirname, 'src')))");
+  assertTrue(staticStart !== -1, 'baseline app.use(express.static(...)) handler is present');
+  assertTrue(useStart < staticStart,
+    `app.use(compression()) must be wired BEFORE the static handlers ` +
+    `(compression at ${useStart}, static at ${staticStart})`);
+  // It also has to come after the app handle exists.
+  const appDecl = js.indexOf('const app = express();');
+  assertTrue(appDecl !== -1 && useStart > appDecl,
+    'app.use(compression()) must come after `const app = express();`');
+});
+
+test('SPEC §30 K.13: Cache-Control middleware sets long max-age on static assets only', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The middleware block: must set a Cache-Control header that
+  // contains both "public" and "max-age=" so the browser will
+  // actually cache the response. The regex covers both double- and
+  // single-quoted strings to be tolerant of style.
+  const cacheControlRe = /res\.setHeader\(\s*['"]Cache-Control['"]\s*,\s*['"`][^'"`]*public[^'"`]*max-age=/;
+  assertTrue(cacheControlRe.test(js),
+    'Cache-Control middleware must set a "public, max-age=…" header (POLISH-AUDIT P2)');
+  // And the gating predicate must match the static-asset extensions
+  // the project actually serves (JS, CSS, fonts, images, favicon).
+  // It MUST NOT match the bare "/" path or the JSON API routes, or
+  // we'd cache the index.html and the API responses.
+  // Substring match — way more reliable than trying to round-trip
+  // backslashes through a regex literal. The source has the
+  // alternation `(js|css|woff2?|svg|png|jpg|jpeg|webp|ico)`.
+  assertTrue(js.includes('js|css|') && js.includes('|svg|') && js.includes('|png|'),
+    'Cache-Control predicate must match the static asset extensions (js/css/svg/png) in the alternation');
+  // The middleware must also check req.method === 'GET' so a
+  // HEAD/POST to a path ending in .js (which won't happen in
+  // practice but could break test harnesses) doesn't get a
+  // long-lived cache header.
+  assertTrue(/req\.method\s*===\s*['"]GET['"]/.test(js),
+    'Cache-Control middleware must gate on req.method === "GET"');
+  // The max-age value lives in a separate const (decoupled from
+  // the header template) — validate the const, not the rendered
+  // header. The middleware substitutes it via ${STATIC_ASSET_CACHE_MS}.
+  const cacheConstMatch = js.match(/STATIC_ASSET_CACHE_MS\s*=\s*(\d+)/);
+  assertTrue(cacheConstMatch && parseInt(cacheConstMatch[1], 10) > 0,
+    `STATIC_ASSET_CACHE_MS must be a positive integer (got: ${cacheConstMatch ? cacheConstMatch[1] : 'none'})`);
+  // And the template must actually use that const, not a magic number.
+  assertTrue(js.includes('max-age=${STATIC_ASSET_CACHE_MS}'),
+    'Cache-Control header template must reference STATIC_ASSET_CACHE_MS (no magic numbers)');
+});
+
+test('SPEC §30 K.13: Cache-Control middleware is wired BEFORE the static handlers', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  // The middleware is a plain app.use((req, res, next) => …) block;
+  // locate the Cache-Control setHeader line and the first static
+  // handler and assert ordering.
+  const cacheLine = js.indexOf("res.setHeader('Cache-Control'");
+  // Fallback: also accept double-quoted form.
+  const cacheLineAlt = js.indexOf('res.setHeader("Cache-Control"');
+  const cacheIdx = cacheLine !== -1 ? cacheLine : cacheLineAlt;
+  assertTrue(cacheIdx !== -1, 'Cache-Control setHeader call found');
+  const staticIdx = js.indexOf("app.use(express.static(path.join(__dirname, 'src')))");
+  assertTrue(cacheIdx < staticIdx,
+    `Cache-Control middleware must be wired BEFORE the static handlers ` +
+    `(cache at ${cacheIdx}, static at ${staticIdx}) — express.static writes the response, so the header must be set first`);
+});
