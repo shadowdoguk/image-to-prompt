@@ -7990,15 +7990,26 @@ const validateChatSessionCreate = (body, { presets } = {}) => {
     return 'Request body must be a JSON object.';
   }
 
-  if (typeof body.prompt !== 'string') {
-    return 'prompt is required and must be a string.';
+  // Bug fix 2026-10-17 — issue #26 — accept `original_prompt` and
+  // `current_prompt` as aliases for `prompt` so a single-shape canonical
+  // contract survives the per-model dispatch. The route handler
+  // (`POST /api/chat/sessions`) then normalizes back into the canonical
+  // `original_prompt` / `current_prompt` storage fields so existing
+  // chat-session records stay readable.
+  const canonicalPrompt =
+    (typeof body.prompt === 'string' && body.prompt) ||
+    (typeof body.original_prompt === 'string' && body.original_prompt) ||
+    (typeof body.current_prompt === 'string' && body.current_prompt) ||
+    null;
+  if (canonicalPrompt === null) {
+    return 'prompt is required and must be a string (or be supplied as original_prompt / current_prompt).';
   }
-  const trimmedPrompt = body.prompt.trim();
+  const trimmedPrompt = canonicalPrompt.trim();
   if (trimmedPrompt.length === 0) {
     return 'prompt must not be empty.';
   }
-  if (body.prompt.length > MAX_FINAL_PROMPT_LENGTH) {
-    return `prompt must be ${MAX_FINAL_PROMPT_LENGTH} characters or fewer (got ${body.prompt.length}).`;
+  if (canonicalPrompt.length > MAX_FINAL_PROMPT_LENGTH) {
+    return `prompt must be ${MAX_FINAL_PROMPT_LENGTH} characters or fewer (got ${canonicalPrompt.length}).`;
   }
 
   if (typeof body.preset_id !== 'string' || !body.preset_id.startsWith(PRESET_ID_PREFIX)) {
@@ -8009,8 +8020,15 @@ const validateChatSessionCreate = (body, { presets } = {}) => {
   // chat session is anchored to the Anima contract, not a Z-Image preset.
   // The placeholder is the validator's only allowed non-real-preset for
   // Anima mode. (The placeholder is never used by Z-Image paths.)
+  //
+  // Bug fix 2026-10-17 — issue #26 — Krea-2 sessions use the parallel
+  // placeholder 'preset_krea2_internal'. Mirrors the Anima convention
+  // so each non-Z-Image model gets its own well-known sentinel without
+  // polluting the real preset registry with model-specific entries.
   const isAnimaCreate = body.model === 'anima' && body.preset_id === 'preset_anima_internal';
-  if (Array.isArray(presets) && !isAnimaCreate && !presets.some((p) => p.id === body.preset_id)) {
+  const isKrea2Create = body.model === 'krea2' && body.preset_id === 'preset_krea2_internal';
+  const isPlaceholderCreate = isAnimaCreate || isKrea2Create;
+  if (Array.isArray(presets) && !isPlaceholderCreate && !presets.some((p) => p.id === body.preset_id)) {
     return `preset_id "${body.preset_id}" does not match any known preset.`;
   }
 
@@ -8020,12 +8038,16 @@ const validateChatSessionCreate = (body, { presets } = {}) => {
   }
 
   // Slice 2.4 — ADR 0021 — model field. Optional. When provided, must
-  // be one of 'zimage_turbo' or 'anima'. The default for backwards
-  // compatibility is 'zimage_turbo' (existing sessions).
+  // be one of 'zimage_turbo', 'anima', or 'krea2'. The default for
+  // backwards compatibility is 'zimage_turbo' (existing sessions).
+  //
+  // Bug fix 2026-10-17 — issue #26 — added 'krea2' to the allowlist so
+  // the K.4 chat-activation helper can anchor Krea-2 sessions to the
+  // Krea-2-specific chat system prompt.
   if (body.model !== undefined && body.model !== null) {
     if (typeof body.model !== 'string') return 'model must be a string when provided.';
-    if (!['zimage_turbo', 'anima'].includes(body.model)) {
-      return `model must be one of: zimage_turbo, anima (got ${JSON.stringify(body.model)}).`;
+    if (!['zimage_turbo', 'anima', 'krea2'].includes(body.model)) {
+      return `model must be one of: zimage_turbo, anima, krea2 (got ${JSON.stringify(body.model)}).`;
     }
   }
 
@@ -9175,6 +9197,14 @@ app.post('/api/chat/sessions', (req, res) => {
       });
     }
 
+    // Bug fix 2026-10-17 — issue #26 — resolve the canonical prompt
+    // from any of the accepted aliases so the on-disk record stays
+    // shape-uniform regardless of which contract the frontend uses.
+    // Validator already asserted one of these is a non-empty string.
+    const canonicalPrompt =
+      (typeof body.prompt === 'string' && body.prompt) ||
+      (typeof body.original_prompt === 'string' && body.original_prompt) ||
+      body.current_prompt;
     const now = new Date().toISOString();
     const session = {
       id: generateChatSessionId(),
@@ -9185,12 +9215,16 @@ app.post('/api/chat/sessions', (req, res) => {
       // for backwards compatibility (existing sessions). The frontend
       // sends 'anima' for Anima-mode sessions so the chat system prompt
       // can dispatch to the Anima constraints block.
-      model: typeof body.model === 'string' && ['zimage_turbo', 'anima'].includes(body.model)
+      //
+      // Bug fix 2026-10-17 — issue #26 — added 'krea2' to the model
+      // dispatch allowlist so Krea-2 chat sessions are anchored to the
+      // Krea-2-specific chat system prompt block.
+      model: typeof body.model === 'string' && ['zimage_turbo', 'anima', 'krea2'].includes(body.model)
         ? body.model
         : 'zimage_turbo',
-      title: buildChatTitle(body.prompt),
-      original_prompt: body.prompt,
-      current_prompt: body.prompt,
+      title: buildChatTitle(canonicalPrompt),
+      original_prompt: canonicalPrompt,
+      current_prompt: canonicalPrompt,
       pending_prompt: null,
       analysis_snapshot: body.analysis_snapshot && typeof body.analysis_snapshot === 'object'
         ? body.analysis_snapshot

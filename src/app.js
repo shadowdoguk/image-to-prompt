@@ -2681,10 +2681,19 @@
       // (mirrors activateAnimaChatForResult's pre-K.11 behaviour);
       // everything else is silenced (the result panel is still
       // functional, the user can refresh to retry).
+      //
+      // Bug fix 2026-10-17 — issue #26 — non-cap validation/transport
+      // failures now surface as a warning toast so the user has
+      // actionable feedback when the click looks like it worked but
+      // the chat session anchor silently failed. Pre-fix, Krea-2 (and
+      // any future invalid body shape) failed without any user-visible
+      // signal, making the redirect look broken.
       console.warn(`[${modelName} chat activation] ${e.message}`);
       const isChatLimit = /chat session limit reached/i.test(e.message);
       if (isChatLimit) {
         showError(`Chat history is full (200 sessions). Delete older conversations from the picker above to start a new one.`, { severity: 'warning' });
+      } else {
+        showError(`Chat console unavailable: ${e.message}`, { severity: 'warning' });
       }
       return null;
     }
@@ -2721,18 +2730,29 @@
     // current_prompt=data.prompt. K.11 — body construction is the
     // only per-model bit left in this helper; the rest lives in
     // runChatActivationSession.
+    //
+    // Bug fix 2026-10-17 — issue #26 — use the canonical `prompt`
+    // field (the validator's preferred contract) plus the new
+    // `preset_krea2_internal` placeholder, mirroring the Anima
+    // convention. Pre-fix, this body used `original_prompt` /
+    // `current_prompt` / `preset_id:null` / `model:'krea2'`, all four
+    // of which the server's `validateChatSessionCreate` rejected,
+    // silently swallowing the error in `runChatActivationSession`.
     await runChatActivationSession({
       modelName: 'krea2',
       body: {
-        preset_id: null,
+        prompt: data.prompt,
+        preset_id: 'preset_krea2_internal', // placeholder; not a real preset (mirrors preset_anima_internal)
         preset_name: 'Krea 2',
-        original_prompt: data.prompt,
-        current_prompt: data.prompt,
-        pending_prompt: null,
+        run_id: state.currentRunId || null,
+        analysis_snapshot: null,
         model: 'krea2',
-        variant: data.variant || state.krea2Variant,
-        creativity: data.creativity ?? state.krea2Creativity,
-        metadata: { provider: state.provider, llm_model: state.llmModel }
+        metadata: {
+          provider: state.provider,
+          llm_model: state.llmModel,
+          variant: data.variant || state.krea2Variant,
+          creativity: data.creativity ?? state.krea2Creativity
+        }
       }
     });
   };
@@ -2842,10 +2862,45 @@
     krea2: (body) => activateKrea2ChatForResult(body)
   };
 
+  // Bug fix 2026-10-17 — issue #26 — click-time guard for oversized or
+  // corrupt prompt data. Mirrors the server's MAX_FINAL_PROMPT_LENGTH
+  // (5000 chars). Trims the payload, fails fast with a clear toast, and
+  // lets the bare-anchor navigation to #/chat proceed so the K.9
+  // empty-state helper can give the user a path forward (e.g. copy /
+  // regenerate).
+  const MAX_PROMPT_CHARS = 5000;
+  const validateRefineBodyPayload = (body, modelName) => {
+    const candidate =
+      (typeof body.prompt === 'string' && body.prompt) ||
+      (typeof body.positive === 'string' && body.positive) ||
+      '';
+    const trimmed = candidate.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, error: `Refine in chat is unavailable: the ${modelName} result has no prompt text yet (Generate first).` };
+    }
+    if (trimmed.length > MAX_PROMPT_CHARS) {
+      return { ok: false, error: `Refine in chat: prompt is ${trimmed.length} characters, max ${MAX_PROMPT_CHARS}. Trim the prompt in the textarea before refining.` };
+    }
+    return { ok: true, promptLength: trimmed.length };
+  };
+
   // Wire a single link. On success, preventDefault so the bare-anchor
   // fallback doesn't double-navigate. On failure, do NOT preventDefault
   // so the URL bar still updates to #/chat and the K.9 empty-state
   // helper can run.
+  //
+  // Bug fix 2026-10-17 — issue #26 — added three click-time guards:
+  //   1. validateRefineBodyPayload: rejects empty/oversized prompts
+  //      BEFORE the network call so a toast can surface the cause.
+  //   2. doubled-click guard (linkEl.dataset.refining='1'): prevents
+  //      two concurrent POST /api/chat/sessions (each of which would
+  //      consume a slot against the 200-session cap).
+  //   3. post-await re-check on state.chatSessionId: the URL bar
+  //      should only update when a session is actually anchored;
+  //      pre-fix, a validator 400 left state.chatSessionId === null
+  //      but the URL still flipped to #/chat, leaving the user at an
+  //      empty chat console that K.9 then tried to "fix" with its
+  //      empty-state helper.
   const wireRefineInChatLink = (linkEl, modelName) => {
     if (!linkEl) return;
     linkEl.addEventListener('click', async (e) => {
@@ -2872,8 +2927,41 @@
       }
       let succeeded = false;
       try {
-        const session = await activator(buildBody());
-        succeeded = !!(session && session.id);
+        const body = buildBody();
+        // Bug fix 2026-10-17 — issue #26 — click-time guards.
+        const validation = validateRefineBodyPayload(body, targetModel);
+        if (!validation.ok) {
+          // Bare anchor will run, navigating to #/chat. The toast
+          // gives the user the actionable reason; K.9's helper then
+          // shows the empty-state path forward.
+          showError(validation.error, { severity: 'warning' });
+          return;
+        }
+        // Doubled-click guard: a second rapid click would issue
+        // a second POST /api/chat/sessions and waste a slot against
+        // the 200-session cap. We bail out silently (return without
+        // preventDefault so the URL still updates) and let the in-flight
+        // call resolve on its own.
+        if (linkEl.dataset.refining === '1') {
+          return;
+        }
+        linkEl.dataset.refining = '1';
+        let session;
+        try {
+          session = await activator(body);
+        } finally {
+          // Always release the dataset flag — even on validation
+          // rejection from the server, so the next user-driven click
+          // can retry.
+          delete linkEl.dataset.refining;
+        }
+        // Bug fix 2026-10-17 — issue #26 — re-check state after the
+        // await so the URL only updates when a session was actually
+        // anchored. runChatActivationSession returns null on validation
+        // failure (already toasts via showError); the old code then
+        // navigated to #/chat which left the user looking at an empty
+        // chat console.
+        succeeded = !!(session && session.id && state.chatSessionId === session.id);
         if (succeeded) {
           // Navigate to chat view (idempotent — the body builder
           // already un-hid #step-chat + focused #chat-input via

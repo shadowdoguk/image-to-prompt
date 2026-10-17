@@ -3336,29 +3336,55 @@ test('Slice 2.4: buildChatSystemPrompt + variant branch on session.model === ani
     'buildChatSystemPromptVariant must still reference ZIMAGE_CHAT_CONSTRAINTS_BLOCK');
 });
 
-test('Slice 2.4: validateChatSessionCreate accepts an optional model field (ADR 0021)', () => {
+test('Slice 2.4: validateChatSessionCreate accepts an optional model field (ADR 0021 + #26 Krea-2)', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   const fnStart = serverText.indexOf('const validateChatSessionCreate = (body,');
   assertTrue(fnStart > 0, 'validateChatSessionCreate must be defined');
-  const fnBody = serverText.slice(fnStart, fnStart + 2500);
+  // Bug fix 2026-10-17 — issue #26 — window widened to 5000 chars so
+  // the new alias-resolution block + the new Krea-2 model branch are
+  // both captured by the static-source check.
+  const fnBody = serverText.slice(fnStart, fnStart + 5000);
   assertTrue(/body\.model/.test(fnBody),
     'validateChatSessionCreate must reference body.model');
-  assertTrue(/zimage_turbo/.test(fnBody) && /anima/.test(fnBody),
-    'validateChatSessionCreate must accept model values zimage_turbo and anima');
-  assertTrue(/model must be one of: zimage_turbo, anima/.test(fnBody),
-    'validateChatSessionCreate must reject unknown model values');
+  assertTrue(/zimage_turbo/.test(fnBody) && /anima/.test(fnBody) && /krea2/.test(fnBody),
+    'validateChatSessionCreate must accept model values zimage_turbo, anima, and krea2 (#26)');
+  assertTrue(/model must be one of: zimage_turbo, anima, krea2/.test(fnBody),
+    'validateChatSessionCreate must reject unknown model values (with krea2 in the allowlist)');
 });
 
 test('Slice 2.4: validateChatSessionCreate skips preset-existence check for Anima (ADR 0021)', () => {
   const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
   const fnStart = serverText.indexOf('const validateChatSessionCreate = (body,');
-  const fnBody = serverText.slice(fnStart, fnStart + 2500);
+  // Bug fix 2026-10-17 — issue #26 — window widened to 5000 chars so
+  // the new placeholder-resolution block (isAnimaCreate + isKrea2Create)
+  // is captured.
+  const fnBody = serverText.slice(fnStart, fnStart + 5000);
   assertTrue(/isAnimaCreate/.test(fnBody),
     'validateChatSessionCreate must declare isAnimaCreate');
+  assertTrue(/isKrea2Create/.test(fnBody),
+    'validateChatSessionCreate must declare isKrea2Create (#26)');
   assertTrue(/preset_anima_internal/.test(fnBody),
     'validateChatSessionCreate must reference the Anima placeholder');
-  assertTrue(/!isAnimaCreate/.test(fnBody),
-    'validateChatSessionCreate must skip the preset-existence check when isAnimaCreate');
+  assertTrue(/preset_krea2_internal/.test(fnBody),
+    'validateChatSessionCreate must reference the Krea-2 placeholder (#26)');
+  assertTrue(/!isPlaceholderCreate/.test(fnBody),
+    'validateChatSessionCreate must skip the preset-existence check when either placeholder branch is active (#26)');
+});
+
+// Bug fix 2026-10-17 — issue #26 — alias acceptance so the K.4
+// chat-activation helper (which sends `original_prompt` / `current_prompt`
+// in its earliest form) and the canonical-prompt path both pass the
+// validator. Locks in the contract that drove the bug surface.
+test('Slice #26: validateChatSessionCreate accepts prompt aliases (canonical + original_prompt + current_prompt)', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const fnStart = serverText.indexOf('const validateChatSessionCreate = (body,');
+  const fnBody = serverText.slice(fnStart, fnStart + 5000);
+  assertTrue(/canonicalPrompt/.test(fnBody),
+    'validateChatSessionCreate must resolve canonicalPrompt (#26)');
+  assertTrue(/body\.original_prompt/.test(fnBody) && /body\.current_prompt/.test(fnBody) && /body\.prompt/.test(fnBody),
+    'validateChatSessionCreate must inspect prompt, original_prompt, and current_prompt as aliases (#26)');
+  assertTrue(/prompt is required and must be a string \(or be supplied as original_prompt \/ current_prompt\)/.test(fnBody),
+    'validateChatSessionCreate error string must mention the aliases when prompting is missing (#26)');
 });
 
 test('Slice 2.4: POST /api/chat/sessions stores model on the session (ADR 0021)', () => {
@@ -15490,4 +15516,128 @@ test('SPEC §30 K.14: click handler awaits activation before navigating; failure
   const inK14 = /console\.warn/.test(k14Code);
   assertTrue(!inK14,
     'K.14 wiring code must not contain console.warn (K.14 spec: surface failures, never silently console.warn)');
+});
+
+// Bug fix 2026-10-17 — issue #26 — the K.4 chat-activation helper
+// (activateKrea2ChatForResult) sends `prompt` + `model:'krea2'` +
+// `preset_id:'preset_krea2_internal'`. Pre-fix, it sent the Krea-2
+// envelope (`original_prompt` / `current_prompt` / `preset_id:null` /
+// `model:'krea2'`), all four of which the server rejected silently.
+// This regression guard locks in the canonical-prompt + new-placeholder
+// shape so a future K.4 refactor cannot regress to the broken envelope.
+test('SPEC #26: activateKrea2ChatForResult sends the canonical chat-session body (prompt + preset_krea2_internal + model:krea2)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Bound the check to the activateKrea2ChatForResult definition so a
+  // future rename or move doesn't false-positive. We slice from the
+  // function definition to the next top-level `const ` declaration
+  // (helpers are sequential at this level — every helper is on its
+  // own `const … =` line).
+  const fnStart = js.indexOf('const activateKrea2ChatForResult');
+  assertTrue(fnStart > 0, 'activateKrea2ChatForResult must be defined in src/app.js');
+  // Search forward for the next 'Slice' or '──' divider comment, or
+  // for the next `const ` at column 2-3. Bounded window prevents test
+  // brittleness if the helper grows by 100 lines in the future.
+  const windowEnd = js.indexOf('\n  // ', fnStart + 200);
+  const fnEnd = windowEnd === -1 ? fnStart + 4000 : windowEnd;
+  const fnBody = js.slice(fnStart, fnEnd);
+  assertTrue(/prompt:\s*data\.prompt/.test(fnBody),
+    'activateKrea2ChatForResult must send `prompt: data.prompt` (canonical field, was `original_prompt` pre-fix)');
+  assertTrue(/preset_id:\s*['"]preset_krea2_internal['"]/.test(fnBody),
+    'activateKrea2ChatForResult must use the `preset_krea2_internal` placeholder (mirrors preset_anima_internal)');
+  assertTrue(/model:\s*['"]krea2['"]/.test(fnBody),
+    'activateKrea2ChatForResult must set `model: "krea2"` so the chat system prompt dispatches to the Krea-2 block');
+  // Negative checks: must NOT regress to the broken K.4 envelope.
+  assertTrue(!/original_prompt:\s*data\.prompt/.test(fnBody) && !/current_prompt:\s*data\.prompt/.test(fnBody),
+    'activateKrea2ChatForResult must not send `original_prompt` / `current_prompt` (those are the storage fields, not the create-body field)');
+  // The literal `preset_id: null` (with optional whitespace) was the
+  // K.4 pre-fix shape; the validator rejects it because null is not a
+  // string starting with "preset_". Locked negatively on the actual
+  // function body ONLY — comments above the function may legitimately
+  // mention the old shape as historical context.
+  const stripComments = (s) => s
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+    .replace(/\s+\/\/.*$/gm, '');
+  const fnCodeOnly = stripComments(fnBody);
+  assertTrue(!/preset_id\s*:\s*null\b/.test(fnCodeOnly),
+    'activateKrea2ChatForResult body must not send `preset_id: null` (was the K.4 pre-fix shape; rejected by the validator)');
+});
+
+// Bug fix 2026-10-17 — issue #26 — runChatActivationSession swallowed
+// every non-cap error silently (returning null + a console.warn).
+// Pre-fix, the Krea-2 path's 400 left the user on a dead #/chat URL.
+// The fix surfaces non-cap validation failures as a showError warning
+// toast so the user has actionable feedback.
+test('SPEC #26: runChatActivationSession surfaces non-cap validation failures as a warning toast', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  const fnStart = js.indexOf('const runChatActivationSession');
+  assertTrue(fnStart > 0, 'runChatActivationSession must be defined in src/app.js');
+  const fnEnd = js.indexOf('\n  const ', fnStart + 200);
+  const fnBody = js.slice(fnStart, fnEnd === -1 ? fnStart + 4000 : fnEnd);
+  // Both branches of the post-catch fallback must be present.
+  assertTrue(/isChatLimit/.test(fnBody),
+    'runChatActivationSession must still recognise the chat-limit regex (regression guard for K.11)');
+  assertTrue(/showError\(\s*[`'"][\s\S]*?severity:\s*['"]warning['"]/.test(fnBody),
+    'runChatActivationSession must showError a warning toast on non-cap failures (the H8/#26 fix)');
+  // Both toasts must advertise warning severity — never the default
+  // red-error severity, which would re-introduce the trap UX.
+});
+
+// Bug fix 2026-10-17 — issue #26 — K.14 click handler guards:
+//   1. validateRefineBodyPayload rejects empty / oversized prompts
+//      BEFORE the network call (toast surfaces the cause)
+//   2. Doubled-click guard via linkEl.dataset.refining
+//   3. Post-await state.chatSessionId === session.id re-check
+//      so a silent activation failure leaves the URL bar alone
+//      (K.9 empty-state helper can still run on the bare anchor).
+test('SPEC #26: wireRefineInChatLink click-time guards (length / double-click / post-await re-check)', () => {
+  const js = fs.readFileSync(path.join(PROJECT_ROOT, 'src/app.js'), 'utf8');
+  // Guard #1: validateRefineBodyPayload helper exists.
+  assertTrue(/const validateRefineBodyPayload = \(body,\s*modelName\) => \{/.test(js),
+    'validateRefineBodyPayload helper must be defined (#26 click-time guard)');
+  // The helper must check length 0 (empty) AND MAX_PROMPT_CHARS (5000).
+  assertTrue(/trimmed\.length === 0/.test(js),
+    'validateRefineBodyPayload must reject empty (trimmed.length === 0) prompts');
+  assertTrue(/MAX_PROMPT_CHARS\s*=\s*5000/.test(js),
+    'MAX_PROMPT_CHARS constant must equal the server\'s MAX_FINAL_PROMPT_LENGTH (5000)');
+  assertTrue(/trimmed\.length > MAX_PROMPT_CHARS/.test(js),
+    'validateRefineBodyPayload must reject prompts > MAX_PROMPT_CHARS');
+  // Guard #2: doubled-click guard.
+  assertTrue(/linkEl\.dataset\.refining/.test(js),
+    'K.14 wiring block must use linkEl.dataset.refining for the doubled-click guard');
+  // Guard #3: post-await state.chatSessionId re-check.
+  assertTrue(/state\.chatSessionId\s*===\s*session\.id/.test(js),
+    'K.14 wiring block must re-check state.chatSessionId === session.id after the await (the silent-activation dead-end fix)');
+  // The K.14 wiring block must STILL call await on the activator and
+  // still set location.hash, still call preventDefault on success —
+  // these are the K.14 invariants we MUST not regress.
+  const firstMarker = js.indexOf('// Slice K.14 — H8 close — "Refine in chat →"');
+  const k14Start = js.indexOf('// Slice K.14 — H8 close — "Refine in chat →"', firstMarker + 1);
+  const k14End = js.indexOf('// ─── Wire up model selector end ───', k14Start);
+  const k14Window = js.slice(k14Start, k14End);
+  assertTrue(/await\s+activator\(/.test(k14Window),
+    'K.14 wiring block still awaits the body builder (preserves K.14 spec)');
+  assertTrue(/window\.location\.hash\s*=\s*['"]#\/chat['"]/.test(k14Window),
+    'K.14 wiring block still navigates to #/chat (preserves K.14 spec)');
+  assertTrue(/e\.preventDefault\(\)/.test(k14Window),
+    'K.14 wiring block still calls preventDefault on success (preserves K.14 spec)');
+});
+
+// Bug fix 2026-10-17 — issue #26 — server route normalises the
+// canonical prompt (resolved from any of the three aliases) into both
+// `original_prompt` and `current_prompt` so on-disk records stay
+// shape-uniform regardless of which contract the frontend uses.
+test('SPEC #26: POST /api/chat/sessions normalises aliases into original_prompt + current_prompt', () => {
+  const serverText = fs.readFileSync(path.join(PROJECT_ROOT, 'server.js'), 'utf8');
+  const routeStart = serverText.indexOf("app.post('/api/chat/sessions'");
+  assertTrue(routeStart > 0, 'POST /api/chat/sessions must be registered');
+  const routeBody = serverText.slice(routeStart, routeStart + 5000);
+  assertTrue(/canonicalPrompt/.test(routeBody),
+    'POST /api/chat/sessions must resolve canonicalPrompt (#26)');
+  assertTrue(/original_prompt:\s*canonicalPrompt/.test(routeBody) &&
+    /current_prompt:\s*canonicalPrompt/.test(routeBody),
+    'POST /api/chat/sessions must write canonicalPrompt into BOTH original_prompt and current_prompt (#26)');
+  // model allowlist in the storage layer also includes krea2.
+  assertTrue(/\[?\s*['"]zimage_turbo['"]\s*,\s*['"]anima['"]\s*,\s*['"]krea2['"]\s*\]?/.test(routeBody),
+    'POST /api/chat/sessions storage layer model allowlist must include krea2 (#26)');
 });
